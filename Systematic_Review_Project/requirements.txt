@@ -1,0 +1,559 @@
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import datetime, timedelta
+import json
+import anthropic
+import os
+from typing import Dict, List, Optional
+
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Patient Health Dashboard",
+    page_icon="🏥",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# --- Custom CSS for Dark Theme ---
+st.markdown("""
+<style>
+    /* Main theme colors */
+    :root {
+        --primary-color: #2DD4BF;
+        --bg-dark: #1A1A1A;
+        --bg-darker: #0F0F0F;
+        --bg-card: #262626;
+        --text-primary: #FFFFFF;
+        --text-secondary: #A3A3A3;
+        --border-color: #404040;
+    }
+    
+    /* Global background */
+    .stApp {
+        background-color: var(--bg-darker);
+    }
+    
+    /* Hide the top toolbar/header */
+    header[data-testid="stHeader"] {
+        display: none !important;
+    }
+    
+    #MainMenu {
+        display: none !important;
+    }
+    
+    footer {
+        display: none !important;
+    }
+    
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background-color: var(--bg-dark);
+        border-right: 1px solid var(--border-color);
+    }
+    
+    [data-testid="stSidebar"] h1, 
+    [data-testid="stSidebar"] h2, 
+    [data-testid="stSidebar"] h3 {
+        color: var(--text-primary);
+        font-weight: 600;
+    }
+    
+    /* Main content area */
+    .main .block-container {
+        padding-top: 2rem;
+        max-width: 1400px;
+    }
+    
+    /* Title styling */
+    h1 {
+        color: var(--text-primary);
+        font-size: 2rem;
+        font-weight: 700;
+        margin-bottom: 0.5rem;
+    }
+    
+    h1 span:first-child {
+        color: var(--primary-color);
+    }
+    
+    /* Button styling - ALL BUTTONS TEAL */
+    .stButton > button,
+    .stDownloadButton > button,
+    .stFormSubmitButton > button {
+        background-color: var(--primary-color) !important;
+        color: var(--bg-darker) !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 0.75rem 2rem !important;
+        font-weight: 600 !important;
+        font-size: 1rem !important;
+        width: 100% !important;
+        transition: all 0.3s ease !important;
+    }
+    
+    .stButton > button:hover,
+    .stDownloadButton > button:hover,
+    .stFormSubmitButton > button:hover {
+        background-color: #25B8A5 !important;
+        box-shadow: 0 4px 12px rgba(45, 212, 191, 0.3) !important;
+        transform: translateY(-1px);
+    }
+    
+    .stButton > button:focus,
+    .stDownloadButton > button:focus,
+    .stFormSubmitButton > button:focus,
+    .stButton > button:focus-visible,
+    .stDownloadButton > button:focus-visible,
+    .stFormSubmitButton > button:focus-visible {
+        outline: none !important;
+        box-shadow: none !important;
+        border: none !important;
+        background-color: var(--primary-color) !important;
+    }
+    
+    button:focus-visible {
+        outline: none !important;
+        box-shadow: none !important;
+    }
+    
+    *:focus-visible {
+        outline: none !important;
+    }
+    
+    /* Metric cards */
+    [data-testid="stMetric"] {
+        background-color: var(--bg-card);
+        padding: 1.5rem;
+        border-radius: 12px;
+        border: 1px solid var(--border-color);
+    }
+    
+    [data-testid="stMetricValue"] {
+        color: var(--primary-color);
+        font-size: 2rem;
+        font-weight: 700;
+    }
+    
+    [data-testid="stMetricLabel"] {
+        color: var(--text-secondary);
+        font-size: 0.9rem;
+    }
+    
+    /* Info boxes */
+    .stAlert {
+        background-color: var(--bg-card) !important;
+        border-left: 4px solid var(--text-secondary) !important;
+        border-radius: 8px;
+        color: var(--text-primary) !important;
+    }
+    
+    /* Section header */
+    .section-header {
+        color: var(--primary-color);
+        font-size: 1.5rem;
+        font-weight: 600;
+        margin-bottom: 1rem;
+        padding-bottom: 0.5rem;
+        border-bottom: 2px solid var(--border-color);
+    }
+    
+    /* Trial card */
+    .trial-card {
+        background-color: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 12px;
+        padding: 1.5rem;
+        margin-bottom: 1rem;
+    }
+    
+    .trial-title {
+        color: var(--text-primary);
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+    }
+    
+    .trial-match {
+        color: var(--primary-color);
+        font-weight: 600;
+        font-size: 0.9rem;
+    }
+    
+    .trial-detail {
+        color: var(--text-secondary);
+        font-size: 0.85rem;
+        margin-top: 0.5rem;
+    }
+    
+    /* Expanders */
+    .streamlit-expanderHeader {
+        background-color: var(--bg-card) !important;
+        border: 1px solid var(--border-color) !important;
+        border-radius: 8px;
+        color: var(--text-primary) !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# --- Session State Initialization ---
+if "patient_data" not in st.session_state:
+    st.session_state.patient_data = None
+if "trial_recommendations" not in st.session_state:
+    st.session_state.trial_recommendations = None
+
+# --- Mock Data Functions (Replace with real Epic/FHIR API calls) ---
+def fetch_epic_data(patient_id: str) -> Dict:
+    """Simulate fetching data from Epic EHR via FHIR API"""
+    # In production, use: requests.get(f"{EPIC_FHIR_BASE_URL}/Patient/{patient_id}")
+    
+    return {
+        "patient_id": patient_id,
+        "name": "John Doe",
+        "age": 58,
+        "gender": "Male",
+        "conditions": [
+            {"name": "Type 2 Diabetes", "onset": "2018-03-15", "status": "active"},
+            {"name": "Hypertension", "onset": "2015-07-22", "status": "active"},
+            {"name": "Hyperlipidemia", "onset": "2019-01-10", "status": "active"}
+        ],
+        "medications": [
+            {"name": "Metformin", "dose": "1000mg", "frequency": "2x daily"},
+            {"name": "Lisinopril", "dose": "10mg", "frequency": "1x daily"},
+            {"name": "Atorvastatin", "dose": "20mg", "frequency": "1x daily"}
+        ],
+        "labs": {
+            "HbA1c": {"value": 7.2, "date": "2025-10-15", "unit": "%", "reference": "< 7.0"},
+            "Glucose": {"value": 145, "date": "2025-10-15", "unit": "mg/dL", "reference": "70-100"},
+            "Total Cholesterol": {"value": 195, "date": "2025-10-10", "unit": "mg/dL", "reference": "< 200"},
+            "LDL": {"value": 110, "date": "2025-10-10", "unit": "mg/dL", "reference": "< 100"},
+            "Blood Pressure": {"value": "138/85", "date": "2025-10-20", "unit": "mmHg", "reference": "< 120/80"}
+        },
+        "vitals_history": pd.DataFrame({
+            "date": pd.date_range(end=datetime.now(), periods=30, freq="D"),
+            "heart_rate": [72, 75, 68, 70, 73, 71, 74, 69, 72, 76, 74, 71, 73, 70, 72, 75, 73, 71, 74, 72, 70, 73, 75, 71, 74, 72, 71, 73, 70, 72],
+            "systolic_bp": [135, 138, 132, 140, 136, 134, 139, 137, 135, 141, 136, 134, 138, 135, 137, 139, 136, 134, 140, 137, 135, 138, 140, 136, 139, 137, 135, 138, 136, 138],
+            "diastolic_bp": [82, 85, 80, 87, 84, 81, 86, 83, 82, 88, 84, 81, 85, 82, 84, 86, 84, 81, 87, 84, 82, 85, 87, 84, 86, 84, 82, 85, 83, 85],
+        })
+    }
+
+def fetch_wearable_data(patient_id: str) -> Dict:
+    """Simulate fetching data from Apple Health/Fitbit API"""
+    # In production, use Apple HealthKit or Fitbit API
+    
+    dates = pd.date_range(end=datetime.now(), periods=30, freq="D")
+    return {
+        "steps": pd.DataFrame({
+            "date": dates,
+            "steps": [8500, 7200, 9100, 6800, 10200, 8900, 7500, 8200, 9500, 7800, 
+                     8600, 9200, 7900, 8400, 9100, 7600, 8800, 9400, 8100, 7700,
+                     8900, 9300, 8200, 7800, 9000, 8500, 7900, 8700, 9100, 8400]
+        }),
+        "sleep": pd.DataFrame({
+            "date": dates,
+            "hours": [7.2, 6.5, 7.8, 6.2, 7.5, 7.1, 6.8, 7.3, 7.6, 6.9,
+                     7.4, 7.2, 6.7, 7.1, 7.5, 6.8, 7.3, 7.7, 7.0, 6.6,
+                     7.2, 7.4, 6.9, 7.1, 7.3, 7.0, 6.8, 7.2, 7.4, 7.1]
+        }),
+        "activity_minutes": pd.DataFrame({
+            "date": dates,
+            "minutes": [35, 28, 42, 25, 48, 38, 30, 36, 45, 32,
+                       38, 42, 33, 37, 41, 29, 39, 44, 36, 31,
+                       40, 43, 37, 32, 40, 38, 33, 39, 42, 37]
+        })
+    }
+
+# --- AI Functions ---
+def call_claude_api(prompt: str, system_prompt: str = "") -> str:
+    """Call Claude API"""
+    claude_api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not claude_api_key:
+        return ""
+    
+    try:
+        client = anthropic.Anthropic(api_key=claude_api_key)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system=system_prompt if system_prompt else anthropic.NOT_GIVEN,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return message.content[0].text
+    except Exception as e:
+        st.error(f"Claude API Error: {e}")
+        return ""
+
+def find_clinical_trials(patient_data: Dict, wearable_data: Dict) -> List[Dict]:
+    """Use Claude to analyze patient data and recommend clinical trials"""
+    
+    system_prompt = """You are a clinical research specialist AI. Analyze patient health data and recommend relevant clinical trials.
+    
+    Consider:
+    - Current conditions and disease progression
+    - Current medications and treatment history
+    - Lab values and vital signs
+    - Lifestyle factors (activity, sleep)
+    - Trial eligibility criteria
+    
+    Return a JSON array of trial recommendations with:
+    - trial_name: Study name
+    - nct_id: ClinicalTrials.gov ID (realistic format)
+    - phase: Trial phase (1, 2, 3, 4)
+    - condition: Primary condition being studied
+    - intervention: Treatment/intervention type
+    - match_score: 0-100 match percentage
+    - match_reasons: List of why patient matches
+    - location: Study location
+    - enrollment_status: "Recruiting" or "Not yet recruiting"
+    
+    Return ONLY valid JSON array."""
+    
+    # Prepare patient summary
+    conditions_str = ", ".join([c["name"] for c in patient_data["conditions"]])
+    meds_str = ", ".join([m["name"] for m in patient_data["medications"]])
+    
+    # Get recent averages from wearables
+    avg_steps = wearable_data["steps"]["steps"].mean()
+    avg_sleep = wearable_data["sleep"]["hours"].mean()
+    avg_activity = wearable_data["activity_minutes"]["minutes"].mean()
+    
+    prompt = f"""Analyze this patient profile and recommend 5 relevant clinical trials:
+
+PATIENT PROFILE:
+- Age: {patient_data['age']}
+- Gender: {patient_data['gender']}
+- Conditions: {conditions_str}
+- Current Medications: {meds_str}
+
+RECENT LAB VALUES:
+- HbA1c: {patient_data['labs']['HbA1c']['value']}% (Ref: {patient_data['labs']['HbA1c']['reference']})
+- Glucose: {patient_data['labs']['Glucose']['value']} {patient_data['labs']['Glucose']['unit']}
+- Blood Pressure: {patient_data['labs']['Blood Pressure']['value']} {patient_data['labs']['Blood Pressure']['unit']}
+- LDL Cholesterol: {patient_data['labs']['LDL']['value']} {patient_data['labs']['LDL']['unit']}
+
+LIFESTYLE DATA (30-day average):
+- Daily Steps: {avg_steps:.0f}
+- Sleep: {avg_sleep:.1f} hours/night
+- Active Minutes: {avg_activity:.0f} min/day
+
+Find clinical trials that:
+1. Match the patient's conditions
+2. Are appropriate for their lab values
+3. Consider their current treatment regimen
+4. Are actively recruiting
+
+Return as JSON array of trial recommendations."""
+    
+    try:
+        response = call_claude_api(prompt, system_prompt)
+        
+        if not response:
+            return []
+        
+        # Extract JSON
+        if "```json" in response:
+            json_str = response.split("```json")[1].split("```")[0].strip()
+        elif "```" in response:
+            json_str = response.split("```")[1].split("```")[0].strip()
+        else:
+            json_str = response.strip()
+        
+        trials = json.loads(json_str)
+        return trials
+    except Exception as e:
+        st.error(f"Error finding trials: {e}")
+        return []
+
+# --- Sidebar ---
+with st.sidebar:
+    st.markdown("## 🏥 Patient Dashboard")
+    st.divider()
+    
+    with st.form("patient_lookup"):
+        st.markdown("### Patient Lookup")
+        patient_id = st.text_input("Patient ID or MRN", placeholder="e.g., MRN12345")
+        lookup_submitted = st.form_submit_button("Load Patient Data", use_container_width=True)
+        
+        if lookup_submitted and patient_id:
+            with st.spinner("Loading patient data..."):
+                st.session_state.patient_data = fetch_epic_data(patient_id)
+                st.session_state.wearable_data = fetch_wearable_data(patient_id)
+                st.success("✓ Data loaded")
+    
+    if st.session_state.patient_data:
+        st.divider()
+        st.markdown("### Data Sources")
+        st.caption("✓ Epic EHR (FHIR)")
+        st.caption("✓ Apple Health")
+        st.caption("✓ Lab Results")
+        
+        st.divider()
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            st.session_state.patient_data = fetch_epic_data(patient_id)
+            st.session_state.wearable_data = fetch_wearable_data(patient_id)
+            st.rerun()
+
+# --- Main Dashboard ---
+if not st.session_state.patient_data:
+    st.markdown('<h1><span>Patient Health</span> Dashboard</h1>', unsafe_allow_html=True)
+    st.markdown("Connect patient health data from Epic EHR and wearables, powered by AI-driven clinical trial recommendations.")
+    
+    st.info("👈 Enter a Patient ID in the sidebar to begin")
+    
+    # Show demo/features
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("### 📊 Health Metrics")
+        st.caption("Real-time vitals from Epic EHR")
+        st.caption("Lab results and trends")
+        st.caption("Medication history")
+    with col2:
+        st.markdown("### ⌚ Wearable Data")
+        st.caption("Apple Health integration")
+        st.caption("Activity and sleep tracking")
+        st.caption("30-day trends")
+    with col3:
+        st.markdown("### 🧪 Trial Matching")
+        st.caption("AI-powered recommendations")
+        st.caption("Eligibility analysis")
+        st.caption("ClinicalTrials.gov search")
+
+else:
+    patient = st.session_state.patient_data
+    wearable = st.session_state.wearable_data
+    
+    # Header with patient info
+    st.markdown(f'<h1><span>{patient["name"]}</span> Health Dashboard</h1>', unsafe_allow_html=True)
+    col_info1, col_info2, col_info3 = st.columns(3)
+    with col_info1:
+        st.caption(f"**Age:** {patient['age']} | **Gender:** {patient['gender']}")
+    with col_info2:
+        st.caption(f"**Patient ID:** {patient['patient_id']}")
+    with col_info3:
+        st.caption(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    
+    st.divider()
+    
+    # Key Metrics
+    st.markdown('<div class="section-header">📊 Key Health Metrics</div>', unsafe_allow_html=True)
+    col1, col2, col3, col4, col5 = st.columns(5)
+    
+    with col1:
+        st.metric("HbA1c", f"{patient['labs']['HbA1c']['value']}%", 
+                 delta=f"{patient['labs']['HbA1c']['value'] - 7.0:.1f}" if patient['labs']['HbA1c']['value'] > 7.0 else None,
+                 delta_color="inverse")
+    with col2:
+        st.metric("Blood Pressure", patient['labs']['Blood Pressure']['value'])
+    with col3:
+        st.metric("LDL Cholesterol", f"{patient['labs']['LDL']['value']} mg/dL")
+    with col4:
+        avg_steps = wearable["steps"]["steps"].mean()
+        st.metric("Avg Daily Steps", f"{avg_steps:,.0f}")
+    with col5:
+        avg_sleep = wearable["sleep"]["hours"].mean()
+        st.metric("Avg Sleep", f"{avg_sleep:.1f} hrs")
+    
+    st.divider()
+    
+    # Charts row
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        st.markdown("#### Blood Pressure Trend (30 Days)")
+        fig_bp = go.Figure()
+        fig_bp.add_trace(go.Scatter(
+            x=patient['vitals_history']['date'],
+            y=patient['vitals_history']['systolic_bp'],
+            name='Systolic',
+            line=dict(color='#2DD4BF', width=2)
+        ))
+        fig_bp.add_trace(go.Scatter(
+            x=patient['vitals_history']['date'],
+            y=patient['vitals_history']['diastolic_bp'],
+            name='Diastolic',
+            line=dict(color='#A3A3A3', width=2)
+        ))
+        fig_bp.update_layout(
+            template='plotly_dark',
+            paper_bgcolor='#262626',
+            plot_bgcolor='#262626',
+            height=300,
+            margin=dict(l=0, r=0, t=0, b=0),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        st.plotly_chart(fig_bp, use_container_width=True)
+    
+    with col_chart2:
+        st.markdown("#### Daily Steps (30 Days)")
+        fig_steps = go.Figure()
+        fig_steps.add_trace(go.Bar(
+            x=wearable['steps']['date'],
+            y=wearable['steps']['steps'],
+            marker_color='#2DD4BF'
+        ))
+        fig_steps.update_layout(
+            template='plotly_dark',
+            paper_bgcolor='#262626',
+            plot_bgcolor='#262626',
+            height=300,
+            margin=dict(l=0, r=0, t=0, b=0),
+            showlegend=False
+        )
+        st.plotly_chart(fig_steps, use_container_width=True)
+    
+    st.divider()
+    
+    # Clinical Info
+    col_clin1, col_clin2 = st.columns(2)
+    
+    with col_clin1:
+        st.markdown("#### Active Conditions")
+        for condition in patient['conditions']:
+            if condition['status'] == 'active':
+                st.markdown(f"**{condition['name']}**")
+                st.caption(f"Onset: {condition['onset']}")
+    
+    with col_clin2:
+        st.markdown("#### Current Medications")
+        for med in patient['medications']:
+            st.markdown(f"**{med['name']}** - {med['dose']}")
+            st.caption(f"Frequency: {med['frequency']}")
+    
+    st.divider()
+    
+    # Clinical Trial Recommendations
+    st.markdown('<div class="section-header">🧪 AI-Recommended Clinical Trials</div>', unsafe_allow_html=True)
+    
+    if st.button("🤖 Find Matching Clinical Trials", use_container_width=False):
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            st.error("⚠️ Set ANTHROPIC_API_KEY environment variable to use AI recommendations")
+        else:
+            with st.spinner("AI is analyzing patient data and searching for matching trials..."):
+                trials = find_clinical_trials(patient, wearable)
+                st.session_state.trial_recommendations = trials
+    
+    if st.session_state.trial_recommendations:
+        st.success(f"✓ Found {len(st.session_state.trial_recommendations)} matching clinical trials")
+        
+        # Sort by match score
+        trials = sorted(st.session_state.trial_recommendations, key=lambda x: x['match_score'], reverse=True)
+        
+        for trial in trials:
+            st.markdown(f"""
+            <div class="trial-card">
+                <div class="trial-title">{trial['trial_name']}</div>
+                <div class="trial-match">Match Score: {trial['match_score']}% | {trial['nct_id']} | Phase {trial['phase']}</div>
+                <div class="trial-detail">
+                    <strong>Condition:</strong> {trial['condition']}<br>
+                    <strong>Intervention:</strong> {trial['intervention']}<br>
+                    <strong>Status:</strong> {trial['enrollment_status']}<br>
+                    <strong>Location:</strong> {trial['location']}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            with st.expander("Why this trial matches"):
+                for reason in trial['match_reasons']:
+                    st.markdown(f"✓ {reason}")
