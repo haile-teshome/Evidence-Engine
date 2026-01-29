@@ -1,7 +1,0 @@
-Bio==1.8.1
-biopython==1.85
-ollama==0.6.1
-pandas==2.3.3
-pypdf==6.6.0
-Requests==2.32.5
-streamlit==1.50.0
