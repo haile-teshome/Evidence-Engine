@@ -159,6 +159,48 @@ class AIService:
         except Exception:
             return ["Focus on specific study designs", "Narrow the target population", "Specify clinical outcomes"]
 
+    @staticmethod
+    def get_field_feedback(pico_dict: Dict[str, Any], papers: List[Paper], model_name: str) -> Dict[str, Dict[str, Any]]:
+        """Reviews each PICO field and provides targeted feedback with alternative suggestions."""
+        model = AIService.get_model(model_name)
+        paper_titles = "\n".join([f"- {p.title}" for p in papers[:5]])
+
+        system_msg = SystemMessage(
+            content="You are a systematic review methodology expert helping researchers refine their PICO framework."
+        )
+
+        prompt = f"""
+Review each PICO element below and provide targeted feedback to strengthen the search strategy.
+
+Current PICO:
+- Population (P): {pico_dict.get('p', 'Not specified')}
+- Intervention (I): {pico_dict.get('i', 'Not specified')}
+- Comparator (C): {pico_dict.get('c', 'Not specified')}
+- Outcome (O): {pico_dict.get('o', 'Not specified')}
+
+Related literature:
+{paper_titles}
+
+For each element, provide:
+1. A brief assessment (1-2 sentences): Is it too broad, too narrow, vague, or well-defined? What would strengthen it?
+2. Exactly 2-3 concrete alternative phrasings grounded in the literature above.
+
+Return ONLY a JSON object:
+{{
+    "p": {{"assessment": "...", "suggestions": ["alt1", "alt2"]}},
+    "i": {{"assessment": "...", "suggestions": ["alt1", "alt2"]}},
+    "c": {{"assessment": "...", "suggestions": ["alt1", "alt2"]}},
+    "o": {{"assessment": "...", "suggestions": ["alt1", "alt2", "alt3"]}}
+}}
+"""
+        try:
+            response = model.invoke([system_msg, HumanMessage(content=prompt)])
+            data = AIService._extract_json(response.content)
+            if data and isinstance(data, dict) and any(k in data for k in ['p', 'i', 'c', 'o']):
+                return data
+        except Exception:
+            pass
+        return {}
 
     @staticmethod
     def _extract_json(text: str) -> Optional[Any]:

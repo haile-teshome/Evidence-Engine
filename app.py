@@ -130,6 +130,9 @@ def main():
                 st.markdown("**🔍 Final MeSH Search String**")
                 st.code(entry.get('query', ''), language="sql")
 
+            if entry.get('field_feedback'):
+                st.caption("💡 Per-field refinement suggestions available in Strategy Review below.")
+
     # --- 4. REFINEMENT SUGGESTIONS ---
     suggestion_to_process = None
     if st.session_state.history:
@@ -165,6 +168,8 @@ def main():
             quick_papers = DataAggregator.fetch_all(mesh_query, active_sources, limit=5)
             summary = AIService.generate_brainstorm_summary(final_input, quick_papers, model_name)
             suggs = AIService.get_refinement_suggestions(final_input, quick_papers, model_name)
+            field_feedback = AIService.get_field_feedback(analysis, quick_papers, model_name)
+            st.session_state.field_feedback = field_feedback
 
             st.session_state.history.append({
                 "goal": final_input,
@@ -172,6 +177,7 @@ def main():
                 "summary": summary,
                 "pico_dict": analysis,
                 "suggestions": suggs,
+                "field_feedback": field_feedback,
                 "inclusion": st.session_state.inclusion_list,
                 "exclusion": st.session_state.exclusion_list
             })
@@ -185,21 +191,37 @@ def main():
 
         with st.container(border=True):
             st.markdown("**🎯 Review PICO & Criteria**")
+            feedback = st.session_state.get('field_feedback', {})
+
+            def render_pico_field(column, field_key, label, pico_attr):
+                with column:
+                    setattr(
+                        st.session_state.pico, pico_attr,
+                        st.text_area(label, value=getattr(st.session_state.pico, pico_attr), height=70)
+                    )
+                    fb = feedback.get(field_key, {})
+                    if fb:
+                        st.caption(f"💡 {fb.get('assessment', '')}")
+                        suggestions = fb.get('suggestions', [])
+                        if suggestions:
+                            s_cols = st.columns(len(suggestions))
+                            for idx, suggestion in enumerate(suggestions):
+                                if s_cols[idx].button(suggestion, key=f"fb_{field_key}_{idx}", use_container_width=True):
+                                    setattr(st.session_state.pico, pico_attr, suggestion)
+                                    st.rerun()
+
             p_col1, p_col2 = st.columns(2)
+            render_pico_field(p_col1, 'p', 'Population', 'population')
+            render_pico_field(p_col1, 'i', 'Intervention', 'intervention')
+            render_pico_field(p_col2, 'c', 'Comparator', 'comparator')
+            render_pico_field(p_col2, 'o', 'Outcome', 'outcome')
+
             with p_col1:
-                st.session_state.pico.population = st.text_area("Population", value=st.session_state.pico.population, height=70)
-                st.session_state.pico.intervention = st.text_area("Intervention", value=st.session_state.pico.intervention, height=70)
-                
-                # Inclusion Criteria Input
                 current_inc = ", ".join(st.session_state.inclusion_list) if isinstance(st.session_state.inclusion_list, list) else st.session_state.inclusion_list
                 new_inc = st.text_area("Inclusion Criteria (comma separated)", value=current_inc, height=70)
                 st.session_state.inclusion_list = [x.strip() for x in new_inc.split(",") if x.strip()]
-                
+
             with p_col2:
-                st.session_state.pico.comparator = st.text_area("Comparator", value=st.session_state.pico.comparator, height=70)
-                st.session_state.pico.outcome = st.text_area("Outcome", value=st.session_state.pico.outcome, height=70)
-                
-                # Exclusion Criteria Input
                 current_excl = ", ".join(st.session_state.exclusion_list) if isinstance(st.session_state.exclusion_list, list) else st.session_state.exclusion_list
                 new_excl = st.text_area("Exclusion Criteria (comma separated)", value=current_excl, height=70)
                 st.session_state.exclusion_list = [x.strip() for x in new_excl.split(",") if x.strip()]

@@ -46,6 +46,7 @@ class UIComponents:
                         # Restore criteria lists used by the main editor
                         st.session_state.inclusion_list = entry.get('inclusion', [])
                         st.session_state.exclusion_list = entry.get('exclusion', [])
+                        st.session_state.field_feedback = entry.get('field_feedback', {})
                         st.rerun()
             
             st.divider()

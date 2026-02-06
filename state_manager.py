@@ -21,7 +21,8 @@ class SessionState:
             'results': None,
             'goal': "",
             'custom_model': Config.DEFAULT_MODEL,
-            'history': []  # Tracks previous versions of (goal, query, summary, pico)
+            'history': [],  # Tracks previous versions of (goal, query, summary, pico)
+            'field_feedback': {}  # Per-field AI refinement suggestions for current PICO
         }
         
         for key, default in defaults.items():
@@ -37,3 +38,4 @@ class SessionState:
         st.session_state.results = None
         st.session_state.goal = ""
         st.session_state.history = []
+        st.session_state.field_feedback = {}
