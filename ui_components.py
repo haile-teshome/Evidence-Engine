@@ -7,120 +7,94 @@ import io
 import os
 import textwrap
 from docx import Document
+from models import PICOCriteria  
+from state_manager import SessionState
 
 class UIComponents:
     """Reusable UI components."""
     
     @staticmethod
     def render_sidebar() -> tuple:
-        """Render sidebar controls (Cleaned: PICO removed)."""
-        with st.sidebar:
-            st.title("⚙️ Refinement Center")
 
-            # --- SEARCH HISTORY SECTION ---
-            st.subheader("📜 Search History")
-            history = st.session_state.get('history', [])
+        with st.sidebar:
+            st.markdown('<div style="margin-top: -20px;"></div>', unsafe_allow_html=True)
+            st.markdown("### 🧬 Evidence Engine")
             
-            if not history:
-                st.caption("No previous iterations recorded.")
-            else:
-                # Limit history display to save space
-                for i, entry in enumerate(reversed(history[-5:])):
-                    goal_text = entry.get('goal', 'Unknown Goal')
-                    label = (goal_text[:35] + '...') if len(goal_text) > 35 else goal_text
-                    
-                    if st.button(f"↩️ {label}", key=f"hist_{i}", use_container_width=True):
-                        # Restore core states
-                        st.session_state.goal = entry['goal']
-                        st.session_state.query = entry['query']
-                        
-                        # Restore PICO dataclass
-                        p_dict = entry.get('pico_dict', {})
-                        st.session_state.pico.population = p_dict.get('p', '')
-                        st.session_state.pico.intervention = p_dict.get('i', '')
-                        st.session_state.pico.comparator = p_dict.get('c', '')
-                        st.session_state.pico.outcome = p_dict.get('o', '')
-                        st.session_state.pico.inclusion_criteria = p_dict.get('inclusion', '')
-                        st.session_state.pico.exclusion_criteria = p_dict.get('exclusion', '')
-                        
-                        # Restore criteria lists used by the main editor
-                        st.session_state.inclusion_list = entry.get('inclusion', [])
-                        st.session_state.exclusion_list = entry.get('exclusion', [])
-                        st.rerun()
-            
-            st.divider()
-            
-            # --- MODEL SELECTION ---
-            st.subheader("AI Model")
-            model_choice = st.selectbox(
-                "Preset Models",
-                ["llama3", "mistral", "phi3", "Custom"],
-                index=0
-            )
-            
-            if model_choice == "Custom":
-                model_name = st.text_input(
-                    "Model Name",
-                    value=st.session_state.get('custom_model', 'llama3')
-                )
-            else:
-                model_name = model_choice
-            
-            # --- DATA SOURCES ---
-            st.subheader("Data Sources")
-            active_sources = st.multiselect(
-                "Active Sources",
-                [s.value for s in DataSource],
-                default=[
-                    DataSource.PUBMED.value,
-                    DataSource.BIG3_JOURNALS.value,
-                    DataSource.BIORXIV.value,
-                    DataSource.SEMANTIC_SCHOLAR.value
-                ]
-            )
-            
-            uploaded_files = None
-            if DataSource.LOCAL_PDF.value in active_sources:
-                uploaded_files = st.file_uploader(
-                    "Upload PDFs",
-                    accept_multiple_files=True,
-                    type=['pdf']
-                )
-            
-            # --- SEARCH PARAMETERS ---
-            st.subheader("Search Depth")
-            num_per_source = st.slider(
-                "Max papers per source",
-                1, 50, 10
-            )
-            
-            st.divider()
-            
-            # --- RESET ACTION ---
-            if st.button("🔄 Reset All Data", use_container_width=True, type="secondary"):
-                SessionState.reset()
+            # 1. START NEW INVESTIGATION
+            if st.button("Start New Investigation", use_container_width=True, type="primary"):
+                # Clear all cached data (API results, dataframes)
+                st.cache_data.clear()
+                
+                # Clear all session state variables
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                
+                # Re-initialize the default state
+                SessionState.reset() 
+                
+                # Force a complete app restart
                 st.rerun()
+            st.divider()
+
+            # # 2. RECENT SESSIONS
+            # st.markdown("##### Recent Sessions")
+            # history = st.session_state.get('history', [])
+
+            # if not history:
+            #     st.caption("No history yet.")
+            # else:
+            #     # Iterate through history (newest at top)
+            #     for i in range(len(history) - 1, -1, -1):
+            #         entry = history[i]
+            #         label = entry.get('short_summary') or entry.get('goal', 'New Investigation')
+                    
+            #         # Create the clickable bullet
+            #         if st.button(f"• {label}", key=f"hist_btn_{i}", use_container_width=True):
+            #             # RESTORE ALL STATE
+            #             st.session_state.active_session_index = i
+            #             st.session_state.goal = entry.get('goal', "")
+            #             st.session_state.query = entry.get('query', "")
+            #             st.session_state.messages = entry.get('messages', [])
+            #             st.session_state.results = entry.get('results')
+                        
+            #             # Map PICO
+            #             p = entry.get('pico_dict', {})
+            #             st.session_state.pico.population = p.get('p', '')
+            #             st.session_state.pico.intervention = p.get('i', '')
+            #             st.session_state.pico.comparator = p.get('c', '')
+            #             st.session_state.pico.outcome = p.get('o', '')
+            #             st.rerun()
+
+            # st.divider()
+
+            # 3. SETTINGS
+            with st.container():
+                model_choice = st.selectbox("AI Model", ["llama3", "mistral", "phi", "Custom"])
+                active_sources = st.multiselect("Sources", [s.value for s in DataSource], default=["PubMed"])
+                num_per_source = st.slider("Depth", 5, 100, 20)
         
-        return (model_name, active_sources, uploaded_files, num_per_source)
-    
-    # In ui_components.py
+        return (model_choice, active_sources, None, num_per_source)
+        
+
     @staticmethod
-    def render_results(results_df: pd.DataFrame):
-        if results_df is None or results_df.empty:
-            st.info("No results to display yet.")
+    def render_results(df: pd.DataFrame):
+        if df.empty:
+            st.info("No papers match the current criteria.")
             return
-        
-        st.subheader("📊 Screening Results")
-        
-        # Change these to match the keys used in app.py (Step 5 of your app.py loop)
-        display_cols = [
-            'Source', 'Decision', 'Design', 'Sample Size',
-            'Reason', 'Title'
-        ]
-        available_cols = [c for c in display_cols if c in results_df.columns]
-        
+
+        # This configuration turns the "URL" column into a clickable link
         st.dataframe(
-            results_df[available_cols],
+            df,
+            column_config={
+                "URL": st.column_config.LinkColumn(
+                    "Source Link",    
+                    display_text="View Paper", 
+                    width="small"
+                ),
+                "Score": st.column_config.NumberColumn(format="%d ⭐"),
+                "Title": st.column_config.TextColumn(width="large")
+            },
+            hide_index=True,
             use_container_width=True
         )
 
@@ -145,60 +119,102 @@ class UIComponents:
 
     @staticmethod
     def render_prisma_flow():
-        """Renders the PRISMA 2020 flow with exact matching wording, structure, and colors."""
-        counts = st.session_state.get('prisma_counts', {})
+        """Renders PRISMA 2020: Gold header centered with bucketed exclusion reasons."""
         
-        # Extract counts
-        id_n = counts.get('identified', 0)
-        dup_n = counts.get('duplicates_removed', 0)
-        scr_n = counts.get('screened', 0)
-        excl_n = counts.get('excluded_total', 0)
-        inc_n = scr_n - excl_n
+        counts = st.session_state.prisma_counts
         
-        # Format exclusion reasons for the side node
-        reasons_map = counts.get('exclusion_breakdown', {})
-        if reasons_map:
-            # Join top reasons into a list for the box
-            reasons_text = "\\n".join([f"• {r[:35]}: {c}" for r, c in list(reasons_map.items())[:5]])
-        else:
-            reasons_text = "Criteria not met"
+        # LOGIC FOR STAGE 1 (ABSTRACTS) 
+        screened_n = counts.get('screened', 0)
+        abs_excl_n = counts.get('excluded_total', 0)
+        inc_n = screened_n - abs_excl_n 
+        
+        # LOGIC FOR STAGE 2 (FULL-TEXT)
+        final_n = counts.get('included_final', inc_n)
+        ft_excluded_total = inc_n - final_n
 
-        # DOT syntax for EXACT compliance
-        prisma_dot = f"""
-        digraph PRISMA {{
-            # Global settings for uniform box size and font
-            node [shape=box, fontname="Arial", fontsize=10, style="filled", width=3.8, height=1.2];
-            rankdir=TB;
-            
-            # --- IDENTIFICATION (Blue) ---
-            id [label="Identification\\nRecords identified from databases\\n(n = {id_n})", 
-                fillcolor="#f8f9fa", color="#007bff"];
-            
-            # --- DEDUPLICATION (Gold) ---
-            dup [label="Deduplication\\nDuplicates removed\\n(n = {dup_n})", 
-                    fillcolor="#fff3cd", color="#ffc107"];
-            
-            # --- SCREENING (Blue) ---
-            scr [label="Screening\\nRecords screened by AI\\n(n = {scr_n})", 
-                    fillcolor="#f8f9fa", color="#007bff"];
-            
-            # --- EXCLUSION (Blue) ---
-            excl [label="Exclusion Reasons\\n{reasons_text}\\n(Total n = {excl_n})", 
-                    fillcolor="#f8f9fa", color="#007bff"];
-            
-            # --- INCLUSION (EXACT WORDING - Blue) ---
-            final [label="Included\\nStudies included in review\\n(n = {inc_n})\\nReports of included studies\\n(n = {inc_n})", 
-                    fillcolor="#f8f9fa", color="#007bff"];
-            
-            # Alignment constraints
-            {{rank=same; scr; excl;}}
-            
-            # Flow Connections
-            id -> dup;
-            dup -> scr;
-            scr -> final;
-            scr -> excl [label="  Excluded"];
-        }}
-        """
+        # SOURCE BREAKDOWN LOGIC 
+        source_data = counts.get('source_counts', {})
+        total_raw = counts.get('identified', 0)
+        if source_data:
+            source_lines = [f"{name} (n={n})" for name, n in source_data.items()]
+            source_text = "\\n".join(source_lines)
+            identification_label = f"Records identified from databases (n = {total_raw})\\n{source_text}"
+        else:
+            identification_label = f"Records identified from:\\nDatabases (n = {counts['identified']})\\nRegisters (n = 0)"
+
+
+        reasons_dict = counts.get('ft_exclusion_breakdown', {})
+        if reasons_dict and ft_excluded_total > 0:
+            sorted_reasons = sorted(reasons_dict.items(), key=lambda x: x[1], reverse=True)[:5]
+            reasons_list = [f"• {r}: (n={c})" for r, c in sorted_reasons]
+            reasons_text = "\\n".join(reasons_list)
+        else:
+            reasons_text = ""
+
+        dot = graphviz.Digraph(comment='PRISMA 2020')
+        dot.attr(rankdir='TB', nodesep='0.5', ranksep='0.4')
         
-        st.graphviz_chart(prisma_dot)
+        dot.attr('node', shape='box', fontname='Arial', fontsize='10', 
+                style='filled, rounded', fillcolor='#ffffff', color='#000000',
+                width='4.0', height='1.0', penwidth='1.5')
+
+        # ROW 0: THE MASTER HEADER
+        dot.node('H1', 'Identification of studies via databases and registers', 
+                fillcolor='#FFD700', color='#B8860B', fontname='Arial Bold', width='9.0')
+
+        # ROW 1: IDENTIFICATION BOXES
+        dot.node('N1', identification_label)
+        dot.node('N2_side', f"Records removed before screening:\\n"
+                            f"Duplicate records removed (n = {counts['duplicates_removed']})\\n"
+                            f"Records marked as ineligible by automation tools (n = 0)\\n"
+                            f"Records removed for other reasons (n = 0)")
+
+        with dot.subgraph() as s:
+            s.attr(rank='same')
+            s.node('N1')
+            s.node('N2_side')
+
+        dot.edge('H1', 'N1', style='invis')
+        dot.edge('H1', 'N2_side', style='invis')
+
+        # ROW 2: Abstract Screening
+        dot.node('N3', f"Records screened\\n(n = {screened_n})")
+        dot.node('N4_excl', f"Records excluded\\n(n = {abs_excl_n})")
+        
+        # ROW 3: Retrieval
+        dot.node('N5_ret', f"Reports sought for retrieval\\n(n = {inc_n})")
+        dot.node('N5_not_ret', f"Reports not retrieved\\n(n = 0)")
+        
+        # ROW 4: Eligibility (STAGE 2)
+        dot.node('N6_elig', f"Reports assessed for eligibility\\n(n = {inc_n})")
+        # Updated to show the Stage 2 specific buckets
+        dot.node('N6_excl_side', f"Reports excluded (n={ft_excluded_total}):\\n{reasons_text}", width='4')
+        
+        # ROW 5: Final Result
+        dot.node('N7_final', f"Studies included in review\\n(n = {final_n})")
+
+        # Alignment for remaining rows 
+        with dot.subgraph() as s:
+            s.attr(rank='same')
+            s.node('N3')
+            s.node('N4_excl')
+        with dot.subgraph() as s:
+            s.attr(rank='same')
+            s.node('N5_ret')
+            s.node('N5_not_ret')
+        with dot.subgraph() as s:
+            s.attr(rank='same')
+            s.node('N6_elig')
+            s.node('N6_excl_side')
+
+        # VISIBLE CONNECTIONS
+        dot.edge('N1', 'N2_side')
+        dot.edge('N1', 'N3')
+        dot.edge('N3', 'N4_excl')
+        dot.edge('N3', 'N5_ret')
+        dot.edge('N5_ret', 'N5_not_ret')
+        dot.edge('N5_ret', 'N6_elig')
+        dot.edge('N6_elig', 'N6_excl_side')
+        dot.edge('N6_elig', 'N7_final')
+
+        st.graphviz_chart(dot, use_container_width=True)

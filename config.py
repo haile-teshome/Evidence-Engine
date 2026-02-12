@@ -8,9 +8,9 @@ from enum import Enum
 
 class Config:
     """Application configuration constants."""
-    APP_TITLE = "Global Epi-Agent Pro"
+    APP_TITLE = "Evidence Engine"
     PAGE_ICON = "🧪"
-    ENTREZ_EMAIL = "researcher@example.com"
+    ENTREZ_EMAIL = os.getenv("ENTREZ_EMAIL", "")
     ARXIV_API_URL = "http://export.arxiv.org/api/query"
     BIORXIV_API_URL = "https://api.biorxiv.org/details/biorxiv"
     SEMANTIC_SCHOLAR_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -22,8 +22,8 @@ class Config:
     PDF_MAX_CHARS = 3000
     DEFAULT_MODEL = "llama3"
     MIN_KEYWORD_LENGTH = 2
-    SEMANTIC_SCHOLAR_KEY = "18DkUdgrPW3OYHmj7OYWq8M0rg8VD5iraUBg5WQP"
-    CORE_API_KEY = "n9W4CIJbKULDkcjAmyMG2rPQOX5RvS8E"
+    SEMANTIC_SCHOLAR_KEY = os.getenv("SEMANTIC_SCHOLAR_KEY", "")
+    CORE_API_KEY = os.getenv("CORE_API_KEY", "")
 
 
 class DataSource(Enum):

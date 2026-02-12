@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Streamlit/OS
+.streamlit/config.toml
+.DS_Store

@@ -14,8 +14,8 @@ class PICOCriteria:
     intervention: str = ""
     comparator: str = ""
     outcome: str = ""
-    inclusion_criteria: str = ""  # New: Inferred/Manual criteria
-    exclusion_criteria: str = ""  # New: Inferred/Manual criteria
+    inclusion_criteria: str = ""  
+    exclusion_criteria: str = ""  
     
     def to_dict(self) -> Dict[str, str]:
         """Convert to dictionary for AI prompting and state management."""
@@ -37,13 +37,15 @@ class Paper:
     title: str
     abstract: str
     score: Optional[int] = None
+    url: str = ""
     
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "Source": self.source,
             "ID": self.id,
             "Title": self.title,
-            "Abstract": self.abstract
+            "Abstract": self.abstract,
+            "URL": self.url
         }
         if self.score is not None:
             result["Score"] = self.score

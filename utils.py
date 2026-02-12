@@ -3,7 +3,6 @@ import json
 import streamlit as st
 from typing import List, Dict, Any, Tuple, Optional
 
-# Modern LangChain v0.3 Imports
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
@@ -11,43 +10,23 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from config import Config
 from models import Paper, PICOCriteria, ScreeningResult
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 class AIService:
-    # @staticmethod
-    # def _extract_json(text: str) -> Optional[Any]:
-    #     """Helper to extract and parse JSON from AI strings."""
-    #     try:
-    #         # Look for JSON structure within the text
-    #         match = re.search(r'(\{.*\}|\[.*\])', text, re.DOTALL)
-    #         if match:
-    #             return json.loads(match.group(1))
-    #         return json.loads(text)
-    #     except (json.JSONDecodeError, AttributeError):
-    #         return None
-
     @staticmethod
     def get_model(model_name: str):
-            """Initializes model based on selection."""
-            name_lower = model_name.lower()
-            try:
-                if "gpt" in name_lower:
-                    return ChatOpenAI(model=model_name, api_key=Config.OPENAI_API_KEY, temperature=0)
-                elif "claude" in name_lower:
-                    return ChatAnthropic(model=model_name, api_key=Config.ANTHROPIC_API_KEY, temperature=0)
-                elif "gemini" in name_lower:
-                    # New Gemini Integration
-                    return ChatGoogleGenerativeAI(
-                        model=model_name, 
-                        google_api_key=Config.GEMINI_API_KEY, 
-                        temperature=0
-                    )
-                else:
-                    return ChatOllama(model=model_name, temperature=0)
-            except Exception as e:
-                st.error(f"Error initializing model {model_name}: {str(e)}")
-                return ChatOllama(model=Config.DEFAULT_MODEL, temperature=0)
-
+        """Initializes model based on selection."""
+        name_lower = model_name.lower()
+        try:
+            if "gpt" in name_lower:
+                return ChatOpenAI(model=model_name, api_key=Config.OPENAI_API_KEY, temperature=0)
+            elif "claude" in name_lower:
+                return ChatAnthropic(model=model_name, api_key=Config.ANTHROPIC_API_KEY, temperature=0)
+            else:
+                return ChatOllama(model=model_name, temperature=0)
+        except Exception as e:
+            st.error(f"Error initializing model {model_name}: {e}")
+            return None
+            
     @staticmethod
     def infer_pico_and_query(goal: str, model_name: str, previous_goal: str = "") -> Dict[str, Any]:
         """Strictly extracts PICO from the NEW goal only, preventing drift."""
@@ -114,29 +93,52 @@ class AIService:
         response = model.invoke(messages)
         return response.content.strip().replace("```sql", "").replace("```", "")
 
-# --- Update these methods in AIService class within utils.py ---
 
     @staticmethod
     def generate_brainstorm_summary(goal: str, papers: List[Paper], model_name: str) -> str:
-        """Provides a comprehensive summary of initial literature findings."""
+        """Refines research goal and provides a list of references in a clean box."""
+        if not papers:
+            return "⚠️ No papers found. Please adjust your research goal."
+
         model = AIService.get_model(model_name)
-        # Feed more context (titles + snippets) to the model for a better summary
-        paper_context = "\n".join([f"- {p.title}: {p.abstract[:200]}..." for p in papers[:5]])
+        subset = papers[:5]
+        
+        paper_context = ""
+        for idx, p in enumerate(subset):
+            paper_context += f"Source [{idx+1}]: {p.title}\nAbstract: {p.abstract[:300]}...\n\n"
         
         prompt = f"""
         Research Goal: {goal}
-        
-        Current Literature Findings:
+        Literature Context:
         {paper_context}
         
-        Provide a comprehensive 3-4 sentence summary of the current landscape found in these results. 
-        Focus on what is currently known, any immediate gaps observed, and how well these papers 
-        align with the target population and intervention.
+        TASK: Write an detailed evaluation in 5-6 sentences of how these papers support or refine the goal.
+        - Cite them using numerical markers like [1] or [2]. 
+        - Dont include the references or create a reference section in your summary, it will be added at the end.
         """
+        
         try:
-            return model.invoke([HumanMessage(content=prompt)]).content
-        except Exception:
-            return "Analyzing literature alignment with research goals..."
+            response = model.invoke([HumanMessage(content=prompt)])
+            ai_prose = response.content.strip()
+
+            ref_list = ""
+            for idx, p in enumerate(subset):
+                ref_list += f"\n* **[{idx+1}]** [{p.title}]({p.url})"
+
+            full_content = f"""
+            <div class="summary-box">
+                <div class="summary-title">Literature Context</div>
+                {ai_prose}
+                <hr style="margin: 15px 0; border: 0; border-top: 1px solid #eee;">
+                <div style="font-size: 0.85em; color: #555; font-weight: bold; margin-bottom: 5px;">Key References:</div>
+                {ref_list}
+            </div>
+            """
+            return full_content.strip()
+            
+        except Exception as e:
+            return f"Literature synthesis unavailable: {str(e)}"
+            
 
     @staticmethod
     def get_refinement_suggestions(goal: str, papers: List[Paper], model_name: str) -> List[str]:
@@ -162,94 +164,386 @@ class AIService:
 
     @staticmethod
     def _extract_json(text: str) -> Optional[Any]:
-        """Enhanced helper to find JSON even if the AI adds conversational filler."""
+        """Enhanced helper to find JSON lists or objects."""
         try:
-            # Try finding a JSON block first
-            match = re.search(r'(\{.*\})', text, re.DOTALL)
-            if match:
-                return json.loads(match.group(1))
-            return json.loads(text)
+            clean_text = text.replace("```json", "").replace("```", "").strip()
+            start_idx = min(clean_text.find('{'), clean_text.find('['))
+            end_idx = max(clean_text.rfind('}'), clean_text.rfind(']'))
+            
+            if start_idx != -1 and end_idx != -1:
+                json_str = clean_text[start_idx:end_idx+1]
+                return json.loads(json_str)
+            return json.loads(clean_text)
         except Exception:
-            # Fallback: Manual extraction if JSON parsing fails
-            manual_data = {}
-            for key in ['decision', 'design', 'sample_size', 'reason']:
-                pattern = f'"{key}":\\s*"([^"]*)"'
-                m = re.search(pattern, text, re.IGNORECASE)
-                if m: manual_data[key] = m.group(1)
-            return manual_data if manual_data else None
+            return None
 
+    # @staticmethod
+    # def screen_paper(paper: Paper, pico: PICOCriteria, model_name: str, inclusion: List[str], exclusion: List[str]) -> dict:
+    #     """Forcefully extracts Design, Sample Size, and Decision Reason."""
+    #     model = AIService.get_model(model_name)
+        
+    #     prompt = f"""
+    #     Strict Systematic Review Screening Task.
+        
+    #     GOAL: Determine if this paper fits the PICO and extract study metadata.
+        
+    #     PICO:
+    #     - Pop: {pico.population} | Int: {pico.intervention} | Comp: {pico.comparator} | Out: {pico.outcome}
+        
+    #     RULES:
+    #     - Inclusion: {inclusion}
+    #     - Exclusion: {exclusion}
+        
+    #     PAPER:
+    #     - Title: {paper.title}
+    #     - Abstract: {paper.abstract}
+        
+    #     YOU MUST PROVIDE THESE 4 FIELDS:
+    #     1. "Decision": Either "Include" or "Exclude".
+    #     2. "Design": Specific study type (e.g. RCT, Cohort, Case-Control).
+    #     3. "Sample_size": The number of subjects (e.g. N=200).
+    #     4. "Reason": Why it was included or the specific criteria it failed.
+
+    #     Return ONLY a JSON object. No intro, no outro.
+    #     {{
+    #         "Decision": "",
+    #         "Reason": ""
+    #     }}
+    #     """
+    #     try:
+    #         response = model.invoke([HumanMessage(content=prompt)])
+    #         data = AIService._extract_json(response.content)
+            
+    #         if data:
+    #             return {
+    #                 "decision": data.get('Decision', 'Exclude'),
+    #                 "reason": data.get('Reason', 'Check criteria')
+    #             }
+    #     except Exception as e:
+    #         print(f"Screening error: {e}")
+            
+    #     return {
+    #         "decision": "Exclude", 
+    #         "reason": "Error parsing response", 
+    #     }
     @staticmethod
-    def screen_paper(paper: Paper, pico: PICOCriteria, model_name: str, inclusion: List[str], exclusion: List[str]) -> dict:
-        """Forcefully extracts Design, Sample Size, and Decision Reason."""
+    def generate_search_query(pico: PICOCriteria, model_name: str) -> str:
+        """
+        Generates an optimized, clean Boolean search string.
+        Ensures the output is ready for API consumption without hallucinated formatting.
+        """
         model = AIService.get_model(model_name)
         
         prompt = f"""
-        Strict Systematic Review Screening Task.
+        Target: Medical Literature Database (PubMed/ArXiv)
+        Task: Convert the following PICO criteria into a professional Boolean search string.
         
-        GOAL: Determine if this paper fits the PICO and extract study metadata.
+        PICO Data:
+        - Population: {pico.population}
+        - Intervention: {pico.intervention}
+        - Comparator: {pico.comparator}
+        - Outcome: {pico.outcome}
         
-        PICO:
-        - Pop: {pico.population} | Int: {pico.intervention} | Comp: {pico.comparator} | Out: {pico.outcome}
-        
-        RULES:
-        - Inclusion: {inclusion}
-        - Exclusion: {exclusion}
-        
-        PAPER:
-        - Title: {paper.title}
-        - Abstract: {paper.abstract}
-        
-        YOU MUST PROVIDE THESE 4 FIELDS:
-        1. "Decision": Either "Include" or "Exclude".
-        2. "Design": Specific study type (e.g. RCT, Cohort, Case-Control).
-        3. "Sample_size": The number of subjects (e.g. N=200).
-        4. "Reason": Why it was included or the specific criteria it failed.
-
-        Return ONLY a JSON object. No intro, no outro.
-        {{
-            "Decision": "",
-            "Design": "",
-            "Sample_size": "",
-            "Reason": ""
-        }}
+        Formatting Rules:
+        1. Use [Mesh] tags for recognized medical terms if applicable.
+        2. Combine concepts with AND, synonyms with OR.
+        3. Use parentheses for grouping logic.
+        4. RETURN ONLY THE STRING. No backticks, no "Search Query:", no explanations.
         """
+        
+        try:
+            response = model.invoke([HumanMessage(content=prompt)])
+            raw_content = response.content.strip()
+            clean = re.sub(r'^(Query|Search Query|PubMed Search String):\s*', '', raw_content, flags=re.IGNORECASE)
+            clean = clean.replace("```", "").replace("`", "").replace('"', '').strip()
+            
+            if len(clean) < 5:
+                return f"({pico.population}) AND ({pico.intervention})"
+                
+            return clean
+
+        except Exception as e:
+            return f"({pico.population}) AND ({pico.intervention})"
+
+
+    @staticmethod
+    def get_pico_suggestion(goal: str, element: str) -> List[str]:
+        """Generates 3 REAL clinical refinements based on the specific research goal."""
+        model = AIService.get_model(Config.DEFAULT_MODEL)
+        if not model: return ["Model Error", "Check", "Config"]
+
+        # Determine clinical context for the element
+        context_hints = {
+            "population": "subgroups, age ranges, or specific comorbidities",
+            "intervention": "dosages, specific drug classes, or delivery methods",
+            "comparator": "standard of care, specific placebos, or active controls",
+            "outcome": "validated scales, mortality metrics, or specific biomarkers"
+        }
+        hint = context_hints.get(element.lower(), "clinical specifics")
+
+        prompt = f"""
+        You are a Clinical Research Methodologist. 
+        Research Goal: "{goal}"
+        
+        TASK: Suggest 3 actual clinical ways to narrow the "{element}" for a systematic review.
+        
+        STRICT FORMATTING RULES:
+        1. Return ONLY a JSON list of strings. Example: ["Term 1", "Term 2", "Term 3"]
+        2. NO conversational text. NO introductory remarks.
+        3. Each suggestion must be 2-5 words.
+        
+        STRICT CONTENT RULES:
+        - DO NOT use the word "{element}" in your suggestions.
+        - DO NOT use generic words like "Specific", "Targeted", or "Refined".
+        - Provide ACTUAL clinical {hint} relevant to the Goal.
+        
+        Example for Goal 'Diabetes treatment': 
+        ["HbA1c reduction > 1%", "Type 2 Adults (BMI > 30)", "Metformin Monotherapy"]
+        """
+        
         try:
             response = model.invoke([HumanMessage(content=prompt)])
             data = AIService._extract_json(response.content)
             
-            if data:
+            if isinstance(data, list) and len(data) > 0:
+                return [str(s).strip() for s in data[:3]]
+            
+            if isinstance(data, dict):
+                vals = list(data.values())
+                return [str(v).strip() for v in vals[:3]]
+
+        except Exception as e:
+            print(f"Suggestion Error: {e}")
+            
+        fallbacks = {
+            "population": ["Adults aged 18-65", "Chronic patients", "Acute settings"],
+            "intervention": ["Combined therapy", "Monotherapy", "Standard dosage"],
+            "comparator": ["Placebo control", "Standard of care", "Active comparator"],
+            "outcome": ["Primary clinical endpoint", "Quality of life", "Adverse events"]
+        }
+        return fallbacks.get(element.lower(), ["Option A", "Option B", "Option C"])
+
+    # @staticmethod
+    # def generate_summary(goal_text: str) -> str:
+    #     """Generates a short title for the sidebar history."""
+    #     # If no LLM is ready, just return a snippet
+    #     if not goal_text: return "New Session"
+        
+    #     # Simple prompt to your model
+    #     prompt = f"Summarize this research goal in 3-5 words: {goal_text}"
+    #     # Example call (pseudo-code):
+    #     # response = model.invoke(prompt)
+    #     # return response.content
+    #     return goal_text[:30] + "..." # Fallback
+
+    @staticmethod
+    def generate_summary(text: str) -> str:
+        """
+        Creates a short label for the sidebar history.
+        Trims the research goal to a readable length.
+        """
+        if not text:
+            return "New Investigation"
+        
+        clean_text = text.replace("\n", " ").strip()
+        if len(clean_text) > 30:
+            return clean_text[:30] + "..."
+        return clean_text
+
+
+
+    @staticmethod
+    def generate_formal_question(pico: PICOCriteria, model_name: str, history: list) -> str:
+        """Refines the research question by building on previous iterations."""
+        model = AIService.get_model(model_name)
+        
+        past_questions = [h['formal_question'] for h in history if 'formal_question' in h]
+        history_context = "\n".join([f"- Iteration {i+1}: {q}" for i, q in enumerate(past_questions)])
+        
+        prompt = f"""
+        You are an expert Clinical Research Librarian. 
+        Task: Refine the current research question based on new user input and previous iterations.
+
+        PREVIOUS ITERATIONS:
+        {history_context if history_context else "None (This is the first draft)"}
+
+        CURRENT UPDATED PICO:
+        - Population: {pico.population}
+        - Intervention: {pico.intervention}
+        - Comparator: {pico.comparator}
+        - Outcome: {pico.outcome}
+
+        GOAL:
+        Synthesize a single, formal research question. 
+        - If the user provided feedback in the latest turn, ensure the new question reflects that adjustment.
+        - Maintain the "In [P], does [I] compared to [C] result in [O]?" structure.
+        - Ensure it is more specific and refined than the previous versions.
+        - Don't return any preamble or filler like "Based on the input here is your research question".
+    
+        Return ONLY the refined question.
+        """
+        
+        try:
+            from langchain_core.messages import HumanMessage
+            response = model.invoke([HumanMessage(content=prompt)])
+            return response.content.strip().strip('"')
+        except Exception:
+            return f"In {pico.population}, what is the effect of {pico.intervention} vs {pico.comparator} on {pico.outcome}?"
+
+
+    # @staticmethod
+    # def screen_paper(paper: Paper, pico: PICOCriteria, model_name: str) -> Dict[str, Any]:
+    #     model = AIService.get_model(model_name)
+        
+    #     criteria_options = f"Inclusion: {pico.inclusion_criteria}\nExclusion: {pico.exclusion_criteria}"
+        
+    #     prompt = f"""
+    #     Strictly screen this paper based on PICO and I/E Criteria.
+        
+    #     CRITERIA:
+    #     {criteria_options}
+
+    #     PAPER:
+    #     Title: {paper.title}
+    #     Abstract: {paper.abstract}
+
+    #     TASK:
+    #     1. Decision: "Include" or "Exclude".
+    #     2. Bucket: Select 3-5 words from the criteria above that best explains the decision (e.g., "Wrong Population", "Study Design", "No Comparator").
+    #     3. Reason: Brief explanation.
+
+    #     RETURN ONLY JSON:
+    #     {{"decision": "Exclude", "bucket": "Wrong Population", "reason": "Focuses on children, not adults."}}
+    #     """
+        
+    #     try:
+    #         from langchain_core.messages import HumanMessage
+    #         response = model.invoke([HumanMessage(content=prompt)])
+            
+    #         raw_content = response.content
+    #         json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+    #         if json_match:
+    #             data = json.loads(json_match.group())
+    #             return {
+    #                 "decision": data.get('decision', 'Exclude'),
+    #                 "reason": data.get('reason', 'Criteria mismatch'),
+    #                 "citation": data.get('citation', 'Reference found in text')
+    #             }
+    #     except Exception as e:
+    #         print(f"DEBUG: AI Processing error: {e}")
+            
+    #     return {"decision": "Exclude", "reason": "AI Processing Timeout", "citation": "Check manually"}
+
+    @staticmethod
+    def screen_paper(paper: Paper, pico: PICOCriteria, model_name: str, inclusion: List[str] = None, exclusion: List[str] = None) -> Dict[str, Any]:
+        """Strictly screen this paper based on PICO and Inclusion/Exclusion Criteria."""
+        model = AIService.get_model(model_name)
+        if not model:
+            return {"decision": "Exclude", "bucket": "Error", "reason": "Model init failed"}
+        
+        # Ensure we have criteria text to send to the AI
+        inc_text = inclusion if inclusion else getattr(pico, 'inclusion_criteria', "None specified")
+        excl_text = exclusion if exclusion else getattr(pico, 'exclusion_criteria', "None specified")
+        
+        prompt = f"""
+        Strictly screen this paper based on PICO and I/E Criteria.
+        
+        PICO:
+        - Pop: {pico.population} | Int: {pico.intervention} | Comp: {pico.comparator} | Out: {pico.outcome}
+        
+        CRITERIA:
+        Inclusion: {inc_text}
+        Exclusion: {excl_text}
+
+        PAPER:
+        Title: {paper.title}
+        Abstract: {paper.abstract}
+
+        TASK:
+        1. Decision: "Include" or "Exclude".
+        2. Bucket: Select 3-5 words from the criteria above that best explains the decision (e.g., "Wrong Population").
+        3. Reason: Brief explanation.
+
+        RETURN ONLY JSON:
+        {{"decision": "Exclude", "bucket": "Wrong Population", "reason": "Focuses on children, not adults."}}
+        """
+        
+        try:
+            # Explicitly using HumanMessage from langchain_core
+            from langchain_core.messages import HumanMessage
+            response = model.invoke([HumanMessage(content=prompt)])
+            
+            # Robust JSON extraction (Old logic that worked)
+            raw_content = response.content
+            json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+            
+            if json_match:
+                data = json.loads(json_match.group())
                 return {
-                    "decision": data.get('Decision', 'Exclude'),
-                    "design": data.get('Design', 'N/A'),
-                    "sample_size": data.get('Sample_size', 'N/A'),
-                    "reason": data.get('Reason', 'Check criteria')
+                    "decision": data.get('decision', 'Exclude'),
+                    "bucket": data.get('bucket', 'Criteria mismatch'),
+                    "reason": data.get('reason', 'N/A')
                 }
         except Exception as e:
-            print(f"Screening error: {e}")
+            # This will show you exactly why it's failing in your terminal
+            print(f"DEBUG: Screening error for {paper.title[:30]}: {e}")
             
-        # CHANGE THESE TO LOWERCASE TO MATCH ABOVE
         return {
             "decision": "Exclude", 
-            "reason": "Error parsing response", 
-            "design": "N/A", 
-            "sample_size": "N/A"
+            "bucket": "Error",
+            "reason": "AI Processing error"
         }
+
     @staticmethod
-    def generate_search_query(pico: PICOCriteria, model_name: str) -> str:
+    def screen_full_text(text: str, pico: PICOCriteria, model_name: str) -> Dict[str, Any]:
+        """Performs deeper eligibility screening on full-text or detailed abstracts."""
         model = AIService.get_model(model_name)
+        if not model:
+            return {"decision": "Exclude", "reason": "Model error", "citation": "N/A"}
+
         prompt = f"""
-        Generate a single PubMed search string using MeSH terms for this PICO.
-        RETURN ONLY THE RAW SEARCH STRING. 
-        NO intro text, NO explanations, NO markdown code blocks.
+        You are performing the Eligibility phase of a Systematic Review.
         
-        PICO: {pico.to_dict()}
+        CRITERIA:
+        Population: {pico.population}
+        Intervention: {pico.intervention}
+        Comparator: {pico.comparator}
+        Outcome: {pico.outcome}
+
+        TEXT TO ANALYZE:
+        {text[:4000]} 
+
+        TASK:
+        Decide if this paper should be included. 
+        Provide a 'citation' which is a direct quote from the text that supports your decision.
+
+        RETURN ONLY JSON:
+        {{
+            "decision": "✅ Include" or "❌ Exclude",
+            "reason": "Short reason (e.g. Wrong Study Design)",
+            "citation": "Direct quote from the text..."
+        }}
         """
-        response = model.invoke([HumanMessage(content=prompt)])
-        # Strip common AI formatting (backticks and "Search String:" prefixes)
-        clean = response.content.replace("```sql", "").replace("```", "").strip()
-        if ":" in clean and "(" not in clean.split(":")[0]:
-            clean = clean.split(":", 1)[-1].strip()
-        return clean
+
+        try:
+            from langchain_core.messages import HumanMessage
+            import re
+            import json
+            
+            response = model.invoke([HumanMessage(content=prompt)])
+            # Use regex to find JSON in case the model adds preamble text
+            match = re.search(r'\{.*\}', response.content, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except Exception as e:
+            print(f"Full-text error: {e}")
+            
+        return {
+            "decision": "❌ Exclude",
+            "reason": "AI Processing error",
+            "citation": "N/A"
+        }
+        
 class Deduplicator:
     @staticmethod
     def normalize_text(text: str) -> str:

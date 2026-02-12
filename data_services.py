@@ -1,31 +1,24 @@
-# ============================================================================
-# FILE: data_services.py
-# All data fetching services in one file
-# ============================================================================
-
 from Bio import Entrez
 import requests
 import xml.etree.ElementTree as ET
 import urllib.parse
 from pypdf import PdfReader
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Dict, Any, Tuple
 import streamlit as st
 from config import Config, DataSource
 from models import Paper
 from utils import QueryCleaner
 import time
 
-# Global variable to track the last time an API request was made
 _last_request_time = 0.0
 
 def throttled_request(url: str, params: dict = None, headers: dict = None, method: str = "GET") -> requests.Response:
     """Ensures all outgoing requests respect a 1-request-per-second limit."""
     global _last_request_time
     
-    # Calculate time since last request
     elapsed = time.time() - _last_request_time
-    if elapsed < 1.1:  # 1.1 seconds for safety buffer
+    if elapsed < 1.1:  
         time.sleep(1.1 - elapsed)
     
     if method.upper() == "POST":
@@ -49,7 +42,6 @@ class PubMedService:
             query = f"({query})[tiab]"
         
         try:
-            # Search for IDs
             search_handle = Entrez.esearch(
                 db="pubmed",
                 term=query,
@@ -60,7 +52,6 @@ class PubMedService:
             if not id_list:
                 return []
             
-            # Fetch details
             fetch_handle = Entrez.efetch(
                 db="pubmed",
                 id=id_list,
@@ -72,15 +63,18 @@ class PubMedService:
             papers = []
             for article in records['PubmedArticle']:
                 citation = article['MedlineCitation']
+                pmid = str(citation['PMID']) 
+                
                 abstract_text = citation['Article'].get('Abstract', {}).get(
                     'AbstractText', ["N/A"]
                 )[0]
                 
                 papers.append(Paper(
                     source=DataSource.PUBMED.value,
-                    id=str(citation['PMID']),
+                    id=pmid,
                     title=citation['Article']['ArticleTitle'],
-                    abstract=str(abstract_text)
+                    abstract=str(abstract_text),
+                    url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                 ))
             
             return papers
@@ -152,112 +146,77 @@ class TopJournalsService:
 class ArXivService:
     """Handles arXiv data fetching."""
     
-    CATEGORIES = "cat:q-bio.PE OR cat:q-bio.QM OR cat:stat.AP"
-    
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         """Fetch papers from arXiv."""
         clean_query = QueryCleaner.clean_for_general_search(query)
-        
-        if not clean_query:
-            return []
-        
-        encoded_query = urllib.parse.quote(clean_query)
-        url = (
-            f"{Config.ARXIV_API_URL}"
-            f"?search_query=all:{encoded_query}+AND+({ArXivService.CATEGORIES})"
-            f"&max_results={max_results}"
-        )
+        params = {
+            'search_query': f'all:{clean_query}',
+            'start': 0,
+            'max_results': max_results
+        }
         
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            
+            response = throttled_request(Config.ARXIV_API_URL, params=params)
             root = ET.fromstring(response.content)
-            namespace = {'atom': 'http://www.w3.org/2005/Atom'}
             
             papers = []
-            for entry in root.findall('atom:entry', namespace):
-                paper_id = entry.find('atom:id', namespace).text.split('/')[-1]
-                title = entry.find('atom:title', namespace).text.strip()
-                abstract = entry.find('atom:summary', namespace).text.strip()
+            ns = {'ns': 'http://www.w3.org/2005/Atom'}
+            
+            for entry in root.findall('ns:entry', ns):
+                full_id = entry.find('ns:id', ns).text
+                paper_id = full_id.split('/')[-1]
                 
                 papers.append(Paper(
                     source=DataSource.ARXIV.value,
                     id=paper_id,
-                    title=title,
-                    abstract=abstract
+                    title=entry.find('ns:title', ns).text.strip().replace('\n', ' '),
+                    abstract=entry.find('ns:summary', ns).text.strip(),
+                    url=f"https://arxiv.org/abs/{paper_id}"
                 ))
-            
             return papers
-            
         except Exception as e:
-            st.error(f"arXiv fetch error: {e}")
+            st.error(f"ArXiv fetch error: {e}")
             return []
 
-
 class BioRxivService:
-    """Handles bioRxiv data fetching."""
+    """Handles BioRxiv data fetching."""
     
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
-        """Fetch preprints from bioRxiv with keyword matching."""
-        clean_query = QueryCleaner.clean_for_general_search(query).lower()
-        keywords = [
-            k for k in clean_query.split()
-            if len(k) > Config.MIN_KEYWORD_LENGTH
-        ]
+        """Fetch papers from BioRxiv (recent papers only)."""
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=Config.BIORXIV_LOOKBACK_DAYS)
         
-        if not keywords:
-            return []
+        date_str = f"{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        url = f"{Config.BIORXIV_API_URL}/{date_str}"
         
-        filtered_papers = []
-        cursor = 0
-        attempts = 0
-        
-        start_date = (
-            datetime.now() - timedelta(days=Config.BIORXIV_LOOKBACK_DAYS)
-        ).strftime('%Y-%m-%d')
-        end_date = datetime.now().strftime('%Y-%m-%d')
-        
-        while (len(filtered_papers) < max_results and
-               attempts < Config.BIORXIV_MAX_ATTEMPTS):
+        try:
+            response = throttled_request(url)
+            data = response.json()
             
-            url = f"{Config.BIORXIV_API_URL}/{start_date}/{end_date}/{cursor}"
+            papers = []
+            keywords = [k.lower() for k in query.split() if len(k) > 2]
             
-            try:
-                response = requests.get(url, timeout=15)
-                response.raise_for_status()
-                data = response.json()
+            for preprint in data.get('collection', []):
+                text_to_search = (preprint['title'] + " " + preprint['abstract']).lower()
                 
-                collection = data.get('collection', [])
-                if not collection:
+                if any(k in text_to_search for k in keywords):
+                    papers.append(Paper(
+                        source=DataSource.BIORXIV.value,
+                        id=preprint.get('doi', 'N/A'),
+                        title=preprint['title'],
+                        abstract=preprint['abstract'],
+                        url=f"https://doi.org/{preprint['doi']}"
+                    ))
+                
+                if len(papers) >= max_results:
                     break
-                
-                for preprint in collection:
-                    text = f"{preprint['title']} {preprint['abstract']}".lower()
-                    relevance = sum(1 for k in keywords if k in text)
                     
-                    if relevance > 0:
-                        filtered_papers.append(Paper(
-                            source=DataSource.BIORXIV.value,
-                            id=preprint['doi'],
-                            title=preprint['title'],
-                            abstract=preprint['abstract'],
-                            score=relevance
-                        ))
-                    
-                    if len(filtered_papers) >= max_results:
-                        break
-                
-                cursor += Config.BIORXIV_BATCH_SIZE
-                attempts += 1
-                
-            except Exception as e:
-                st.error(f"bioRxiv fetch error: {e}")
-                break
-        
-        return sorted(filtered_papers, key=lambda x: x.score or 0, reverse=True)
+            return papers
+        except Exception as e:
+            st.error(f"BioRxiv fetch error: {e}")
+            return []
 
 
 class PDFService:
@@ -310,11 +269,16 @@ class SemanticScholarService:
             data = response.json()
             papers = []
             for item in data.get("data", []):
+                # FIX: Define the ID variable here
+                s2_id = item.get("paperId", "N/A")
+                
                 papers.append(Paper(
                     source="Semantic Scholar",
-                    id=item.get("paperId", "N/A"),
+                    id=s2_id,
                     title=item.get("title", "Untitled"),
-                    abstract=item.get("abstract") or "No abstract available."
+                    abstract=item.get("abstract") or "No abstract available.",
+                    # FIX: Use the variable 's2_id' defined above
+                    url=f"https://www.semanticscholar.org/paper/{s2_id}"
                 ))
             return papers
         except Exception as e:
@@ -348,10 +312,9 @@ class COREService:
 class DataAggregator:
     """Aggregates data from all active sources while respecting rate limits."""
     
-    # This map links the UI selection to the Python class
     SERVICE_MAP = {
         DataSource.PUBMED.value: PubMedService.fetch,
-        DataSource.BIG3_JOURNALS.value: TopJournalsService.fetch,
+        # DataSource.BIG3_JOURNALS.value: TopJournalsService.fetch,
         DataSource.ARXIV.value: ArXivService.fetch,
         DataSource.BIORXIV.value: BioRxivService.fetch,
         "Semantic Scholar": SemanticScholarService.fetch,
@@ -359,47 +322,159 @@ class DataAggregator:
     }
     
     @staticmethod
-    def fetch_all(query: str, active_sources: List[str], max_per_source: int = 10, uploaded_files=None, limit: int = None) -> List[Paper]:
-        """The main entry point called by app.py to start the search."""
+    def fetch_all(query: str, active_sources: List[str], max_per_source: int = 10, uploaded_files=None, limit: int = None):
+        """
+        Aggregates raw data from all active sources. 
+        Deduplication is removed to ensure PRISMA counts accurately reflect total records.
+        """
         all_papers = []
+        source_counts = {} 
         
-        # If 'limit' is passed (from Brainstorm), we use it to cap the search per source
-        # to keep the quick summary fast.
         search_count = limit if limit is not None else max_per_source
         
         for source in active_sources:
-            # Handle local files separately
-            if source == DataSource.LOCAL_PDF.value:
-                if uploaded_files:
-                    papers = PDFService.process_files(uploaded_files)
-                    all_papers.extend(papers)
-                    st.write(f"✅ {source}: {len(papers)} files processed")
+            papers = []
+            status_text = st.empty()
+            status_text.write(f"🔍 Searching {source}...")
             
-            # Handle API-based sources
-            elif source in DataAggregator.SERVICE_MAP:
-                st.write(f"🔍 Searching {source}...")
-                fetch_func = DataAggregator.SERVICE_MAP[source]
+            try:
+                # 1. Handle local files
+                if source == DataSource.LOCAL_PDF.value:
+                    if uploaded_files:
+                        from data_services import PDFService
+                        papers = PDFService.process_files(uploaded_files)
                 
-                # Use the adjusted search_count (either the 5-paper limit or the full max)
-                papers = fetch_func(query, search_count)
+                # 2. Handle API-based sources (PubMed, ArXiv, Semantic Scholar, CORE, etc.)
+                elif source in DataAggregator.SERVICE_MAP:
+                    fetch_func = DataAggregator.SERVICE_MAP[source]
+                    papers = fetch_func(query, search_count)
+                
+                # 3. Track RAW counts per source and update UI
+                count = len(papers)
                 all_papers.extend(papers)
-                st.write(f"✅ {source}: {len(papers)} papers found")
-        
-        total_before = len(all_papers)
-        if total_before > 0:
-            from utils import Deduplicator
-            unique, duplicates = Deduplicator.run(all_papers)
-            
-            # Store duplicates in session state for the UI to see
-            st.session_state['last_duplicates'] = duplicates
-            all_papers = unique
-            
-            removed = len(duplicates)
-            if removed > 0:
-                st.success(f"🔍 Removed {removed} duplicates.")
+                source_counts[source] = count
+                
+                # Update the status placeholder with the final count
+                if count > 0:
+                    status_text.write(f"✅ {source}: {count} papers found")
+                else:
+                    status_text.write(f"ℹ️ {source}: 0 papers found")
 
-        # If a hard limit was requested (e.g., 5 papers), ensure we return exactly that or fewer
+            except Exception as e:
+                # Catch failures so one source doesn't break the entire search
+                status_text.write(f"❌ {source}: Error occurred")
+                st.error(f"Error fetching from {source}: {str(e)}")
+                source_counts[source] = 0
+
         if limit is not None:
-            return all_papers[:limit]
+            return all_papers[:limit], source_counts
             
-        return all_papers
+        return all_papers, source_counts
+
+    @staticmethod
+    def simulate_yield(query: str, active_sources: List[str]) -> Dict[str, int]:
+        """Returns the absolute total of papers matching the query in each database."""
+        results = {}
+        for source in active_sources:
+            try:
+                # PubMed & Top Journals (Uses E-Search 'Count' field)
+                if source in [DataSource.PUBMED.value, DataSource.BIG3_JOURNALS.value]:
+                    from Bio import Entrez
+                    Entrez.email = Config.ENTREZ_EMAIL
+                    search_query = PubMedService.get_query(query) if source == DataSource.PUBMED.value else TopJournalsService.get_query(query)
+                    
+                    # retmax=0 makes the request instant as no records are downloaded
+                    handle = Entrez.esearch(db="pubmed", term=search_query, retmax=0)
+                    record = Entrez.read(handle)
+                    results[source] = int(record.get("Count", 0))
+
+                # ArXiv (Uses OpenSearch 'totalResults' field)
+                elif source == DataSource.ARXIV.value:
+                    from utils import QueryCleaner
+                    import xml.etree.ElementTree as ET
+                    clean_query = QueryCleaner.clean_for_general_search(query)
+                    url = f"{Config.ARXIV_API_URL}?search_query=all:{clean_query}&max_results=0"
+                    resp = throttled_request(url)
+                    root = ET.fromstring(resp.content)
+                    ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
+                    total_node = root.find('os:totalResults', ns)
+                    results[source] = int(total_node.text) if total_node is not None else 0
+
+                # Inside DataAggregator.simulate_yield:
+                elif source == DataSource.BIORXIV.value:
+                    # BioRxiv doesn't have a 'total count' search API easily accessible via GET 
+                    # without fetching data, so we use the fetch method to see what we get 
+                    # in the current lookback window.
+                    temp_papers = BioRxivService.fetch(query, max_results=100)
+                    results[source] = len(temp_papers)
+
+                # Semantic Scholar (Uses the 'total' metadata field)
+                elif source == "Semantic Scholar":
+                    params = {'query': query, 'limit': 1} # Minimal request
+                    headers = {'x-api-key': Config.SEMANTIC_SCHOLAR_KEY} if hasattr(Config, 'SEMANTIC_SCHOLAR_KEY') else {}
+                    url = "https://api.semanticscholar.org/graph/v1/paper/search"
+                    resp = throttled_request(url, params=params, headers=headers).json()
+                    results[source] = int(resp.get('total', 0))
+
+                # CORE (Uses the 'totalHits' field)
+                elif source == "CORE":
+                    headers = {"Authorization": f"Bearer {Config.CORE_API_KEY}"} if hasattr(Config, 'CORE_API_KEY') else {}
+                    payload = {"q": query, "limit": 1}
+                    resp = throttled_request(Config.CORE_API_URL, params=payload, headers=headers).json()
+                    results[source] = int(resp.get('totalHits', 0))
+                
+            except Exception as e:
+                results[source] = 0
+        return results
+
+    @staticmethod
+    def get_total_counts(query: str, sources: List[str]) -> Dict[str, int]:
+        """Fetches only the total result count for a query from selected sources."""
+        results = {}
+        clean_query = QueryCleaner.clean_for_general_search(query)
+        
+        for source in sources:
+            try:
+                # PubMed: Use esearch with retmax=0
+                if source == DataSource.PUBMED.value:
+                    Entrez.email = Config.ENTREZ_EMAIL
+                    handle = Entrez.esearch(db="pubmed", term=query, retmax=0)
+                    record = Entrez.read(handle)
+                    results[source] = int(record.get('Count', 0))
+
+                # ArXiv: Parse the totalResults from the OpenSearch XML
+                elif source == DataSource.ARXIV.value:
+                    url = f"{Config.ARXIV_API_URL}?search_query=all:{clean_query}&max_results=0"
+                    resp = throttled_request(url)
+                    root = ET.fromstring(resp.content)
+                    ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
+                    total_node = root.find('os:totalResults', ns)
+                    results[source] = int(total_node.text) if total_node is not None else 0
+
+                # Semantic Scholar: Use the 'total' field in response metadata
+                elif source == "Semantic Scholar":
+                    params = {'query': query, 'limit': 1, 'fields': 'title'} # Added fields
+                    resp = throttled_request(url, params=params, headers=headers).json()
+                    # Debug print here would show you the raw JSON if it's 0
+                    results[source] = int(resp.get('total', 0))
+
+                # CORE: Use 'totalHits' field
+                elif source == "CORE":
+                    payload = {"q": query, "limit": 0} # limit 0 is faster for just counts
+                    resp = throttled_request(Config.CORE_API_URL, params=payload, headers=headers).json()
+                    # CORE v3 usually returns a 'totalHits' at the top level
+                    results[source] = int(resp.get('totalHits', 0))
+                
+                # BioRxiv: The 'messages' array contains the total 'count'
+                elif source == DataSource.BIORXIV.value:
+                    # Note: BioRxiv search is usually date-based in your current config
+                    # This assumes you are fetching the last N days as per Config
+                    url = f"{Config.BIORXIV_API_URL}/biorxiv/last/{Config.BIORXIV_LOOKBACK_DAYS}"
+                    resp = throttled_request(url).json()
+                    results[source] = int(resp.get('messages', [{}])[0].get('count', 0))
+
+            except Exception as e:
+                st.warning(f"Could not fetch count for {source}: {e}")
+                results[source] = 0
+                
+        return results
