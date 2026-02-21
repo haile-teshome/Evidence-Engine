@@ -4,13 +4,14 @@
 # ============================================================================
 
 from enum import Enum
+import os 
 
 
 class Config:
     """Application configuration constants."""
     APP_TITLE = "Evidence Engine"
     PAGE_ICON = "🧪"
-    ENTREZ_EMAIL = os.getenv("ENTREZ_EMAIL", "")
+    ENTREZ_EMAIL = os.getenv("ENTREZ_EMAIL", "researcher@example.com")
     ARXIV_API_URL = "http://export.arxiv.org/api/query"
     BIORXIV_API_URL = "https://api.biorxiv.org/details/biorxiv"
     SEMANTIC_SCHOLAR_URL = "https://api.semanticscholar.org/graph/v1/paper/search"

@@ -36,44 +36,92 @@ class UIComponents:
                 st.rerun()
             st.divider()
 
-            # # 2. RECENT SESSIONS
-            # st.markdown("##### Recent Sessions")
-            # history = st.session_state.get('history', [])
-
-            # if not history:
-            #     st.caption("No history yet.")
-            # else:
-            #     # Iterate through history (newest at top)
-            #     for i in range(len(history) - 1, -1, -1):
-            #         entry = history[i]
-            #         label = entry.get('short_summary') or entry.get('goal', 'New Investigation')
-                    
-            #         # Create the clickable bullet
-            #         if st.button(f"• {label}", key=f"hist_btn_{i}", use_container_width=True):
-            #             # RESTORE ALL STATE
-            #             st.session_state.active_session_index = i
-            #             st.session_state.goal = entry.get('goal', "")
-            #             st.session_state.query = entry.get('query', "")
-            #             st.session_state.messages = entry.get('messages', [])
-            #             st.session_state.results = entry.get('results')
-                        
-            #             # Map PICO
-            #             p = entry.get('pico_dict', {})
-            #             st.session_state.pico.population = p.get('p', '')
-            #             st.session_state.pico.intervention = p.get('i', '')
-            #             st.session_state.pico.comparator = p.get('c', '')
-            #             st.session_state.pico.outcome = p.get('o', '')
-            #             st.rerun()
-
-            # st.divider()
+            # 2. PAGE NAVIGATION (Anthropic-style sidebar nav)
+            st.markdown("##### Navigation")
+            
+            # Initialize page if not set
+            if 'current_page' not in st.session_state:
+                st.session_state.current_page = "home"
+            
+            # Navigation options with Material icons
+            nav_items = [
+                ("home", ":material/home:", "Home"),
+                ("simulation", ":material/analytics:", "Simulation"),
+                ("abstract", ":material/article:", "Abstract Screening"),
+                ("fulltext", ":material/lab_research:", "Full-Text Evidence"),
+                ("prisma", ":material/account_tree:", "PRISMA Flow")
+            ]
+            
+            # Render navigation buttons
+            for nav_id, icon, label in nav_items:
+                is_active = st.session_state.current_page == nav_id
+                
+                # Use different styling for active vs inactive
+                if is_active:
+                    btn_type = "primary"
+                else:
+                    btn_type = "secondary"
+                
+                if st.button(
+                    f"{icon} {label}",
+                    key=f"nav_{nav_id}",
+                    use_container_width=True,
+                    type=btn_type
+                ):
+                    st.session_state.current_page = nav_id
+                    st.rerun()
+            
+            st.divider()
 
             # 3. SETTINGS
             with st.container():
                 model_choice = st.selectbox("AI Model", ["llama3", "mistral", "phi", "Custom"])
+                
+                # Show custom model input if "Custom" is selected
+                if model_choice == "Custom":
+                    custom_model = st.text_input("Enter Custom Model Name", placeholder="e.g., gpt-4, claude-3, llama3:70b")
+                    if custom_model:
+                        model_choice = custom_model
+                
+                # Data Sources Selection
                 active_sources = st.multiselect("Sources", [s.value for s in DataSource], default=["PubMed"])
-                num_per_source = st.slider("Depth", 5, 100, 20)
-        
-        return (model_choice, active_sources, None, num_per_source)
+                
+                # PDF Upload Section (only shows when Local PDFs is selected)
+                local_pdfs_selected = DataSource.LOCAL_PDF.value in active_sources
+                
+                if local_pdfs_selected:
+                    uploaded_files = st.file_uploader(
+                        "Upload PDF documents",
+                        type="pdf",
+                        accept_multiple_files=True,
+                        help="Upload research papers in PDF format for analysis"
+                    )
+                    
+                    # Store uploaded files in session state
+                    if uploaded_files:
+                        st.session_state.uploaded_files = uploaded_files
+                    
+                    # File selection for uploaded PDFs
+                    uploaded_files = st.session_state.get('uploaded_files', [])
+                    
+                    if uploaded_files:
+                        st.markdown("### 📄 Select PDFs for Search")
+                        selected_files = st.multiselect(
+                            "Choose specific PDFs to include in search",
+                            options=[file.name for file in uploaded_files],
+                            default=[file.name for file in uploaded_files],
+                            help="Select which uploaded PDFs to include in search. Leave empty to include all."
+                        )
+                    else:
+                        selected_files = None
+                else:
+                    uploaded_files = None
+                    selected_files = None
+                
+                # Depth slider
+                num_per_source = st.slider("Depth", 5, 100, 20)    
+
+        return (model_choice, active_sources, selected_files, num_per_source)
         
 
     @staticmethod
@@ -82,9 +130,43 @@ class UIComponents:
             st.info("No papers match the current criteria.")
             return
 
+        # Style DataFrame to color cells based on decision and criteria
+        def color_decisions(val):
+            if 'Include' in str(val):
+                return 'background-color: #d4edda; color: #155724; font-weight: 500; padding: 8px;'
+            elif 'Exclude' in str(val):
+                return 'background-color: #f8d7da; color: #721c24; font-weight: 500; padding: 8px;'
+            else:
+                return 'padding: 8px;'
+        
+        def color_criteria(val):
+            if 'INCLUDE' in str(val):
+                return 'background-color: #d4edda; color: #155724; font-weight: 500; padding: 8px;'
+            elif 'EXCLUDE' in str(val):
+                return 'background-color: #f8d7da; color: #721c24; font-weight: 500; padding: 8px;'
+            else:
+                return 'background-color: #fff3cd; color: #856404; font-weight: 500; padding: 8px;'
+
+        # Apply styling to Decision column if it exists
+        styled_df = df.copy()
+        if 'Decision' in styled_df.columns:
+            styled_df = styled_df.style.map(color_decisions, subset=['Decision'])
+        
+        # Apply styling to criteria columns
+        try:
+            import streamlit as st
+            inclusion_criteria = st.session_state.get('inclusion_list', [])
+            exclusion_criteria = st.session_state.get('exclusion_list', [])
+            
+            for criterion in inclusion_criteria + exclusion_criteria:
+                if criterion in styled_df.columns:
+                    styled_df = styled_df.map(color_criteria, subset=[criterion])
+        except:
+            pass
+
         # This configuration turns the "URL" column into a clickable link
         st.dataframe(
-            df,
+            styled_df,
             column_config={
                 "URL": st.column_config.LinkColumn(
                     "Source Link",    

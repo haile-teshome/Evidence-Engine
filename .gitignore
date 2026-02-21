@@ -1,8 +1,17 @@
-# Python
-__pycache__/
-*.pyc
+# Python Virtual Environments
+.venv/
 venv/
+ENV/
+env/
+
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment Variables (Secrets)
 .env
+.env.*
 
 # Streamlit/OS
 .streamlit/config.toml
