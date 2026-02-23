@@ -7,9 +7,9 @@ Evidence Engine is a Streamlit-based research automation tool designed to stream
 - **PICO Analysis**: Automatically infer Population, Intervention, Comparator, and Outcome criteria from a research goal.
 - **Multi-Source Search**: Aggregates literature from PubMed, arXiv, bioRxiv, Semantic Scholar, and CORE.
 - **AI-Powered Screening**: Screens abstracts against specific inclusion/exclusion criteria using LLMs like GPT, Claude, or local Llama3 via Ollama.
-- [cite_start]**Table Extraction**: Automatically detects and extracts data tables from HTML, PDF, and text-based research papers[cite: 1].
+- **Table Extraction**: Automatically detects and extracts data tables from HTML, PDF, and text-based research papers.
 - **PRISMA Flow Visualization**: Generates dynamic PRISMA flow diagrams using Graphviz to track study selection progress.
-- [cite_start]**Data Export**: Export extracted evidence and screening results to CSV or JSON formats[cite: 1].
+- **Data Export**: Export extracted evidence and screening results to CSV or JSON formats.
 
 ## Tech Stack
 
