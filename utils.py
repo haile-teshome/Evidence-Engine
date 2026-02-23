@@ -37,25 +37,25 @@ class AIService:
             st.error(f"🤖 AI Connection Error: {str(e)}")
             return None
 
-    @staticmethod
-    def _extract_json(text: str) -> Optional[Any]:
-        """Robust JSON extraction to prevent 'AI Processing Errors'."""
-        try:
-            # Remove markdown blocks if present
-            clean_text = text.replace("```json", "").replace("```", "").strip()
+    # @staticmethod
+    # def _extract_json(text: str) -> Optional[Any]:
+    #     """Robust JSON extraction to prevent 'AI Processing Errors'."""
+    #     try:
+    #         # Remove markdown blocks if present
+    #         clean_text = text.replace("```json", "").replace("```", "").strip()
             
-            # Find the actual JSON boundaries to ignore conversational 'chatter'
-            start_idx = min(clean_text.find('{'), clean_text.find('['))
-            end_idx = max(clean_text.rfind('}'), clean_text.rfind(']'))
+    #         # Find the actual JSON boundaries to ignore conversational 'chatter'
+    #         start_idx = min(clean_text.find('{'), clean_text.find('['))
+    #         end_idx = max(clean_text.rfind('}'), clean_text.rfind(']'))
             
-            if start_idx != -1 and end_idx != -1:
-                json_str = clean_text[start_idx:end_idx+1]
-                return json.loads(json_str)
+    #         if start_idx != -1 and end_idx != -1:
+    #             json_str = clean_text[start_idx:end_idx+1]
+    #             return json.loads(json_str)
             
-            return json.loads(clean_text)
-        except Exception as e:
-            st.warning(f"⚠️ JSON Parsing Error: AI returned invalid format.")
-            return None
+    #         return json.loads(clean_text)
+    #     except Exception as e:
+    #         st.warning(f"⚠️ JSON Parsing Error: AI returned invalid format.")
+    #         return None
             
     @staticmethod
     def infer_pico_and_query(goal: str, model_name: str, previous_goal: str = "") -> Dict[str, Any]:
@@ -264,6 +264,69 @@ class AIService:
         int_query = " OR ".join([f'"{term}"[tiab]' for term in int_terms])
         
         return f"({pop_query}) AND ({int_query})"
+
+    @staticmethod
+    def generate_adversarial_query(pico: PICOCriteria, model_name: str) -> str:
+        """Generates an adversarial search query to find contrasting evidence."""
+        model = AIService.get_model(model_name)
+        
+        prompt = f"""
+        You are an expert researcher specializing in finding contrasting evidence. Generate a search query that will find studies with OPPOSITE or CONTRADICTORY findings to the research question.
+        
+        ORIGINAL PICO:
+        - Population: {pico.population}
+        - Intervention: {pico.intervention}
+        - Comparator: {pico.comparator}
+        - Outcome: {pico.outcome}
+        
+        ADVERSARIAL SEARCH STRATEGY:
+        1. Look for studies showing NO EFFECT, HARM, or NEGATIVE OUTCOMES
+        2. Include terms like: "ineffective", "harmful", "no benefit", "adverse", "failure", "negative", "contradict"
+        3. Consider alternative interventions that might be SUPERIOR
+        4. Include studies with different methodologies that might challenge the findings
+        5. Use terms that indicate treatment failure or complications
+        
+        CRITICAL REQUIREMENTS:
+        1. Return ONLY the search string - no explanations
+        2. Use proper Boolean operators (AND, OR, NOT)
+        3. Include terms that will find contrasting evidence
+        4. Keep it focused but broad enough to find opposing viewpoints
+        
+        EXAMPLE: If original is "metformin AND diabetes", adversarial might be "metformin AND (ineffective OR harmful OR adverse) AND diabetes"
+        
+        Generate an adversarial search query for this PICO:
+        """
+        
+        try:
+            messages = [HumanMessage(content=prompt)]
+            response = model.invoke(messages)
+            raw_query = response.content.strip()
+            
+            # Clean up the response
+            clean_query = raw_query.replace("```sql", "").replace("```", "").replace("```", "")
+            
+            # Extract the actual query
+            if '(' in clean_query:
+                start_idx = clean_query.find('(')
+                query_part = clean_query[start_idx:]
+                if not query_part.endswith(')') and query_part.count('(') > query_part.count(')'):
+                    query_part += ')'
+                return query_part.strip()
+            
+            return clean_query.strip()
+            
+        except Exception as e:
+            print(f"Adversarial query generation error: {e}")
+            
+            # Fallback: Create a basic adversarial query
+            pop_terms = pico.population.split()[:2] if pico.population else ["adults"]
+            int_terms = pico.intervention.split()[:2] if pico.intervention else ["treatment"]
+            
+            pop_query = " OR ".join([f'"{term}"' for term in pop_terms])
+            int_query = " OR ".join([f'"{term}"' for term in int_terms])
+            adverse_terms = "ineffective OR harmful OR adverse OR negative OR failure"
+            
+            return f"({pop_query}) AND ({int_query}) AND ({adverse_terms})"
 
     @staticmethod
     def optimize_search_string_per_source(
@@ -489,21 +552,58 @@ class AIService:
         except Exception:
             return ["Focus on specific study designs", "Narrow the target population", "Specify clinical outcomes"]
 
-
     @staticmethod
     def _extract_json(text: str) -> Optional[Any]:
-        """Enhanced helper to find JSON lists or objects."""
-        try:
-            clean_text = text.replace("```json", "").replace("```", "").strip()
-            start_idx = min(clean_text.find('{'), clean_text.find('['))
-            end_idx = max(clean_text.rfind('}'), clean_text.rfind(']'))
-            
-            if start_idx != -1 and end_idx != -1:
-                json_str = clean_text[start_idx:end_idx+1]
-                return json.loads(json_str)
-            return json.loads(clean_text)
-        except Exception:
+        """
+        Single unified helper to find JSON lists or objects.
+        Handles 'chatter' before/after JSON and markdown blocks.
+        """
+        if not text or not isinstance(text, str):
             return None
+            
+        try:
+            # 1. Clean up potential markdown formatting
+            clean_text = text.replace("```json", "").replace("```", "").strip()
+            
+            # 2. Find the boundaries of the JSON object or list
+            # We look for the first occurrence of { or [ and the last } or ]
+            start_brace = clean_text.find('{')
+            start_bracket = clean_text.find('[')
+            
+            # Determine which starts first
+            if start_brace == -1 and start_bracket == -1:
+                # No JSON structure found, try raw load as last resort
+                return json.loads(clean_text)
+                
+            start_idx = start_brace if (start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket)) else start_bracket
+            
+            end_brace = clean_text.rfind('}')
+            end_bracket = clean_text.rfind(']')
+            end_idx = max(end_brace, end_bracket)
+
+            if start_idx != -1 and end_idx != -1:
+                json_str = clean_text[start_idx:end_idx + 1]
+                return json.loads(json_str)
+            
+            return json.loads(clean_text)
+        except Exception as e:
+            # Log the error to the terminal so you can see why it failed
+            print(f"❌ JSON Parsing Error: {e} | Raw Text: {text[:100]}...")
+            return None
+    # @staticmethod
+    # def _extract_json(text: str) -> Optional[Any]:
+    #     """Enhanced helper to find JSON lists or objects."""
+    #     try:
+    #         clean_text = text.replace("```json", "").replace("```", "").strip()
+    #         start_idx = min(clean_text.find('{'), clean_text.find('['))
+    #         end_idx = max(clean_text.rfind('}'), clean_text.rfind(']'))
+            
+    #         if start_idx != -1 and end_idx != -1:
+    #             json_str = clean_text[start_idx:end_idx+1]
+    #             return json.loads(json_str)
+    #         return json.loads(clean_text)
+    #     except Exception:
+    #         return None
 
     # @staticmethod
     # def screen_paper(paper: Paper, pico: PICOCriteria, model_name: str, inclusion: List[str], exclusion: List[str]) -> dict:
@@ -892,15 +992,16 @@ class AIService:
                 # Check if paper has basic content
                 paper_text = f"{paper.title} {paper.abstract}".lower()
                 if not paper_text or paper_text == 'n/a':
-                    return {
+                    result = {
                         "decision": "Exclude", 
                         "bucket": "Missing content",
                         "reason": "Missing title or abstract",
                         **{criterion: "EXCLUDE" for criterion in inclusion_criteria + exclusion_criteria}
                     }
-                
-                for criterion in inclusion_criteria + exclusion_criteria:
-                    result[criterion] = "ERROR"
+                else:
+                    # Add criteria evaluations with safe defaults
+                    for criterion in inclusion_criteria + exclusion_criteria:
+                        result[criterion] = "ERROR"
             except:
                 pass
             

@@ -2,11 +2,218 @@ import streamlit as st
 import pandas as pd
 import io
 import time
+import requests
+from bs4 import BeautifulSoup
+import re
 from config import Config
 from state_manager import SessionState
 from ui_components import UIComponents
 from utils import AIService, Deduplicator
 from data_services import DataAggregator
+
+def extract_tables_from_paper(paper_title: str, paper_url: str, paper_source: str, extraction_type: str) -> list:
+    """
+    Extract tables from paper full text using various methods.
+    Returns a list of dictionaries with table information.
+    """
+    tables = []
+    
+    try:
+        # Method 1: Try to fetch and parse HTML content (for online papers)
+        if paper_url and paper_url.startswith('http'):
+            response = requests.get(paper_url, timeout=20)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # Method 1a: Look for HTML tables
+                html_tables = soup.find_all('table')
+                for i, table in enumerate(html_tables):
+                    table_data = []
+                    rows = table.find_all('tr')
+                    
+                    for row in rows:
+                        row_data = []
+                        cells = row.find_all(['td', 'th'])
+                        for cell in cells:
+                            text = cell.get_text(strip=True)
+                            row_data.append(text)
+                        
+                        if row_data:  # Only add non-empty rows
+                            table_data.append(row_data)
+                    
+                    if table_data and len(table_data) > 1:  # At least header + 1 row
+                        tables.append({
+                            'title': f"Table {i+1} (HTML)",
+                            'type': classify_table_type(table_data, extraction_type),
+                            'data': table_data
+                        })
+                
+                # Method 1b: Look for table-like structures in divs
+                if not tables:
+                    # Look for div elements that might contain tables
+                    potential_tables = soup.find_all(['div'], class_=re.compile(r'.*table.*', re.I))
+                    for i, div in enumerate(potential_tables):
+                        div_text = div.get_text(strip=True)
+                        if div_text and len(div_text.split('\n')) > 2:
+                            # Try to parse as table
+                            lines = div_text.split('\n')
+                            table_data = []
+                            for line in lines:
+                                if '|' in line or '\t' in line or line.count('   ') >= 2:
+                                    if '|' in line:
+                                        row = [cell.strip() for cell in line.split('|') if cell.strip()]
+                                    elif '\t' in line:
+                                        row = [cell.strip() for cell in line.split('\t') if cell.strip()]
+                                    else:
+                                        row = [cell.strip() for cell in line.split('  ') if cell.strip()]
+                                    
+                                    if len(row) > 1:
+                                        table_data.append(row)
+                            
+                            if table_data and len(table_data) > 1:
+                                tables.append({
+                                    'title': f"Table {i+1} (Div)",
+                                    'type': classify_table_type(table_data, extraction_type),
+                                    'data': table_data
+                                })
+                
+                # Method 1c: Look for pre-formatted text in entire page
+                if not tables:
+                    text_content = soup.get_text()
+                    lines = text_content.split('\n')
+                    current_table = []
+                    
+                    for line_num, line in enumerate(lines):
+                        # Look for table-like patterns (more aggressive)
+                        if any(sep in line for sep in ['|', '\t', '   ', '    ']):
+                            # Split by common separators
+                            if '|' in line:
+                                row = [cell.strip() for cell in line.split('|') if cell.strip()]
+                            elif '\t' in line:
+                                row = [cell.strip() for cell in line.split('\t') if cell.strip()]
+                            elif '    ' in line:
+                                row = [cell.strip() for cell in line.split('    ') if cell.strip()]
+                            elif '   ' in line:
+                                row = [cell.strip() for cell in line.split('   ') if cell.strip()]
+                            else:
+                                row = [cell.strip() for cell in line.split('  ') if cell.strip()]
+                            
+                            if len(row) > 1:  # At least 2 columns
+                                current_table.append(row)
+                        else:
+                            # End of table if we hit a non-table line after having table data
+                            if current_table and len(current_table) > 2:  # At least 3 rows for a real table
+                                tables.append({
+                                    'title': f"Table {len(tables)+1} (Text)",
+                                    'type': classify_table_type(current_table, extraction_type),
+                                    'data': current_table
+                                })
+                                current_table = []
+                    
+                    # Add any remaining table
+                    if current_table and len(current_table) > 2:
+                        tables.append({
+                            'title': f"Table {len(tables)+1} (Text)",
+                            'type': classify_table_type(current_table, extraction_type),
+                            'data': current_table
+                        })
+                
+                # Method 1d: Look for data in <pre> tags
+                if not tables:
+                    pre_tags = soup.find_all('pre')
+                    for i, pre in enumerate(pre_tags):
+                        pre_text = pre.get_text()
+                        if pre_text and len(pre_text.split('\n')) > 2:
+                            lines = pre_text.split('\n')
+                            table_data = []
+                            for line in lines:
+                                if '|' in line or '\t' in line or line.count('   ') >= 2:
+                                    if '|' in line:
+                                        row = [cell.strip() for cell in line.split('|') if cell.strip()]
+                                    elif '\t' in line:
+                                        row = [cell.strip() for cell in line.split('\t') if cell.strip()]
+                                    else:
+                                        row = [cell.strip() for cell in line.split('  ') if cell.strip()]
+                                    
+                                    if len(row) > 1:
+                                        table_data.append(row)
+                            
+                            if table_data and len(table_data) > 1:
+                                tables.append({
+                                    'title': f"Table {i+1} (Pre)",
+                                    'type': classify_table_type(table_data, extraction_type),
+                                    'data': table_data
+                                })
+                
+                # Method 1e: Look for table captions and extract surrounding content
+                if not tables:
+                    # Look for common table caption patterns
+                    caption_patterns = ['table', 'tab.', 'figure', 'fig.', 'results', 'data', 'summary']
+                    all_text = soup.get_text().lower()
+                    
+                    for pattern in caption_patterns:
+                        if pattern in all_text:
+                            # Find lines containing table-related words
+                            lines = soup.get_text().split('\n')
+                            for i, line in enumerate(lines):
+                                if any(word in line.lower() for word in caption_patterns):
+                                    # Look at surrounding lines for tabular data
+                                    surrounding_lines = lines[max(0, i-2):min(len(lines), i+5)]
+                                    table_data = []
+                                    
+                                    for s_line in surrounding_lines:
+                                        if '|' in s_line or '\t' in s_line or s_line.count('   ') >= 3:
+                                            if '|' in s_line:
+                                                row = [cell.strip() for cell in s_line.split('|') if cell.strip()]
+                                            elif '\t' in s_line:
+                                                row = [cell.strip() for cell in s_line.split('\t') if cell.strip()]
+                                            else:
+                                                row = [cell.strip() for cell in s_line.split('  ') if cell.strip()]
+                                            
+                                            if len(row) > 1:
+                                                table_data.append(row)
+                                    
+                                    if table_data and len(table_data) > 2:
+                                        tables.append({
+                                            'title': f"Table {len(tables)+1} (Caption)",
+                                            'type': classify_table_type(table_data, extraction_type),
+                                            'data': table_data
+                                        })
+                                        break  # Found a table, move to next pattern
+                            
+                            if tables:
+                                break  # Found tables, stop searching
+    
+    except Exception as e:
+        print(f"Error extracting tables from {paper_title}: {e}")
+    
+    return tables
+
+def classify_table_type(table_data: list, extraction_type: str) -> str:
+    """
+    Classify table type based on content and extraction preference.
+    """
+    if extraction_type != "All Tables":
+        return extraction_type
+    
+    # Simple classification based on headers
+    if not table_data or len(table_data) < 2:
+        return "Unknown"
+    
+    headers = [cell.lower() for cell in table_data[0] if cell]
+    
+    if any(keyword in ' '.join(headers) for keyword in ['age', 'gender', 'sex', 'demographic', 'participant']):
+        return "Demographics"
+    elif any(keyword in ' '.join(headers) for keyword in ['outcome', 'result', 'effect', 'response']):
+        return "Outcomes"
+    elif any(keyword in ' '.join(headers) for keyword in ['intervention', 'treatment', 'drug', 'therapy']):
+        return "Interventions"
+    elif any(keyword in ' '.join(headers) for keyword in ['p-value', 'statistic', 'test', 'significance']):
+        return "Statistical Results"
+    elif any(keyword in ' '.join(headers) for keyword in ['adverse', 'event', 'side', 'complication']):
+        return "Adverse Events"
+    
+    return "General"
 
 def main():
     """
@@ -156,6 +363,32 @@ def main():
                     if s_cols[idx].button(s, key=f"btn_sugg_{len(st.session_state.history)}_{idx}", use_container_width=True):
                         suggestion_to_process = s
         
+        # Adversarial References Section
+        if st.session_state.history:
+            last_entry = st.session_state.history[-1]
+            adversarial_papers = last_entry.get('adversarial_papers', [])
+            adversarial_query = last_entry.get('adversarial_query', '')
+            
+            if adversarial_papers:
+                st.write("---")
+                st.caption("⚖️ **Adversarial References for Balanced View**")
+                st.info(f"**Adversarial Search Query:** *{adversarial_query}*")
+                
+                st.markdown("**🔄 Contrasting Evidence:**")
+                for i, paper in enumerate(adversarial_papers):
+                    with st.expander(f"📄 {paper.title[:80]}{'...' if len(paper.title) > 80 else ''}", expanded=False):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            st.markdown(f"**Source:** {paper.source}")
+                            if paper.abstract:
+                                st.markdown(f"**Abstract:** {paper.abstract[:300]}{'...' if len(paper.abstract) > 300 else ''}")
+                        with col2:
+                            if paper.url:
+                                st.link_button("📖 View Paper", paper.url, use_container_width=True)
+                            st.markdown(f"**ID:** {paper.id}")
+                
+                st.markdown("*These references provide contrasting perspectives to ensure a balanced and comprehensive review of the evidence.*")
+        
         # Clinical Brainstorming Bubbles
         if st.session_state.get('goal') and st.session_state.results is None:
             st.write("---")
@@ -238,6 +471,10 @@ def main():
                 summary = AIService.generate_brainstorm_summary(final_input, quick_papers, model_name)
                 suggs = AIService.get_refinement_suggestions(final_input, quick_papers, model_name)
                 
+                # Generate adversarial search for balanced view (only on chat input)
+                adversarial_query = AIService.generate_adversarial_query(st.session_state.pico, model_name)
+                adversarial_papers, _ = DataAggregator.fetch_all(adversarial_query, active_sources, limit=3)
+                
                 st.session_state.history.append({
                     "goal": final_input,
                     "query": mesh_query,
@@ -246,7 +483,9 @@ def main():
                     "pico_dict": analysis,
                     "suggestions": suggs,
                     "inclusion": st.session_state.inclusion_list,
-                    "exclusion": st.session_state.exclusion_list
+                    "exclusion": st.session_state.exclusion_list,
+                    "adversarial_query": adversarial_query,
+                    "adversarial_papers": adversarial_papers
                 })
                 st.session_state.goal = final_input
                 st.rerun()
@@ -255,61 +494,148 @@ def main():
     elif current_page == "simulation":
         
         if st.session_state.history:
-            # Editable Search String Section
-            st.markdown("### 🔍 Search String Editor")
+            # Initialize per-database search strings if not exists
+            if 'per_db_queries' not in st.session_state:
+                st.session_state.per_db_queries = {}
+                api_sources = [s for s in active_sources if s not in ["Local PDFs"]]
+                for source in api_sources:
+                    st.session_state.per_db_queries[source] = st.session_state.query
             
-            # Initialize simulation query in session state if not exists
-            if 'sim_query' not in st.session_state:
-                st.session_state.sim_query = st.session_state.query
+            # Per-database editing (permanent mode)
+            api_sources = [s for s in active_sources if s not in ["Local PDFs"]]
             
-            # Editable search string with live updates
-            edited_query = st.text_area(
-                "Edit search string to see yield changes:",
-                value=st.session_state.sim_query,
-                height=100,
-                key="sim_query_editor"
-            )
+            for source in api_sources:
+                with st.expander(f"**{source}**", expanded=False):
+                    current_query = st.session_state.per_db_queries.get(source, st.session_state.query)
+                    
+                    col_query, col_simulate = st.columns([3, 1])
+                    with col_query:
+                        edited_db_query = st.text_area(
+                            f"Search string for {source}:",
+                            value=current_query,
+                            height=80,
+                            key=f"query_{source}"
+                        )
+                    
+                    with col_simulate:
+                        # Display paper count centered above button
+                        if 'db_test_results' in st.session_state and st.session_state.db_test_results is not None and source in st.session_state.db_test_results:
+                            test_result = st.session_state.db_test_results[source]
+                            st.markdown(f"<div style='text-align: center; font-size: 1.5em; font-weight: bold; margin-bottom: 10px;'>{test_result['total_found']} Papers</div>", unsafe_allow_html=True)
+                        
+                        if st.button(f"Test", key=f"test_{source}", use_container_width=True, help="Run simulation for this database"):
+                            with st.spinner(f"Testing {source}..."):
+                                try:
+                                    # For arXiv, get actual count using simulation method
+                                    if source.lower() == "arxiv":
+                                        # Use the same count method as simulation
+                                        count_result = DataAggregator.simulate_yield(edited_db_query, [source])
+                                        actual_count = count_result.get(source, 0)
+                                        
+                                        # Get top 10 papers for display
+                                        papers, _ = DataAggregator.fetch_all(
+                                            edited_db_query, 
+                                            [source], 
+                                            max_per_source=10, 
+                                            uploaded_files=[]
+                                        )
+                                        
+                                        # Store results in session state
+                                        if 'db_test_results' not in st.session_state:
+                                            st.session_state.db_test_results = {}
+                                        st.session_state.db_test_results[source] = {
+                                            'query': edited_db_query,
+                                            'papers': papers[:10],  # Top 10 papers for display
+                                            'total_found': actual_count  # Actual total from arXiv
+                                        }
+                                    else:
+                                        # For other databases, use regular method
+                                        all_papers, _ = DataAggregator.fetch_all(
+                                            edited_db_query, 
+                                            [source], 
+                                            max_per_source=1000,  # Get more to get accurate total
+                                            uploaded_files=[]
+                                        )
+                                        
+                                        # Store results in session state
+                                        if 'db_test_results' not in st.session_state:
+                                            st.session_state.db_test_results = {}
+                                        st.session_state.db_test_results[source] = {
+                                            'query': edited_db_query,
+                                            'papers': all_papers[:10],  # Top 10 papers for display
+                                            'total_found': len(all_papers)  # Total papers found
+                                        }
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error testing {source}: {str(e)}")
+                    
+                    if edited_db_query != current_query:
+                        st.session_state.per_db_queries[source] = edited_db_query
+                        st.session_state.search_simulation = None
+                    
+                    # Display top 10 results if available
+                    if 'db_test_results' in st.session_state and st.session_state.db_test_results is not None and source in st.session_state.db_test_results:
+                        test_result = st.session_state.db_test_results[source]
+                        
+                        if test_result['papers']:
+                            st.markdown("**Top 10 Results:**")
+                            for i, paper in enumerate(test_result['papers'], 1):
+                                with st.container():
+                                    st.markdown(f"**{i}.** {paper.title}")
+                                    st.caption(f"🔗 {paper.url}")
+                                    st.divider()
             
-            # Update session state when query changes
-            if edited_query != st.session_state.sim_query:
-                st.session_state.sim_query = edited_query
-                # Clear previous simulation results when query changes
-                st.session_state.search_simulation = None
-            
-            # Agentic AI Optimization Button - Per Source
+            # Action buttons
+            api_sources = [s for s in active_sources if s not in ["Local PDFs"]]
             col_optimize, col_sim, col_clear = st.columns([1, 1, 2])
             
             with col_optimize:
                 if st.button("🤖 AI Optimize Per Source", use_container_width=True, type="secondary"):
                     with st.spinner("AI optimizing search strings for each database..."):
                         per_source_results = AIService.optimize_search_string_per_source(
-                            st.session_state.sim_query,
+                            st.session_state.sim_query if edit_mode == "Unified Search String" else st.session_state.per_db_queries.get(api_sources[0], st.session_state.query),
                             st.session_state.pico,
                             model_name,
-                            [s for s in active_sources if s not in ["Local PDFs", "Big 3 Journals"]]
+                            api_sources
                         )
                         st.session_state.per_source_optimization = per_source_results
+                        # Update per-database queries with optimized versions
+                        for source, data in per_source_results.items():
+                            st.session_state.per_db_queries[source] = data['query']
                         st.session_state.search_simulation = {source: data["yield"] for source, data in per_source_results.items()}
                     st.rerun()
             
             with col_sim:
                 if st.button("🚀 Run Simulation", use_container_width=True, type="primary"):
-                    api_sources = [s for s in active_sources if s not in ["Local PDFs", "Big 3 Journals"]]
                     with st.spinner("Calculating yields..."):
-                        yield_results = DataAggregator.simulate_yield(st.session_state.sim_query, api_sources)
+                        # Simulate with individual queries per database
+                        yield_results = {}
+                        for source in api_sources:
+                            source_query = st.session_state.per_db_queries.get(source, st.session_state.query)
+                            source_yield = DataAggregator.simulate_yield(source_query, [source])
+                            yield_results.update(source_yield)
                         st.session_state.search_simulation = yield_results
                     st.rerun()
             
             with col_clear:
-                if st.session_state.search_simulation:
-                    if st.button("Clear Simulation", use_container_width=True):
+                # Clear both simulation and test results
+                clear_text = "Clear Results"
+                if st.session_state.search_simulation and st.session_state.get('db_test_results'):
+                    clear_text = "Clear All Results"
+                elif st.session_state.get('db_test_results'):
+                    clear_text = "Clear Test Results"
+                elif st.session_state.search_simulation:
+                    clear_text = "Clear Simulation"
+                    
+                if (st.session_state.search_simulation or st.session_state.get('db_test_results')):
+                    if st.button(clear_text, use_container_width=True):
                         st.session_state.search_simulation = None
+                        st.session_state.per_source_optimization = None
+                        st.session_state.db_test_results = None
                         st.rerun()
             
             # Display Simulation Results
             if st.session_state.search_simulation:
-                st.success("✅ Simulation complete!")
-                
                 # Check if we have per-source optimization results
                 if st.session_state.get('per_source_optimization'):
                     st.markdown("### 📊 Per-Source Optimized Results")
@@ -329,13 +655,24 @@ def main():
                             with col2:
                                 if st.button(f"Use for {source}", key=f"use_{source}"):
                                     st.session_state.sim_query = data['query']
+                                    # Update per-database queries
+                                    api_sources = [s for s in active_sources if s not in ["Local PDFs"]]
+                                    for src in api_sources:
+                                        st.session_state.per_db_queries[src] = data['query'] if src == source else st.session_state.per_db_queries.get(src, st.session_state.query)
                                     st.rerun()
                 else:
-                    # Standard simulation display
+                    # Enhanced simulation display with per-database queries
                     sim_rows = []
                     total_yield = 0
-                    for source, count in st.session_state.search_simulation.items():
-                        sim_rows.append({"Database": source, "Paper Count": count, "Query": st.session_state.sim_query[:50] + "..."})
+                    
+                    for source in api_sources:
+                        count = st.session_state.search_simulation.get(source, 0)
+                        query_preview = st.session_state.per_db_queries.get(source, st.session_state.query)[:50] + "..."
+                        sim_rows.append({
+                            "Database": source, 
+                            "Paper Count": count, 
+                            "Query Preview": query_preview
+                        })
                         if isinstance(count, int): 
                             total_yield += count
                     
@@ -344,16 +681,14 @@ def main():
                         st.dataframe(pd.DataFrame(sim_rows), hide_index=True, use_container_width=True)
                     with col2:
                         st.metric("Total Potential", f"{total_yield:,}", help="Aggregate potential results across all databases")
-                    
+                
                 # Option to apply optimized query to main search
-                if st.session_state.sim_query != st.session_state.query:
+                current_main_query = st.session_state.per_db_queries.get(api_sources[0], st.session_state.query)
+                if current_main_query != st.session_state.query:
                     if st.button("✅ Apply This Search String", use_container_width=True, type="primary"):
-                        st.session_state.query = st.session_state.sim_query
+                        st.session_state.query = current_main_query
                         st.success("Search string updated!")
                         st.rerun()
-        else:
-            st.info("Enter a research goal in the 'Search & Chat' tab first to enable simulation.")
-    
     # --- PAGE 3: ABSTRACT SCREENING ---
     elif current_page == "abstract":
         
@@ -379,25 +714,107 @@ def main():
                     
                     # 4. Screening Loop
                     for idx, p in enumerate(unique):
-                        res = AIService.screen_paper(
-                            p, 
-                            st.session_state.pico, 
-                            model_name, 
-                            st.session_state.inclusion_list, 
-                            st.session_state.exclusion_list
-                        )
+                        # Add criteria evaluations based on content analysis
+                        def evaluate_criteria_against_content(title, abstract, criteria_list, is_inclusion=True):
+                            """Evaluate criteria based on actual title/abstract content."""
+                            if not criteria_list:
+                                return {}
+                            
+                            results = {}
+                            content_text = f"{title} {abstract}".lower()
+                            
+                            for criterion in criteria_list:
+                                criterion_words = criterion.lower().split()
+                                # Remove common words and focus on meaningful terms
+                                stop_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'this', 'that', 'these', 'those'}
+                                key_terms = [w for w in criterion_words if len(w) > 2 and w not in stop_words]
+                                
+                                if key_terms:
+                                    matches = sum(1 for term in key_terms if term in content_text)
+                                    match_ratio = matches / len(key_terms)
+                                    
+                                    # Check if criterion is explicitly mentioned as NOT met
+                                    exclusion_phrases = ['not', 'no', 'without', 'lacking', 'absent', 'missing', 'none', 'never', 'failed to', 'did not', 'excluded']
+                                    has_exclusion_phrase = any(phrase in content_text for phrase in exclusion_phrases)
+                                    
+                                    # If exclusion phrases are found near criterion terms, mark as EXCLUDE
+                                    if has_exclusion_phrase and match_ratio > 0.3:
+                                        results[criterion] = "EXCLUDE"
+                                    # If good match (>50%), mark as INCLUDE
+                                    elif match_ratio > 0.5:
+                                        results[criterion] = "INCLUDE"
+                                    # If some match but not explicit, mark as UNSPECIFIED
+                                    elif match_ratio > 0.1:
+                                        results[criterion] = "UNSPECIFIED"
+                                    # No mention at all
+                                    else:
+                                        results[criterion] = "UNSPECIFIED"
+                                else:
+                                    results[criterion] = "UNSPECIFIED"
+                            
+                            return results
+
+                        def make_final_decision(criteria_evaluations, inclusion_criteria, exclusion_criteria):
+                            """Make final decision based on ALL criteria."""
+                            # Check if ALL inclusion criteria are met (INCLUDE or UNSPECIFIED)
+                            for criterion in inclusion_criteria:
+                                eval_result = criteria_evaluations.get(criterion, 'UNSPECIFIED')
+                                if eval_result == 'EXCLUDE':
+                                    return False, f"Excluded by inclusion criterion: {criterion}"
+                            
+                            # Check if ANY exclusion criteria are violated (EXCLUDE)
+                            for criterion in exclusion_criteria:
+                                eval_result = criteria_evaluations.get(criterion, 'UNSPECIFIED')
+                                if eval_result == 'EXCLUDE':
+                                    return False, f"Excluded by exclusion criterion: {criterion}"
+                            
+                            # If no exclusions and no inclusion violations, include
+                            return True, "All criteria satisfied"
+
+                        try:
+                            res = AIService.screen_paper(
+                                p, 
+                                st.session_state.pico, 
+                                model_name, 
+                                st.session_state.inclusion_list, 
+                                st.session_state.exclusion_list
+                            )
+                        except Exception as e:
+                            # Fallback if screening fails
+                            res = {
+                                "decision": "Include",
+                                "bucket": "Screening error",
+                                "reason": f"Screening failed: {str(e)[:50]}",
+                                **{criterion: "ERROR" for criterion in st.session_state.get('inclusion_list', []) + st.session_state.get('exclusion_list', [])}
+                            }
                         
-                        decision_val = str(res.get('decision', 'Exclude')).strip().lower()
-                        is_included = "include" in decision_val
+                        # Get criteria evaluations from AI response first, then fallback to content analysis
+                        ai_criteria = {criterion: res.get(criterion, 'ERROR') for criterion in st.session_state.get('inclusion_list', []) + st.session_state.get('exclusion_list', [])}
+                        content_criteria = evaluate_criteria_against_content(p.title, p.abstract, st.session_state.get('inclusion_list', []) + st.session_state.get('exclusion_list', []))
+                        
+                        # Use AI criteria when available, otherwise use content analysis
+                        final_criteria = {}
+                        for criterion in st.session_state.get('inclusion_list', []) + st.session_state.get('exclusion_list', []):
+                            if ai_criteria.get(criterion) not in ['ERROR', 'EXCLUDE', 'INCLUDE']:
+                                final_criteria[criterion] = ai_criteria[criterion]
+                            else:
+                                final_criteria[criterion] = content_criteria.get(criterion, 'UNSPECIFIED')
+                        
+                        # Make final decision based on ALL criteria
+                        is_included, decision_reason = make_final_decision(
+                            final_criteria, 
+                            st.session_state.get('inclusion_list', []), 
+                            st.session_state.get('exclusion_list', [])
+                        )
                         
                         screened.append({
                             "Source": p.source,
                             "Title": p.title,
                             "URL": p.url,
                             "Decision": "Include" if is_included else "Exclude",
-                            "Reason": res.get('reason', 'N/A'),
+                            "Reason": decision_reason,
                             "Abstract": p.abstract,
-                            **{criterion: res.get(criterion, 'ERROR') for criterion in st.session_state.get('inclusion_list', []) + st.session_state.get('exclusion_list', [])}
+                            **final_criteria
                         })
 
                         if not is_included:
@@ -514,8 +931,10 @@ def main():
                             return 'background-color: #d4edda; color: #155724; font-weight: 500; padding: 8px;'
                         elif 'EXCLUDE' in str(val):
                             return 'background-color: #f8d7da; color: #721c24; font-weight: 500; padding: 8px;'
-                        else:
+                        elif 'UNSPECIFIED' in str(val):
                             return 'background-color: #fff3cd; color: #856404; font-weight: 500; padding: 8px;'
+                        else:
+                            return 'background-color: #e2e3e5; color: #383d41; font-weight: 500; padding: 8px;'
                     
                     # Apply styling to Decision column if it exists
                     styled_ft_results = st.session_state.full_text_results.copy()
@@ -549,7 +968,286 @@ def main():
         else:
             st.info("Complete the Abstract Screening tab first to unlock Full-Text evidence.")
     
-    # --- PAGE 5: PRISMA FLOW ---
+    # --- PAGE 5: TEXT EXTRACTION ---
+    elif current_page == "extraction":
+        
+
+        if st.session_state.results is not None:
+            passed = st.session_state.results[st.session_state.results['Decision'].str.contains("Include")]
+            
+            if not passed.empty:
+                st.info(f"🎯 {len(passed)} papers available for table extraction.")
+                
+                # Table extraction options
+                st.markdown("### Extraction Settings")
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    extraction_type = st.selectbox(
+                        "Table Type to Extract:",
+                        ["All Tables", "Demographics", "Outcomes", "Interventions", "Statistical Results", "Adverse Events"]
+                    )
+                
+                with col2:
+                    output_format = st.selectbox(
+                        "Output Format:",
+                        ["DataFrame", "CSV Export", "JSON Export", "Excel Export"]
+                    )
+                
+                if st.button("🚀 Start Table Extraction", type="primary", use_container_width=True):
+                    with st.status("📊 Extracting tables from papers...", expanded=True) as status:
+                        extracted_data = []
+                        
+                        for idx, (_, row) in enumerate(passed.iterrows()):
+                            paper_title = row.get('Title', 'Unknown Paper')
+                            paper_url = row.get('URL', '')
+                            paper_source = row.get('Source', 'Unknown')
+                            
+                            # Extract tables from full text (placeholder for actual extraction)
+                            extracted_tables = extract_tables_from_paper(paper_title, paper_url, paper_source, extraction_type)
+                            
+                            extracted_data.append({
+                                "Paper_Title": paper_title,
+                                "Paper_URL": paper_url,
+                                "Source": paper_source,
+                                "Extracted_Tables": extracted_tables
+                            })
+                        
+                        st.session_state.extracted_papers_data = extracted_data
+                        status.update(label=f"✅ Tables extracted from {len(extracted_data)} papers!", state="complete")
+                        st.rerun()
+                
+                # Display extracted tables if available
+                    
+                    for idx, (_, row) in enumerate(passed.iterrows()):
+                        paper_title = row.get('Title', 'Unknown Paper')
+                        paper_url = row.get('URL', '')
+                        paper_source = row.get('Source', 'Unknown')
+                        
+                        # Extract tables from full text (placeholder for actual extraction)
+                        tables = []
+                        
+                        # Method 1: Try to fetch and parse HTML content (for online papers)
+                        if paper_url and paper_url.startswith('http'):
+                            st.info(f" Extracting tables from: {paper_title}")
+                            
+                            response = requests.get(paper_url, timeout=20)
+                            if response.status_code == 200:
+                                # Parse HTML content
+                                soup = BeautifulSoup(response.content, 'html.parser')
+                                
+                                # Method 1a: Look for HTML tables
+                                html_tables = soup.find_all('table')
+                                for i, table in enumerate(html_tables):
+                                    table_data = []
+                                    rows = table.find_all('tr')
+                                    
+                                    for row in rows:
+                                        row_data = []
+                                        cells = row.find_all(['td', 'th'])
+                                        for cell in cells:
+                                            text = cell.get_text(strip=True)
+                                            row_data.append(text)
+                                        
+                                        if row_data:  # Only add non-empty rows
+                                            table_data.append(row_data)
+                                    
+                                    if table_data and len(table_data) > 1:  # At least header + 1 row
+                                        table_type = classify_table_type(table_data, extraction_type)
+                                        if extraction_type == "All Tables" or table_type == extraction_type:
+                                            tables.append({
+                                                'title': f"Table {i+1} (HTML)",
+                                                'type': table_type,
+                                                'data': table_data,
+                                                'source': 'HTML'
+                                            })
+                                
+                                # Method 1b: Look for table-like structures in divs
+                                if not html_tables:
+                                    # Look for div elements that might contain tables
+                                    potential_tables = soup.find_all(['div'], class_=re.compile(r'.*table.*', re.I))
+                                    for i, div in enumerate(potential_tables):
+                                        div_text = div.get_text(strip=True)
+                                        if div_text and len(div_text.split('\n')) > 2:
+                                            # Try to parse as table
+                                            lines = div_text.split('\n')
+                                            table_data = []
+                                            for line in lines:
+                                                if '|' in line or '\t' in line or line.count('   ') >= 2:
+                                                    if '|' in line:
+                                                        row = [cell.strip() for cell in line.split('|') if cell.strip()]
+                                                    elif '\t' in line:
+                                                        row = [cell.strip() for cell in line.split('\t') if cell.strip()]
+                                                    else:
+                                                        row = [cell.strip() for cell in line.split('  ') if cell.strip()]
+                                                    
+                                                    if len(row) > 1:
+                                                        table_data.append(row)
+                                            
+                                            if table_data and len(table_data) > 1:
+                                                tables.append({
+                                                    'title': f"Table {i+1} (Div)",
+                                                    'type': classify_table_type(table_data, extraction_type),
+                                                    'data': table_data,
+                                                    'source': 'Div'
+                                                })
+                                
+                                # Method 1c: Look for pre-formatted text in entire page
+                                if not tables:
+                                    text_content = soup.get_text()
+                                    lines = text_content.split('\n')
+                                    current_table = []
+                                    
+                                    for line_num, line in enumerate(lines):
+                                        # Look for table-like patterns (more aggressive)
+                                        if any(sep in line for sep in ['|', '\t', '   ', '    ']):
+                                            # Split by common separators
+                                            if '|' in line:
+                                                row = [cell.strip() for cell in line.split('|') if cell.strip()]
+                                            elif '\t' in line:
+                                                row = [cell.strip() for cell in line.split('\t') if cell.strip()]
+                                            elif '    ' in line:
+                                                row = [cell.strip() for cell in line.split('    ') if cell.strip()]
+                                            elif '   ' in line:
+                                                row = [cell.strip() for cell in line.split('   ') if cell.strip()]
+                                            else:
+                                                row = [cell.strip() for cell in line.split('  ') if cell.strip()]
+                                            
+                                            if len(row) > 1:  # At least 2 columns
+                                                current_table.append(row)
+                                        else:
+                                            # End of table if we hit a non-table line after having table data
+                                            if current_table and len(current_table) > 2:  # At least 3 rows for a real table
+                                                table_type = classify_table_type(current_table, extraction_type)
+                                                if extraction_type == "All Tables" or table_type == extraction_type:
+                                                    tables.append({
+                                                        'title': f"Table {len(tables)+1} (Text)",
+                                                        'type': table_type,
+                                                        'data': current_table,
+                                                        'source': 'Text'
+                                                    })
+                                                current_table = []
+                                    
+                                    # Add any remaining table
+                                    if current_table and len(current_table) > 2:
+                                        table_type = classify_table_type(current_table, extraction_type)
+                                        if extraction_type == "All Tables" or table_type == extraction_type:
+                                            tables.append({
+                                                'title': f"Table {len(tables)+1} (Text)",
+                                                'type': table_type,
+                                                'data': current_table,
+                                                'source': 'Text'
+                                            })
+                                
+                                # Method 1d: Look for data in <pre> tags
+                                if not tables:
+                                    pre_tags = soup.find_all('pre')
+                                    for i, pre in enumerate(pre_tags):
+                                        pre_text = pre.get_text()
+                                        if pre_text and len(pre_text.split('\n')) > 2:
+                                            lines = pre_text.split('\n')
+                                            table_data = []
+                                            for line in lines:
+                                                if '|' in line or '\t' in line or line.count('   ') >= 2:
+                                                    if '|' in line:
+                                                        row = [cell.strip() for cell in line.split('|') if cell.strip()]
+                                                    elif '\t' in line:
+                                                        row = [cell.strip() for cell in line.split('\t') if cell.strip()]
+                                                    else:
+                                                        row = [cell.strip() for cell in line.split('  ') if cell.strip()]
+                                                    
+                                                    if len(row) > 1:
+                                                        table_data.append(row)
+                                            
+                                            if table_data and len(table_data) > 1:
+                                                tables.append({
+                                                    'title': f"Table {i+1} (Pre)",
+                                                    'type': classify_table_type(table_data, extraction_type),
+                                                    'data': table_data,
+                                                    'source': 'Pre'
+                                                })
+                            else:
+                                st.warning(f" Could not access {paper_url} (status: {response.status_code})")
+                        
+                        extracted_data.append({
+                            "Paper_Title": paper_title,
+                            "Paper_URL": paper_url,
+                            "Source": paper_source,
+                            "Extracted_Tables": tables
+                        })
+                    
+                    st.session_state.extracted_papers_data = extracted_data
+                    status.update(label=f" Tables extracted from {len(extracted_data)} papers!", state="complete")
+                    st.rerun()
+            
+            # Display extracted tables if available
+            if 'extracted_papers_data' in st.session_state and st.session_state.extracted_papers_data:
+                st.success(f" Tables extracted from {len(st.session_state.extracted_papers_data)} papers")
+                
+                # Display each paper's tables
+                for paper_data in st.session_state.extracted_papers_data:
+                    with st.expander(f"📄 {paper_data['Paper_Title']}", expanded=False):
+                        col1, col2 = st.columns([3, 1])
+                        
+                        with col1:
+                            st.markdown(f"**Source:** {paper_data['Source']}")
+                            if paper_data['Paper_URL']:
+                                st.link_button("📖 View Full Paper", paper_data['Paper_URL'], use_container_width=True)
+                        
+                        with col2:
+                            st.metric("Tables Found", len(paper_data['Extracted_Tables']))
+                        
+                        # Display extracted tables
+                        if paper_data['Extracted_Tables']:
+                            st.markdown("### 📊 Extracted Tables")
+                            
+                            # Use tabs instead of nested expanders
+                            table_tabs = st.tabs([f"📋 Table {i+1}: {table['title']}" for i, table in enumerate(paper_data['Extracted_Tables'])])
+                            
+                            for i, (table, tab) in enumerate(zip(paper_data['Extracted_Tables'], table_tabs)):
+                                with tab:
+                                    # Convert table data to DataFrame for display
+                                    if table['data']:
+                                        df = pd.DataFrame(table['data'])
+                                        st.dataframe(df, use_container_width=True)
+                                        
+                                        # Table metadata
+                                        col_meta1, col_meta2, col_meta3 = st.columns(3)
+                                        with col_meta1:
+                                            st.metric("Rows", len(table['data']))
+                                        with col_meta2:
+                                            st.metric("Columns", len(table['data'][0]) if table['data'] else 0)
+                                        with col_meta3:
+                                            st.metric("Type", table['type'])
+                                        
+                                        # Export individual table
+                                        if st.button(f"📥 Export Table {i+1}", key=f"export_table_{paper_data['Paper_Title'][:20]}_{i}"):
+                                            csv_data = df.to_csv(index=False)
+                                            st.download_button(
+                                                label=f"Download Table {i+1} CSV",
+                                                data=csv_data,
+                                                file_name=f"table_{i+1}_{paper_data['Paper_Title'][:30].replace(' ', '_')}.csv",
+                                                mime="text/csv"
+                                            )
+                        else:
+                            st.info("No tables found in this paper.")
+                
+                if st.button("📄 Export All Tables to JSON", use_container_width=True):
+                    import json
+                    json_data = json.dumps(st.session_state.extracted_papers_data, indent=2)
+                    st.download_button(
+                        label="Download All Tables (JSON)",
+                        data=json_data,
+                        file_name="all_extracted_tables.json",
+                        mime="application/json"
+                    )
+                
+            else:
+                st.info("No papers have passed screening yet. Complete the Abstract Screening tab first.")
+        else:
+            st.info("Complete the Abstract Screening tab first to unlock Table Extraction.")
+    
+    # --- PAGE 6: PRISMA FLOW ---
     elif current_page == "prisma":
         UIComponents.render_prisma_flow()
 

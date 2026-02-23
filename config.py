@@ -30,7 +30,6 @@ class Config:
 class DataSource(Enum):
     """Available data sources for literature search."""
     PUBMED = "PubMed"
-    BIG3_JOURNALS = "Big 3 Journals"
     ARXIV = "arXiv"
     BIORXIV = "bioRxiv"
     LOCAL_PDF = "Local PDFs"

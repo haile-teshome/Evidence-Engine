@@ -45,10 +45,11 @@ class UIComponents:
             
             # Navigation options with Material icons
             nav_items = [
-                ("home", ":material/home:", "Home"),
+                ("home", ":material/chat:", "Chat"),
                 ("simulation", ":material/analytics:", "Simulation"),
                 ("abstract", ":material/article:", "Abstract Screening"),
                 ("fulltext", ":material/lab_research:", "Full-Text Evidence"),
+                ("extraction", ":material/description:", "Text Extraction"),
                 ("prisma", ":material/account_tree:", "PRISMA Flow")
             ]
             
@@ -144,8 +145,10 @@ class UIComponents:
                 return 'background-color: #d4edda; color: #155724; font-weight: 500; padding: 8px;'
             elif 'EXCLUDE' in str(val):
                 return 'background-color: #f8d7da; color: #721c24; font-weight: 500; padding: 8px;'
-            else:
+            elif 'UNSPECIFIED' in str(val):
                 return 'background-color: #fff3cd; color: #856404; font-weight: 500; padding: 8px;'
+            else:
+                return 'background-color: #e2e3e5; color: #383d41; font-weight: 500; padding: 8px;'
 
         # Apply styling to Decision column if it exists
         styled_df = df.copy()
@@ -225,13 +228,51 @@ class UIComponents:
             identification_label = f"Records identified from:\\nDatabases (n = {counts['identified']})\\nRegisters (n = 0)"
 
 
-        reasons_dict = counts.get('ft_exclusion_breakdown', {})
+        reasons_dict = counts.get('exclusion_breakdown', {})
         if reasons_dict and ft_excluded_total > 0:
-            sorted_reasons = sorted(reasons_dict.items(), key=lambda x: x[1], reverse=True)[:5]
-            reasons_list = [f"• {r}: (n={c})" for r, c in sorted_reasons]
-            reasons_text = "\\n".join(reasons_list)
+            # Create a cleaner, more visual breakdown
+            sorted_reasons = sorted(reasons_dict.items(), key=lambda x: x[1], reverse=True)
+            
+            # Group reasons by category for better visualization
+            def categorize_reason(reason):
+                reason_lower = reason.lower()
+                if any(word in reason_lower for word in ['not', 'no', 'without', 'lacking', 'absent']):
+                    return "Missing Criteria"
+                elif any(word in reason_lower for word in ['wrong', 'incorrect', 'inappropriate']):
+                    return "Wrong Type"
+                elif any(word in reason_lower for word in ['duplicate', 'similar', 'repeat']):
+                    return "Duplicates"
+                elif any(word in reason_lower for word in ['language', 'translation', 'english']):
+                    return "Language"
+                elif any(word in reason_lower for word in ['date', 'year', 'old', 'recent']):
+                    return "Time Period"
+                elif any(word in reason_lower for word in ['quality', 'method', 'study']):
+                    return "Study Quality"
+                else:
+                    return "Other"
+            
+            # Categorize and count reasons
+            categorized_reasons = {}
+            for reason, count in sorted_reasons:
+                category = categorize_reason(reason)
+                if category not in categorized_reasons:
+                    categorized_reasons[category] = 0
+                categorized_reasons[category] += count
+            
+            # Create a more visual representation
+            reasons_lines = []
+            for category, count in sorted(categorized_reasons.items(), key=lambda x: x[1], reverse=True):
+                percentage = (count / ft_excluded_total) * 100
+                reasons_lines.append(f" {category}: {count} papers ({percentage:.1f}%)")
+            
+            # Add top 3 specific reasons for detail
+            top_reasons = sorted_reasons[:3]
+            reasons_lines.append("\n **Top Exclusion Reasons:**")
+            for i, (reason, count) in enumerate(top_reasons, 1):
+                percentage = (count / ft_excluded_total) * 100
+                reasons_lines.append(f"  {i}. {reason[:60]}{'...' if len(reason) > 60 else ''} ({count} papers, {percentage:.1f}%)")
         else:
-            reasons_text = ""
+            reasons_lines = ["No papers were excluded during screening."]
 
         dot = graphviz.Digraph(comment='PRISMA 2020')
         dot.attr(rankdir='TB', nodesep='0.5', ranksep='0.4')
@@ -269,8 +310,9 @@ class UIComponents:
         
         # ROW 4: Eligibility (STAGE 2)
         dot.node('N6_elig', f"Reports assessed for eligibility\\n(n = {inc_n})")
-        # Updated to show the Stage 2 specific buckets
-        dot.node('N6_excl_side', f"Reports excluded (n={ft_excluded_total}):\\n{reasons_text}", width='4')
+        # Updated to show categorized exclusion reasons
+        reasons_text = "\\n".join(reasons_lines) if reasons_lines else "No exclusions"
+        dot.node('N6_excl_side', f"Reports excluded (n={ft_excluded_total}):\\n{reasons_text}", width='5')
         
         # ROW 5: Final Result
         dot.node('N7_final', f"Studies included in review\\n(n = {final_n})")
