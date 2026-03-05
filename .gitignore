@@ -14,5 +14,4 @@ __pycache__/
 .env.*
 
 # Streamlit/OS
-.streamlit/config.toml
 .DS_Store

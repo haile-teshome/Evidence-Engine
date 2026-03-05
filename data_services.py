@@ -8,7 +8,6 @@ from typing import List, Dict, Any, Tuple
 import streamlit as st
 from config import Config, DataSource
 from models import Paper
-from utils import QueryCleaner
 import time
 
 _last_request_time = 0.0
@@ -141,22 +140,18 @@ class TopJournalsService:
             
             papers = []
             for article in records['PubmedArticle']:
-                citation = article['MedlineCitation']
-                abstract_text = citation['Article'].get('Abstract', {}).get(
-                    'AbstractText', ["N/A"]
-                )[0]
-                
+                citation = article['MedlineCitation']['Article']
                 papers.append(Paper(
-                    source=DataSource.BIG3_JOURNALS.value,
+                    source=DataSource.PUBMED.value,
                     id=str(citation['PMID']),
-                    title=citation['Article']['ArticleTitle'],
-                    abstract=str(abstract_text)
+                    title=citation['ArticleTitle'],
+                    abstract=str(citation['Abstract']['AbstractText'])
                 ))
             
             return papers
             
         except Exception as e:
-            st.error(f"Top journals fetch error: {e}")
+            st.error(f"PubMed fetch error: {e}")
             return []
 
 
@@ -166,6 +161,7 @@ class ArXivService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         """Fetch papers from arXiv."""
+        from utils import QueryCleaner
         clean_query = QueryCleaner.clean_for_general_search(query)
         params = {
             'search_query': f'all:{clean_query}',
@@ -184,7 +180,7 @@ class ArXivService:
             
             # Check for HTTP error status
             if response.status_code != 200:
-                st.error(f"ArXiv API returned status {response.status_code}")
+                print(f"ArXiv API returned status {response.status_code} - skipping")
                 return []
             
             root = ET.fromstring(response.content)
@@ -205,7 +201,7 @@ class ArXivService:
                 ))
             return papers
         except Exception as e:
-            st.error(f"ArXiv fetch error: {e}")
+            print(f"ArXiv fetch error (silent): {e}")
             return []
 
 class BioRxivService:
@@ -343,7 +339,6 @@ class DataAggregator:
     
     SERVICE_MAP = {
         DataSource.PUBMED.value: PubMedService.fetch,
-        # DataSource.BIG3_JOURNALS.value: TopJournalsService.fetch,
         DataSource.ARXIV.value: ArXivService.fetch,
         DataSource.BIORXIV.value: BioRxivService.fetch,
         "Semantic Scholar": SemanticScholarService.fetch,
@@ -363,8 +358,8 @@ class DataAggregator:
         
         for source in active_sources:
             papers = []
+            # Status text placeholder - only show errors, not searching messages
             status_text = st.empty()
-            status_text.write(f"🔍 Searching {source}...")
             
             try:
                 # 1. Handle local files
@@ -383,11 +378,7 @@ class DataAggregator:
                 all_papers.extend(papers)
                 source_counts[source] = count
                 
-                # Update the status placeholder with the final count
-                if count > 0:
-                    status_text.write(f"✅ {source}: {count} papers found")
-                else:
-                    status_text.write(f"ℹ️ {source}: 0 papers found")
+                # Status updates removed - now handled by optimization progress callback
 
             except Exception as e:
                 # Catch failures so one source doesn't break the entire search
@@ -406,91 +397,142 @@ class DataAggregator:
         Returns the absolute total of papers matching the query in each database 
         without downloading full records.
         """
+        from utils import QueryCleaner
         results = {}
         clean_query = QueryCleaner.clean_for_general_search(query)
         
         for source in active_sources:
             try:
+                print(f"Processing source: {source}")
+                
                 # 1. PubMed & Top Journals
-                if source in [DataSource.PUBMED.value, DataSource.BIG3_JOURNALS.value]:
+                if source == DataSource.PUBMED.value:
                     Entrez.email = Config.ENTREZ_EMAIL
                     
-                    # Construct search term based on source type
+                    # Construct search term for PubMed
                     search_term = query
-                    if source == DataSource.BIG3_JOURNALS.value:
-                        journal_filter = ' OR '.join([
-                            '"Am J Epidemiol"[Journal]',
-                            '"Int J Epidemiol"[Journal]',
-                            '"Eur J Epidemiol"[Journal]'
-                        ])
-                        search_term = f"({query}) AND ({journal_filter})"
                     
                     # retmax=0 makes the request instant as no records are downloaded
-                    handle = Entrez.esearch(db="pubmed", term=search_term, retmax=0)
-                    record = Entrez.read(handle)
-                    count = record.get("Count", 0)
-                    results[source] = int(count) if str(count).isdigit() else 0
+                    try:
+                        handle = Entrez.esearch(db="pubmed", term=search_term, retmax=0)
+                        record = Entrez.read(handle)
+                        if record is not None:
+                            count = record.get("Count", 0)
+                            results[source] = int(count) if str(count).isdigit() else 0
+                        else:
+                            results[source] = 0
+                    except Exception as e:
+                        print(f"PubMed search error for {source}: {e}")
+                        results[source] = 0
 
                 # 2. ArXiv (Parsing OpenSearch XML for total results)
                 elif source == DataSource.ARXIV.value:
-                    url = f"{Config.ARXIV_API_URL}?search_query=all:{clean_query}&max_results=0"
-                    resp = throttled_request(url)
-                    root = ET.fromstring(resp.content)
-                    # ArXiv uses opensearch namespace for result counts
-                    ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
-                    total_node = root.find('os:totalResults', ns)
-                    if total_node is not None and total_node.text:
-                        total_text = total_node.text.strip()
-                        results[source] = int(total_text) if total_text.isdigit() else 0
-                    else:
+                    try:
+                        url = f"{Config.ARXIV_API_URL}?search_query=all:{clean_query}&max_results=0"
+                        resp = throttled_request(url)
+                        root = ET.fromstring(resp.content)
+                        
+                        # Debug: Print the XML response to see what we're getting
+                        print(f"ArXiv XML response for query '{clean_query}':")
+                        print(resp.text[:500] + "..." if len(resp.text) > 500 else resp.text)
+                        
+                        # ArXiv uses opensearch namespace for result counts
+                        ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
+                        total_node = root.find('os:totalResults', ns)
+                        
+                        if total_node is not None and total_node.text:
+                            total_text = total_node.text.strip()
+                            print(f"ArXiv totalResults text: '{total_text}'")
+                            
+                            # Try to convert to int, handle non-numeric gracefully
+                            try:
+                                results[source] = int(total_text)
+                            except ValueError:
+                                # If not a pure number, try to extract digits
+                                import re
+                                digits = re.findall(r'\d+', total_text)
+                                if digits:
+                                    results[source] = int(''.join(digits))
+                                else:
+                                    print(f"Could not extract numeric count from: '{total_text}'")
+                                    results[source] = 0
+                        else:
+                            print("ArXiv totalResults node not found")
+                            results[source] = 0
+                    except Exception as e:
+                        print(f"ArXiv search error for {source}: {e}")
+                        import traceback
+                        traceback.print_exc()
                         results[source] = 0
 
                 # 3. BioRxiv (Metadata-only request)
                 elif source == DataSource.BIORXIV.value:
-                    # BioRxiv API provides counts for a date range in the 'messages' field
-                    end_date = datetime.now()
-                    start_date = end_date - timedelta(days=Config.BIORXIV_LOOKBACK_DAYS)
-                    date_str = f"{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
-                    
-                    # We use the 'details' endpoint which returns a 'messages' count for the range
-                    url = f"{Config.BIORXIV_API_URL}/{date_str}/0"
-                    resp = throttled_request(url).json()
-                    
-                    # Note: BioRxiv count is for the time window; keyword filtering 
-                    # for counts usually requires fetching, so this is an upper-bound estimate.
-                    messages = resp.get('messages', [])
-                    if messages:
-                        total = messages[0].get('total', 0)
-                        results[source] = int(total) if str(total).isdigit() else 0
-                    else:
+                    try:
+                        # BioRxiv API provides counts for a date range in the 'messages' field
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=Config.BIORXIV_LOOKBACK_DAYS)
+                        date_str = f"{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+                        
+                        # We use the 'details' endpoint which returns a 'messages' count for the range
+                        url = f"{Config.BIORXIV_API_URL}/{date_str}/0"
+                        resp = throttled_request(url).json()
+                        
+                        # Note: BioRxiv count is for the time window; keyword filtering 
+                        # for counts usually requires fetching, so this is an upper-bound estimate.
+                        messages = resp.get('messages', [])
+                        if messages:
+                            total = messages[0].get('total', 0)
+                            results[source] = int(total) if str(total).isdigit() else 0
+                        else:
+                            results[source] = 0
+                    except Exception as e:
+                        print(f"BioRxiv search error for {source}: {e}")
                         results[source] = 0
 
                 # 4. Semantic Scholar (Accessing 'total' in JSON response)
                 elif source == "Semantic Scholar":
-                    params = {'query': query, 'limit': 0} 
-                    headers = {'x-api-key': Config.SEMANTIC_SCHOLAR_KEY} if Config.SEMANTIC_SCHOLAR_KEY else {}
-                    url = "https://api.semanticscholar.org/graph/v1/paper/search"
-                    resp = throttled_request(url, params=params, headers=headers).json()
-                    total = resp.get('total', 0)
-                    results[source] = int(total) if str(total).isdigit() else 0
+                    try:
+                        params = {'query': query, 'limit': 0} 
+                        headers = {'x-api-key': Config.SEMANTIC_SCHOLAR_KEY} if Config.SEMANTIC_SCHOLAR_KEY else {}
+                        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+                        resp = throttled_request(url, params=params, headers=headers).json()
+                        total = resp.get('total', 0)
+                        results[source] = int(total) if str(total).isdigit() else 0
+                    except Exception as e:
+                        print(f"Semantic Scholar search error for {source}: {e}")
+                        results[source] = 0
 
                 # 5. CORE (Accessing 'totalHits' in JSON response)
                 elif source == "CORE":
-                    headers = {"Authorization": f"Bearer {Config.CORE_API_KEY}"} if Config.CORE_API_KEY else {}
-                    # CORE v3 uses 'limit: 0' for count-only queries
-                    payload = {"q": query, "limit": 0}
-                    resp = throttled_request(Config.CORE_API_URL, params=payload, headers=headers).json()
-                    total_hits = resp.get('totalHits', 0)
-                    results[source] = int(total_hits) if str(total_hits).isdigit() else 0
+                    try:
+                        headers = {"Authorization": f"Bearer {Config.CORE_API_KEY}"} if Config.CORE_API_KEY else {}
+                        # CORE v3 uses 'limit: 0' for count-only queries
+                        payload = {"q": query, "limit": 0}
+                        resp = throttled_request(Config.CORE_API_URL, params=payload, headers=headers, method="POST").json()
+                        total_hits = resp.get('totalHits', 0)
+                        results[source] = int(total_hits) if str(total_hits).isdigit() else 0
+                    except Exception as e:
+                        print(f"CORE search error for {source}: {e}")
+                        results[source] = 0
 
                 # 6. Local PDFs (Current count in session)
                 elif source == DataSource.LOCAL_PDF.value:
-                    # Accessing papers already loaded in the aggregator if available
-                    results[source] = len(st.session_state.get('uploaded_files', []))
+                    try:
+                        # Accessing papers already loaded in the aggregator if available
+                        results[source] = len(st.session_state.get('uploaded_files', []))
+                    except Exception as e:
+                        print(f"Local PDFs error for {source}: {e}")
+                        results[source] = 0
+                        
+                else:
+                    print(f"Unknown source: {source}")
+                    results[source] = 0
 
             except Exception as e:
-                # Log error and default to 0 to prevent the UI from crashing
-                print(f"Error simulating yield for {source}: {e}")
+                # This is the outer catch-all for any unexpected errors
+                print(f"Unexpected error simulating yield for {source}: {e}")
+                import traceback
+                traceback.print_exc()  # Print full stack trace
                 results[source] = 0
                 
         return results
@@ -498,6 +540,7 @@ class DataAggregator:
     @staticmethod
     def get_total_counts(query: str, sources: List[str]) -> Dict[str, int]:
         """Fetches only the total result count for a query from selected sources."""
+        from utils import QueryCleaner
         results = {}
         clean_query = QueryCleaner.clean_for_general_search(query)
         
@@ -577,6 +620,7 @@ class DataAggregator:
         # arXiv Count
         if "arXiv" in selected_sources:
             try:
+                from utils import QueryCleaner
                 clean_arxiv_query = QueryCleaner.clean_for_general_search(query)
                 url = f"{Config.ARXIV_API_URL}?search_query=all:{urllib.parse.quote(clean_arxiv_query)}&max_results=0"
                 resp = throttled_request(url)

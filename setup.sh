@@ -6,7 +6,7 @@
 
 echo "--- Initializing Evidence Engine Setup ---"
 
-# 1. Create Virtual Environment
+# Create Virtual Environment
 if [ ! -d "venv" ]; then
     echo "Status: Creating virtual environment..."
     python3 -m venv venv
@@ -14,14 +14,14 @@ else
     echo "Status: Virtual environment already exists."
 fi
 
-# 2. Activate Environment
+# Activate Environment
 source venv/bin/activate
 
-# 3. Upgrade Core Pip Tools
+# Upgrade Core Pip Tools
 echo "Status: Upgrading pip and installer tools..."
 pip install --upgrade pip setuptools wheel
 
-# 4. Install Dependencies with Conflict Resolution
+# Install Dependencies with Conflict Resolution
 # We force-install these specific versions first to prevent common LangChain/Streamlit conflicts
 echo "Status: Installing dependencies (this may take a minute)..."
 pip install packaging==24.1 requests==2.32.3
@@ -33,7 +33,7 @@ else
     exit 1
 fi
 
-# 5. Check for Graphviz (System Dependency)
+# Check for Graphviz 
 # Required for rendering PRISMA Flow Diagrams
 if ! command -v dot &> /dev/null; then
     echo "⚠️  Warning: Graphviz (system binary) not found."
@@ -41,7 +41,7 @@ if ! command -v dot &> /dev/null; then
     echo "   Install via: 'brew install graphviz' (Mac) or 'sudo apt install graphviz' (Linux)"
 fi
 
-# 6. Initialize Local AI (Ollama)
+# Initialize Local AI (Ollama)
 if command -v ollama &> /dev/null; then
     echo "Status: Ollama detected. Pulling default model (llama3)..."
     ollama pull llama3
@@ -50,7 +50,7 @@ else
     echo "   Download it from: https://ollama.ai"
 fi
 
-# 7. Final Verification
+# Verification
 echo "Status: Running dependency integrity check..."
 pip check
 

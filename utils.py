@@ -1,11 +1,13 @@
 import re
 import json
 import streamlit as st
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable
+from dataclasses import dataclass
 
 from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
 from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage 
 
 from config import Config
@@ -15,17 +17,88 @@ from models import Paper, PICOCriteria, ScreeningResult
 
 class AIService:
     @staticmethod
+    def screen_single_paper(paper: Paper, pico: PICOCriteria, model_name: str, api_keys: dict) -> Tuple[str, ScreeningResult]:
+        """
+        Worker Agent: Screens one paper against PICO criteria.
+        Returns a tuple of (paper_id, ScreeningResult).
+        """
+        # Pass API keys explicitly for thread safety in parallel execution
+        model = AIService.get_model_with_keys(model_name, api_keys)
+        if not model:
+            return paper.id, ScreeningResult(decision="ERROR", reason="Model initialization failed")
+
+        system_msg = SystemMessage(content="You are a clinical research screener. Evaluate if the study meets the Inclusion/Exclusion criteria.")
+        
+        prompt = f"""
+        Screen the following paper based on the PICO framework and criteria.
+        
+        PICO: {pico.to_dict()}
+        
+        Paper Title: {paper.title}
+        Abstract: {paper.abstract}
+        
+        Return a JSON object:
+        {{
+            "decision": "INCLUDE" or "EXCLUDE",
+            "reason": "Brief explanation",
+            "design": "Study design type",
+            "sample_size": "N=...",
+            "risk_of_bias": "High/Low/Unclear"
+        }}
+        """
+        try:
+            response = model.invoke([system_msg, HumanMessage(content=prompt)])
+            data = AIService._extract_json(response.content)
+            if data:
+                return paper.id, ScreeningResult(**data)
+        except Exception as e:
+            return paper.id, ScreeningResult(decision="ERROR", reason=f"Worker error: {str(e)}")
+        
+        return paper.id, ScreeningResult(decision="EXCLUDE", reason="Failed to parse AI response")
+
+    @staticmethod
+    def get_model_with_keys(model_name: str, keys: dict):
+        """Thread-safe model initializer that doesn't rely on st.session_state."""
+        name_lower = model_name.lower()
+        if "gpt" in name_lower:
+            return ChatOpenAI(model=model_name, api_key=keys.get('openai'), temperature=0)
+        elif "claude" in name_lower:
+            return ChatAnthropic(model=model_name, api_key=keys.get('anthropic'), temperature=0)
+        # Add Gemini and Ollama logic following the same pattern...
+        return ChatOllama(model=model_name, temperature=0, base_url="http://localhost:11434")
+        
+    @staticmethod
     def get_model(model_name: str):
-        """Initializes model based on selection."""
+        """Initializes model based on selection with user-provided API keys."""
         name_lower = model_name.lower()
         try:
-            # Check for Cloud Providers first
-            if "gpt" in name_lower:
-                return ChatOpenAI(model=model_name, api_key=Config.OPENAI_API_KEY, temperature=0)
-            elif "claude" in name_lower:
-                return ChatAnthropic(model=model_name, api_key=Config.ANTHROPIC_API_KEY, temperature=0)
+            # Import here to avoid circular imports
+            import streamlit as st
             
-            # DEFAULT/LOCAL: Use ChatOllama for everything else (like llama3)
+            # Check for Cloud Providers first with user-provided API keys
+            if "gpt" in name_lower:
+                # Use user-provided API key from session state or config
+                api_key = st.session_state.get('openai_api_key', Config.OPENAI_API_KEY)
+                if not api_key:
+                    st.error("🔑 OpenAI API key required for GPT models. Please set it in the sidebar.")
+                    return None
+                return ChatOpenAI(model=model_name, api_key=api_key, temperature=0)
+            elif "claude" in name_lower:
+                # Use user-provided API key from session state or config
+                api_key = st.session_state.get('anthropic_api_key', Config.ANTHROPIC_API_KEY)
+                if not api_key:
+                    st.error("🔑 Anthropic API key required for Claude models. Please set it in the sidebar.")
+                    return None
+                return ChatAnthropic(model=model_name, api_key=api_key, temperature=0)
+            elif "gemini" in name_lower:
+                # Use user-provided API key from session state or config
+                api_key = st.session_state.get('gemini_api_key', Config.GEMINI_API_KEY)
+                if not api_key:
+                    st.error("🔑 Google Gemini API key required for Gemini models. Please set it in the sidebar.")
+                    return None
+                return ChatGoogleGenerativeAI(model=model_name, api_key=api_key, temperature=0)
+            
+            # DEFAULT/LOCAL: Use ChatOllama for everything else (like llama3, mistral, phi)
             # We add a base_url to ensure it connects to your local instance
             return ChatOllama(
                 model=model_name, 
@@ -329,6 +402,386 @@ class AIService:
             return f"({pop_query}) AND ({int_query}) AND ({adverse_terms})"
 
     @staticmethod
+    def agentic_optimize_per_source(
+        current_query: str,
+        pico: PICOCriteria,
+        model_name: str,
+        active_sources: List[str],
+        research_goal: str = "",
+        progress_callback: Optional[Callable] = None
+    ) -> Dict[str, Any]:
+        """
+        Agentic optimization using systematic review best practices:
+        1. PICO/SPIDER framework structuring
+        2. Boolean logic (OR for synonyms, AND for concepts)
+        3. Precision syntax (phrases, truncation, wildcards)
+        4. Database-specific subject headings (MeSH, Emtree)
+        5. Iterative testing with title relevance analysis
+        
+        Returns detailed trace per database with quality metrics.
+        """
+        from data_services import DataAggregator
+        
+        model = AIService.get_model(model_name)
+        if not model:
+            return {
+                "final_query": current_query,
+                "trace": [],
+                "per_source_queries": {source: current_query for source in active_sources},
+                "error": "Model initialization failed"
+            }
+        
+        # Database-specific syntax strategies
+        db_syntax_guide = {
+            "PubMed": {
+                "mesh_tags": True,
+                "field_tags": ["[Mesh]", "[tiab]", "[pt]", "[mh]"],
+                "boolean": "AND/OR/NOT",
+                "truncation": "*",
+                "phrases": "\"exact phrase\"",
+                "explode": True,
+                "proximity": False,
+                "syntax_example": '("Diabetes Mellitus"[Mesh] OR diabetes[tiab]) AND ("Metformin"[Mesh] OR metformin[tiab])'
+            },
+            "Europe PMC": {
+                "mesh_tags": True,
+                "field_tags": [":tiab", ":mesh", ":pt"],
+                "boolean": "AND/OR/NOT",
+                "truncation": "*",
+                "phrases": "\"exact phrase\"",
+                "explode": False,
+                "proximity": False,
+                "syntax_example": '(diabetes:tiab OR diabetes:mesh) AND (metformin:tiab OR metformin:mesh)'
+            },
+            "arXiv": {
+                "mesh_tags": False,
+                "field_tags": [],
+                "boolean": "AND/OR/NOT",
+                "truncation": "*",
+                "phrases": "\"exact phrase\"",
+                "explode": False,
+                "proximity": False,
+                "syntax_example": '(diabetes OR "blood sugar") AND (metformin OR "glucose lowering")'
+            },
+            "Semantic Scholar": {
+                "mesh_tags": False,
+                "field_tags": [],
+                "boolean": "AND/OR",
+                "truncation": "*",
+                "phrases": "\"exact phrase\"",
+                "explode": False,
+                "proximity": False,
+                "syntax_example": '"diabetes mellitus" AND metformin AND treatment'
+            },
+            "Google Scholar": {
+                "mesh_tags": False,
+                "field_tags": [],
+                "boolean": "AND/OR",
+                "truncation": "*",
+                "phrases": "\"exact phrase\"",
+                "explode": False,
+                "proximity": False,
+                "syntax_example": '"diabetes mellitus" treatment metformin'
+            }
+        }
+        
+        max_iterations = 10
+        trace = []
+        best_queries = {source: current_query for source in active_sources}
+        best_scores = {source: (0, 0) for source in active_sources}
+        
+        for iteration in range(max_iterations):
+            iter_data = {
+                "iteration": iteration + 1,
+                "sources": {},
+                "total_papers": 0,
+                "avg_relevance": 0,
+                "status": "checking"
+            }
+            
+            # Process each database independently
+            for source in active_sources:
+                source_result = {
+                    "query": best_queries.get(source, current_query),
+                    "count": 0,
+                    "titles": [],
+                    "relevance_score": 0,
+                    "quality_rating": "Poor",
+                    "optimization_applied": []
+                }
+                
+                try:
+                    # Debug: Print what's happening
+                    print(f"\n=== ITERATION {iteration + 1} for {source} ===")
+                    print(f"Current query: {source_result['query'][:80]}...")
+                    
+                    try:
+                        # Test current query
+                        print(f"Fetching papers with current query...")
+                        papers, _ = DataAggregator.fetch_all(
+                            source_result["query"],
+                            [source],
+                            max_per_source=10,
+                            limit=10
+                        )
+                        print(f"Fetched {len(papers) if papers else 0} papers")
+                        
+                        count = len(papers) if papers else 0
+                        titles = [p.title for p in papers] if papers else []
+                        
+                        # Calculate relevance score
+                        relevance = AIService._analyze_title_relevance(
+                            titles, research_goal, pico
+                        ) if titles else 0
+                        
+                        source_result.update({
+                            "count": count,
+                            "titles": titles[:10],
+                            "relevance_score": round(relevance, 2),
+                            "quality_rating": AIService._score_to_rating(relevance),
+                            "iteration_reasoning": ""
+                        })
+                    except Exception as e:
+                        print(f"Error fetching papers: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        count = 0
+                        titles = []
+                        relevance = 0
+                    # Determine what optimization strategy to apply
+                    reasoning_parts = []
+                    if iteration == 0:
+                        reasoning_parts.append("Initial query setup using PICO framework")
+                        if count < 5:
+                            reasoning_parts.append(f"Low initial yield ({count} papers) - need to broaden with OR synonyms")
+                        elif relevance < 0.4:
+                            reasoning_parts.append(f"Low relevance ({relevance:.2f}) - need to refine precision")
+                    elif count < 20:
+                        reasoning_parts.append(f"Yield too low ({count} papers) - broadening with OR synonyms and removing filters")
+                    elif relevance < 0.5:
+                        reasoning_parts.append(f"Relevance too low ({relevance:.2f}) - adding more specific PICO terms")
+                    elif relevance < 0.6:
+                        reasoning_parts.append(f"Moderate relevance ({relevance:.2f}) - fine-tuning balance between sensitivity and precision")
+                    else:
+                        reasoning_parts.append(f"Good metrics achieved - query converged")
+                    
+                    source_result["iteration_reasoning"] = "; ".join(reasoning_parts)
+                    
+                    # If first iteration or needs improvement, optimize the query
+                    if iteration == 0 or (count < 20 and relevance < 0.6):
+                        syntax = db_syntax_guide.get(source, db_syntax_guide["PubMed"])
+                        
+                        optimization_prompt = f"""
+                        You are an expert Medical Librarian optimizing search strings.
+                        
+                        RESEARCH GOAL: {research_goal}
+                        
+                        PICO FRAMEWORK:
+                        - Population (P): {pico.population}
+                        - Intervention (I): {pico.intervention}
+                        - Comparator (C): {pico.comparator}
+                        - Outcome (O): {pico.outcome}
+                        
+                        DATABASE: {source}
+                        
+                        DATABASE SYNTAX RULES:
+                        - Supports MeSH/Subject Headings: {syntax['mesh_tags']}
+                        - Field tags available: {syntax['field_tags']}
+                        - Boolean operators: {syntax['boolean']}
+                        - Truncation symbol: {syntax['truncation']}
+                        - Phrase searching: {syntax['phrases']}
+                        - Example format: {syntax['syntax_example']}
+                        
+                        CURRENT QUERY: {source_result["query"]}
+                        
+                        CURRENT RESULTS:
+                        - Papers found: {count}
+                        - Relevance score: {relevance:.2f}/1.0
+                        - Sample titles: {titles[:3] if titles else "N/A"}
+                        
+                        OPTIMIZATION STRATEGIES TO APPLY:
+                        
+                        1. PICO STRUCTURING (Primary Strategy):
+                           - Build query around Population AND Intervention (skip Outcome - too narrow)
+                           - Group synonyms with OR within each PICO element
+                           - Join major concepts with AND
+                        
+                        2. BOOLEAN LOGIC:
+                           - OR: Use between synonyms (e.g., "heart attack" OR "myocardial infarction")
+                           - AND: Join PICO categories only (e.g., [Population] AND [Intervention])
+                           - Avoid NOT: Too risky for systematic reviews
+                        
+                        3. PRECISION SYNTAX:
+                           - Phrase quotes: Use \"\" for exact phrases (\"type 2 diabetes\")
+                           - Truncation (*): therap* → therapy, therapies, therapeutic
+                           - Wildcards: Use ? or $ for spelling variants if supported
+                        
+                        4. SUBJECT HEADINGS:
+                           {f"- Include MeSH terms with {syntax['field_tags'][0]} if applicable" if syntax['mesh_tags'] else "- Use keyword terms only (no controlled vocabulary)"}
+                           {f"- Explode broader MeSH terms to capture sub-types" if syntax.get('explode') else ""}
+                        
+                        5. TESTING ITERATION {iteration + 1}/10:
+                           - Current relevance: {relevance:.2f}
+                           - Current papers found: {count}
+                           - Target: >0.7 relevance with 20+ papers
+                           - If too few results (<20): Add OR synonyms, remove filters, broaden MeSH terms
+                           - If low relevance (<0.6): Narrow with more specific terms, add required concepts
+                        
+                        CRITICAL RULES:
+                        1. You MUST return a DIFFERENT query than CURRENT QUERY
+                        2. If count < 20: Add MORE synonyms with OR, use broader MeSH terms
+                        3. If relevance < 0.6: Add specific terms to improve precision
+                        4. NEVER return the exact same query - always modify something
+                        
+                        RETURN ONLY the optimized query string for {source}.
+                        NO explanations, NO markdown, just the executable query.
+                        MUST be different from current query."""
+                        
+                        try:
+                            response = model.invoke([HumanMessage(content=optimization_prompt)])
+                            new_query = response.content.strip()
+                            print(f"AI returned query: {new_query[:80]}...")
+                            
+                            new_query = re.sub(r'^(Query|Optimized Query|Search String):\s*', '', new_query, flags=re.IGNORECASE)
+                            new_query = new_query.replace('```sql', '').replace('```', '').replace('`', '').strip()
+                            new_query = re.sub(r'^(PubMed|pubmed)\s*[:\-]?\s*', '', new_query, flags=re.IGNORECASE)
+                            new_query = re.sub(r'^(Here is|This is).*$', '', new_query, flags=re.IGNORECASE | re.MULTILINE)
+                            new_query = re.sub(r'^(The optimized|Final|Best).*$', '', new_query, flags=re.IGNORECASE | re.MULTILINE)
+                            new_query = new_query.strip()
+                            
+                            print(f"After cleaning: {new_query[:80]}...")
+                            print(f"Comparing to current: {source_result['query'][:80]}...")
+                            
+                            if new_query and len(new_query) > 10:
+                                if new_query != source_result["query"]:
+                                    print(f"Query changed! Updating...")
+                                    source_result["query"] = new_query
+                                    source_result["optimization_applied"].append(f"iteration_{iteration + 1}")
+                                else:
+                                    print(f"Query unchanged - AI returned same query")
+                            else:
+                                print(f"New query rejected: too short or empty")
+                        except Exception as e:
+                            print(f"Optimization error for {source}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    
+                    iter_data["sources"][source] = source_result
+                    
+                    # Track best query by relevance (papers as tiebreaker)
+                    current_relevance = source_result["relevance_score"]
+                    current_count = source_result["count"]
+                    current_query = source_result["query"]
+                    
+                    if source not in best_queries:
+                        # First iteration - save it
+                        best_queries[source] = current_query
+                        best_scores[source] = (current_relevance, current_count)
+                    else:
+                        # Compare: higher relevance wins, if tie then more papers wins
+                        prev_relevance, prev_count = best_scores[source]
+                        if current_relevance > prev_relevance:
+                            best_queries[source] = current_query
+                            best_scores[source] = (current_relevance, current_count)
+                        elif current_relevance == prev_relevance and current_count > prev_count:
+                            best_queries[source] = current_query
+                            best_scores[source] = (current_relevance, current_count)
+                    
+                    # Call progress callback if provided
+                    if progress_callback:
+                        try:
+                            progress_callback(
+                                iteration=iteration + 1,
+                                total=max_iterations,
+                                source=source,
+                                count=count,
+                                relevance=relevance,
+                                reasoning=source_result.get("iteration_reasoning", "")
+                            )
+                        except Exception as e:
+                            print(f"Progress callback error: {e}")
+                        
+                except Exception as e:
+                    print(f"\n!!! EXCEPTION in iteration {iteration + 1} for {source}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    iter_data["sources"][source] = {
+                        "query": best_queries.get(source, current_query),
+                        "count": 0,
+                        "titles": [],
+                        "relevance_score": 0,
+                        "quality_rating": "Error",
+                        "error": str(e)
+                    }
+            
+            # Calculate aggregate metrics
+            all_scores = [s["relevance_score"] for s in iter_data["sources"].values()]
+            all_counts = [s["count"] for s in iter_data["sources"].values()]
+            
+            iter_data["avg_relevance"] = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0
+            iter_data["total_papers"] = sum(all_counts)
+            
+            # Check stopping conditions (after minimum 3 iterations)
+            if iteration >= 2:
+                if iter_data["avg_relevance"] >= 0.7 and iter_data["total_papers"] >= 20:
+                    iter_data["status"] = "success"
+                    trace.append(iter_data)
+                    break
+                if iteration >= max_iterations - 1:
+                    iter_data["status"] = "max_iterations"
+                    trace.append(iter_data)
+                    break
+            
+            trace.append(iter_data)
+        
+        return {
+            "final_query": best_queries.get(active_sources[0], current_query) if active_sources else current_query,
+            "per_source_queries": best_queries,
+            "trace": trace,
+            "iterations_run": len(trace),
+            "best_relevance": max([t["avg_relevance"] for t in trace]) if trace else 0,
+            "total_papers_found": trace[-1]["total_papers"] if trace else 0
+        }
+    
+    @staticmethod
+    def _analyze_title_relevance(titles: List[str], research_goal: str, pico: PICOCriteria) -> float:
+        """Analyze how relevant returned titles are to the research goal."""
+        if not titles or not research_goal:
+            return 0.0
+        
+        # Extract key terms from PICO and goal
+        key_terms = []
+        for field in [pico.population, pico.intervention, pico.outcome, research_goal]:
+            if field:
+                key_terms.extend([t.lower() for t in field.split() if len(t) > 2])
+        
+        # Remove stop words
+        stop_words = {'the', 'and', 'or', 'of', 'in', 'to', 'for', 'with', 'a', 'an', 'is', 'are', 'was', 'were', 'on', 'at', 'by'}
+        key_terms = [t for t in key_terms if t not in stop_words]
+        
+        if not key_terms:
+            return 0.5
+        
+        # Score each title
+        scores = []
+        for title in titles:
+            title_lower = title.lower()
+            matches = sum(1 for term in key_terms if term in title_lower)
+            score = min((matches / len(key_terms)) * 2, 1.0)  # Scale and cap
+            scores.append(score)
+        
+        return sum(scores) / len(scores) if scores else 0
+    
+    @staticmethod
+    def _score_to_rating(score: float) -> str:
+        """Convert relevance score to quality rating."""
+        if score >= 0.8: return "Excellent"
+        elif score >= 0.6: return "Good"
+        elif score >= 0.4: return "Fair"
+        elif score >= 0.2: return "Poor"
+        else: return "Very Poor"
+
+    @staticmethod
     def optimize_search_string_per_source(
         current_query: str,
         pico: PICOCriteria,
@@ -390,16 +843,48 @@ class AIService:
                 response = model.invoke(messages)
                 content = response.content.strip()
                 
-                # Extract JSON
+                # Try multiple JSON extraction methods
                 import re
+                json_data = None
+                
+                # Method 1: Look for JSON object
                 json_match = re.search(r'\{.*?\}', content, re.DOTALL)
                 if json_match:
-                    data = json.loads(json_match.group())
+                    try:
+                        json_data = json.loads(json_match.group())
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Method 2: Try to parse the entire content as JSON
+                if not json_data:
+                    try:
+                        json_data = json.loads(content)
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Method 3: Try to extract key-value pairs manually
+                if not json_data:
+                    try:
+                        # Look for optimized_query and estimated_yield patterns
+                        query_match = re.search(r'["\']?optimized_query["\']?\s*[:=]\s*["\']([^"\']+)["\']', content, re.IGNORECASE)
+                        yield_match = re.search(r'["\']?estimated_yield["\']?\s*[:=]\s*(\d+)', content, re.IGNORECASE)
+                        
+                        if query_match:
+                            json_data = {
+                                "optimized_query": query_match.group(1),
+                                "estimated_yield": int(yield_match.group(1)) if yield_match else 0
+                            }
+                    except Exception:
+                        pass
+                
+                if json_data:
                     results[source] = {
-                        "query": data.get("optimized_query", current_query),
-                        "yield": data.get("estimated_yield", 0)
+                        "query": json_data.get("optimized_query", current_query),
+                        "yield": json_data.get("estimated_yield", 0)
                     }
                 else:
+                    print(f"Could not extract JSON from AI response for {source}")
+                    print(f"AI response content: {content[:200]}...")
                     results[source] = {"query": current_query, "yield": 0}
                     
             except Exception as e:
@@ -486,6 +971,120 @@ class AIService:
             return current_query
 
     @staticmethod
+    def generate_comprehensive_summary(goal: str, papers: List[Paper], model_name: str) -> str:
+        """
+        Generates a comprehensive summary with:
+        - Brief summaries of key references
+        - Arguments supporting the research question
+        - Arguments against the research question
+        - Expanded reference list (10 papers instead of 5)
+        """
+        if not papers:
+            return "⚠️ No papers found. Please adjust your research goal."
+
+        model = AIService.get_model(model_name)
+        
+        # Use up to 10 papers for more comprehensive coverage
+        subset = papers[:10]
+        
+        # Build detailed paper context with summaries
+        paper_context = ""
+        for idx, p in enumerate(subset):
+            paper_context += f"""
+Paper [{idx+1}]: {p.title}
+Source: {p.source}
+Abstract: {p.abstract[:400]}...
+---
+"""
+        
+        prompt = f"""
+You are an expert systematic review analyst. Provide a comprehensive analysis of the research landscape.
+
+RESEARCH GOAL: {goal}
+
+LITERATURE CONTEXT ({len(subset)} papers analyzed):
+{paper_context}
+
+TASK: Create a structured analysis with the following sections:
+
+1. RESEARCH LANDSCAPE OVERVIEW (2-3 sentences)
+   - Brief synthesis of the current state of research on this topic
+   - Identify gaps or consensus areas
+
+2. ARGUMENTS SUPPORTING THE RESEARCH QUESTION
+   - List 3-5 key points from the literature that SUPPORT the research goal
+   - Cite papers using [1], [2], etc.
+   - Focus on positive findings, beneficial outcomes, or established relationships
+
+3. ARGUMENTS AGAINST/CHALLENGING THE RESEARCH QUESTION  
+   - List 2-4 key points that CONTRADICT or CHALLENGE the research goal
+   - Cite papers using [1], [2], etc.
+   - Include null findings, conflicting results, or methodological concerns
+
+OUTPUT FORMAT:
+- Use plain text headers like "HEADER NAME:" (NO markdown ** or code blocks)
+- Structure your response with clear section headers
+- Do not include a reference list - that will be added separately.
+"""
+        
+        try:
+            response = model.invoke([HumanMessage(content=prompt)])
+            ai_analysis = response.content.strip()
+
+            # Convert markdown formatting to HTML so it renders correctly inside HTML divs.
+            # Streamlit does NOT process markdown inside HTML blocks, so we must pre-convert.
+            def md_to_html(text: str) -> str:
+                # Strip any accidental triple-backtick code fences the LLM may produce
+                text = re.sub(r'```[a-z]*\n?', '', text)
+                # Bold: **text** or __text__
+                text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+                text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+                # Italic: *text* or _text_
+                text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+                text = re.sub(r'_(.+?)_', r'<em>\1</em>', text)
+                # Numbered list items (1. text)
+                text = re.sub(r'(?m)^\d+\.\s+(.+)', r'<li>\1</li>', text)
+                # Bullet list items (- text or * text)
+                text = re.sub(r'(?m)^[-*]\s+(.+)', r'<li>\1</li>', text)
+                # Wrap consecutive <li> blocks in <ol>/<ul>
+                text = re.sub(r'(<li>.*?</li>\n*)+', lambda m: '<ul style="margin:8px 0 8px 20px;">' + m.group(0) + '</ul>', text, flags=re.DOTALL)
+                # Plain section headers like "HEADER NAME:"
+                text = re.sub(r'(?m)^([A-Z][A-Z /&-]{3,}):[ \t]*$', r'<p style="font-weight:600;margin-top:14px;margin-bottom:4px;">\1:</p>', text)
+                # Newlines to <br> for remaining plain paragraphs
+                text = re.sub(r'\n{2,}', '</p><p style="margin:8px 0;">', text)
+                text = text.replace('\n', '<br>')
+                return f'<p style="margin:8px 0;">{text}</p>'
+
+            ai_analysis_html = md_to_html(ai_analysis)
+
+            # Build expanded reference list (10 papers)
+            ref_list = ""
+            for idx, p in enumerate(subset):
+                ref_list += f'<div><a href="{p.url}" target="_blank"><strong>[{idx+1}]</strong> {p.title}</a></div>\n'
+
+            full_content = f"""
+            <div class="summary-box">
+                <div class="summary-title">Comprehensive Literature Analysis</div>
+                <div style="font-size:0.97em; color:#222; line-height:1.7;">
+                    {ai_analysis_html}
+                </div>
+                <hr style="margin: 20px 0; border: 0; border-top: 1px solid #ddd;">
+                <div style="font-size: 0.9em; color: #333; font-weight: 600; margin-bottom: 10px;">
+                    Key References
+                </div>
+                <div style="font-size: 0.85em; color: #555; line-height: 1.6;">
+                    {ref_list}
+                </div>
+            </div>
+            """
+            return re.sub(r'(?m)^\s+', '', full_content).strip()
+            
+        except Exception as e:
+            print(f"Comprehensive summary error: {e}")
+            # Fallback to simple summary
+            return AIService.generate_brainstorm_summary(goal, papers, model_name)
+
+    @staticmethod
     def generate_brainstorm_summary(goal: str, papers: List[Paper], model_name: str) -> str:
         """Refines research goal and provides a list of references in a clean box."""
         if not papers:
@@ -533,24 +1132,82 @@ class AIService:
 
     @staticmethod
     def get_refinement_suggestions(goal: str, papers: List[Paper], model_name: str) -> List[str]:
-        """Generates specific refinement options based on found literature."""
+        """Generates specific, intelligent refinement options based on found literature."""
         model = AIService.get_model(model_name)
-        titles = "\n".join([f"- {p.title}" for p in papers[:5]])
+        
+        # Analyze the found papers to understand current search scope
+        paper_analysis = []
+        for p in papers[:10]:
+            paper_analysis.append({
+                'title': p.title,
+                'abstract': p.abstract[:300] if p.abstract else '',
+                'source': p.source
+            })
+        
+        analysis_text = "\n".join([
+            f"Paper {i+1}: {pa['title']}" 
+            f"Source: {pa['source']}" 
+            f"Abstract: {pa['abstract']}"
+            for i, pa in enumerate(paper_analysis)
+        ])
         
         prompt = f"""
-        Research Goal: {goal}
-        Literature Found: {titles}
+        You are an expert systematic reviewer and research methodologist. Analyze the research goal and current literature to provide intelligent refinement suggestions.
         
-        Based on the literature above, suggest 3 specific ways to refine or narrow this research goal.
-        Return ONLY a JSON list of strings.
-        Example: ["Focus on pediatric populations", "Limit to randomized controlled trials", "Include specific biomarkers"]
+        RESEARCH GOAL:
+        {goal}
+        
+        CURRENT LITERATURE LANDSCAPE:
+        {analysis_text}
+        
+        TASK: Generate 4-5 specific, actionable refinement suggestions that will improve the precision and relevance of this systematic review.
+        
+        ANALYSIS CONSIDERATIONS:
+        1. Population scope: Are we too broad/narrow? Consider age groups, conditions, settings
+        2. Intervention specificity: Should we focus on specific drugs, therapies, or approaches?
+        3. Outcome precision: Can we target more specific clinical endpoints or measurements?
+        4. Study design: Should we limit to RCTs, meta-analyses, or observational studies?
+        5. Timeframe: Should we specify publication date ranges or follow-up periods?
+        6. Geographic scope: Should we focus on specific regions or healthcare settings?
+        7. Comparison clarity: Can we better define control or alternative treatments?
+        
+        SUGGESTION CRITERIA:
+        - Be specific and actionable (not generic)
+        - Target common systematic review refinement strategies
+        - Consider PICO framework improvements
+        - Address potential gaps in current search
+        - Suggest methodological filters
+        - Include clinical or demographic specifics
+        - Consider intervention delivery mechanisms
+        - Target outcome measurement specificity
+        
+        OUTPUT FORMAT:
+        Return ONLY a JSON list of strings, each being a specific refinement suggestion.
+        
+        EXAMPLES OF GOOD SUGGESTIONS:
+        - "Focus on randomized controlled trials published after 2015"
+        - "Limit to adult patients with type 2 diabetes (>18 years)"
+        - "Specify metformin dosage ranges (500-2000mg daily)"
+        - "Include studies with minimum 12-month follow-up period"
+        - "Target HbA1c reduction as primary outcome"
+        
+        Generate 4-5 specific refinement suggestions for this research goal:
         """
+        
         try:
             response = model.invoke([HumanMessage(content=prompt)])
             suggestions = AIService._extract_json(response.content)
             return suggestions if isinstance(suggestions, list) else []
-        except Exception:
-            return ["Focus on specific study designs", "Narrow the target population", "Specify clinical outcomes"]
+        except Exception as e:
+            print(f"Refinement suggestion error: {e}")
+            # Fallback to more intelligent defaults
+            return [
+                "Focus on specific study designs (e.g., randomized controlled trials only)",
+                "Narrow population characteristics (e.g., specific age groups or conditions)",
+                "Specify intervention details (e.g., dosage, duration, administration)",
+                "Define precise outcome measures (e.g., specific clinical endpoints)",
+                "Add timeframe constraints (e.g., publication date or follow-up period)"
+            ]
 
     @staticmethod
     def _extract_json(text: str) -> Optional[Any]:
@@ -1054,12 +1711,6 @@ class AIService:
         prompt = f"""
         You are performing the Full-Text Eligibility phase of a Systematic Review.
         
-        PICO:
-        Population: {pico.population}
-        Intervention: {pico.intervention}
-        Comparator: {pico.comparator}
-        Outcome: {pico.outcome}
-        
         INCLUSION CRITERIA:
         {inc_text}
         
@@ -1098,6 +1749,7 @@ class AIService:
         }}
         
         You MUST provide: decision, reason (brief summary), citation, and criteria_evaluations for ALL criteria.
+        Only use "INCLUDE" or "EXCLUDE" values - no "ERROR" or other values.
         """
 
         try:
@@ -1555,6 +2207,206 @@ class AIService:
 
         return current_query, search_log, "exhausted_attempts"
         
+    @staticmethod
+    def fetch_citations(paper_id: str, source: str, title: str, snowball_type: str, max_results: int, active_sources: list) -> List[Dict]:
+        """
+        Fetch citations for a paper (backward references or forward citations).
+        
+        Args:
+            paper_id: The ID of the paper (PMID, DOI, etc.)
+            source: The source database (PubMed, Europe PMC, etc.)
+            title: Paper title for fallback search
+            snowball_type: "Both", "Backward (References)", or "Forward (Cited by)"
+            max_results: Maximum citations to fetch per paper
+            active_sources: List of active data sources to query
+        
+        Returns:
+            List of citation dictionaries
+        """
+        import requests
+        from Bio import Entrez
+        from config import Config
+        
+        citations = []
+        
+        # Normalize paper_id
+        if not paper_id and title:
+            # Try to find paper by title if ID is missing
+            try:
+                Entrez.email = Config.ENTREZ_EMAIL
+                handle = Entrez.esearch(db="pubmed", term=title, retmax=1)
+                record = Entrez.read(handle)
+                if record['IdList']:
+                    paper_id = record['IdList'][0]
+            except:
+                pass
+        
+        if not paper_id:
+            return citations
+        
+        # Try Europe PMC for references
+        if "Europe PMC" in active_sources or "PubMed" in active_sources:
+            try:
+                if snowball_type in ["Both", "Backward (References)"]:
+                    # Fetch references (backward)
+                    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{paper_id}/references"
+                    response = requests.get(url, params={"pageSize": max_results, "format": "json"}, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        refs = data.get('referenceList', {}).get('reference', [])
+                        for ref in refs:
+                            citations.append({
+                                'id': ref.get('id', ''),
+                                'title': ref.get('title', ref.get('source', 'Unknown')),
+                                'abstract': ref.get('abstractText', ''),
+                                'url': f"https://pubmed.ncbi.nlm.nih.gov/{ref.get('id', '')}" if ref.get('id') else '',
+                                'source': 'Europe PMC (Reference)',
+                                'citation_type': 'backward'
+                            })
+                
+                if snowball_type in ["Both", "Forward (Cited by)"]:
+                    # Fetch citing papers (forward)
+                    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{paper_id}/citations"
+                    response = requests.get(url, params={"pageSize": max_results, "format": "json"}, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        cites = data.get('citationList', {}).get('citation', [])
+                        for cite in cites:
+                            citations.append({
+                                'id': cite.get('id', ''),
+                                'title': cite.get('title', cite.get('source', 'Unknown')),
+                                'abstract': cite.get('abstractText', ''),
+                                'url': f"https://pubmed.ncbi.nlm.nih.gov/{cite.get('id', '')}" if cite.get('id') else '',
+                                'source': 'Europe PMC (Cited by)',
+                                'citation_type': 'forward'
+                            })
+            except Exception as e:
+                print(f"Europe PMC citation error: {e}")
+        
+        # Try Semantic Scholar
+        if "Semantic Scholar" in active_sources:
+            try:
+                # First, we need to find the Semantic Scholar paper ID
+                ss_url = "https://api.semanticscholar.org/graph/v1/paper/search"
+                params = {
+                    "query": title,
+                    "fields": "paperId,title,abstract,url",
+                    "limit": 1
+                }
+                response = requests.get(ss_url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    papers = data.get('data', [])
+                    if papers:
+                        ss_paper_id = papers[0].get('paperId')
+                        
+                        if ss_paper_id:
+                            if snowball_type in ["Both", "Backward (References)"]:
+                                # Fetch references
+                                refs_url = f"https://api.semanticscholar.org/graph/v1/paper/{ss_paper_id}/references"
+                                refs_params = {"fields": "paperId,title,abstract,url", "limit": max_results}
+                                refs_response = requests.get(refs_url, params=refs_params, timeout=10)
+                                if refs_response.status_code == 200:
+                                    refs_data = refs_response.json()
+                                    for ref in refs_data.get('data', []):
+                                        cited = ref.get('citedPaper', {})
+                                        citations.append({
+                                            'id': cited.get('paperId', ''),
+                                            'title': cited.get('title', 'Unknown'),
+                                            'abstract': cited.get('abstract', ''),
+                                            'url': cited.get('url', ''),
+                                            'source': 'Semantic Scholar (Reference)',
+                                            'citation_type': 'backward'
+                                        })
+                            
+                            if snowball_type in ["Both", "Forward (Cited by)"]:
+                                # Fetch citations
+                                cites_url = f"https://api.semanticscholar.org/graph/v1/paper/{ss_paper_id}/citations"
+                                cites_params = {"fields": "paperId,title,abstract,url", "limit": max_results}
+                                cites_response = requests.get(cites_url, params=cites_params, timeout=10)
+                                if cites_response.status_code == 200:
+                                    cites_data = cites_response.json()
+                                    for cite in cites_data.get('data', []):
+                                        citing = cite.get('citingPaper', {})
+                                        citations.append({
+                                            'id': citing.get('paperId', ''),
+                                            'title': citing.get('title', 'Unknown'),
+                                            'abstract': citing.get('abstract', ''),
+                                            'url': citing.get('url', ''),
+                                            'source': 'Semantic Scholar (Cited by)',
+                                            'citation_type': 'forward'
+                                        })
+            except Exception as e:
+                print(f"Semantic Scholar citation error: {e}")
+        
+        # Try OpenAlex (no API key needed, good coverage)
+        try:
+            # Search for paper by title or DOI
+            if paper_id.startswith('10.'):  # DOI
+                openalex_url = f"https://api.openalex.org/works/doi:{paper_id}"
+            else:
+                # Search by title
+                search_url = "https://api.openalex.org/works"
+                params = {"search": title, "per_page": 1}
+                search_response = requests.get(search_url, params=params, timeout=10)
+                if search_response.status_code == 200:
+                    search_data = search_response.json()
+                    results = search_data.get('results', [])
+                    if results:
+                        openalex_url = f"https://api.openalex.org/works/{results[0].get('id')}"
+                    else:
+                        openalex_url = None
+                else:
+                    openalex_url = None
+            
+            if openalex_url:
+                response = requests.get(openalex_url, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if snowball_type in ["Both", "Backward (References)"]:
+                        # Get referenced works
+                        refs = data.get('referenced_works', [])
+                        for ref_id in refs[:max_results]:
+                            try:
+                                ref_response = requests.get(f"https://api.openalex.org/works/{ref_id}", timeout=5)
+                                if ref_response.status_code == 200:
+                                    ref_data = ref_response.json()
+                                    citations.append({
+                                        'id': ref_data.get('doi', ref_id.split('/')[-1]),
+                                        'title': ref_data.get('display_name', 'Unknown'),
+                                        'abstract': ref_data.get('abstract', ''),
+                                        'url': ref_data.get('open_access', {}).get('oa_url', f"https://doi.org/{ref_data.get('doi')}" if ref_data.get('doi') else ''),
+                                        'source': 'OpenAlex (Reference)',
+                                        'citation_type': 'backward'
+                                    })
+                            except:
+                                pass
+                    
+                    if snowball_type in ["Both", "Forward (Cited by)"]:
+                        # Get citing works
+                        cited_by_url = data.get('cited_by_api_url')
+                        if cited_by_url:
+                            try:
+                                cites_response = requests.get(cited_by_url, params={"per_page": max_results}, timeout=10)
+                                if cites_response.status_code == 200:
+                                    cites_data = cites_response.json()
+                                    for cite in cites_data.get('results', []):
+                                        citations.append({
+                                            'id': cite.get('doi', cite.get('id', '').split('/')[-1]),
+                                            'title': cite.get('display_name', 'Unknown'),
+                                            'abstract': cite.get('abstract', ''),
+                                            'url': cite.get('open_access', {}).get('oa_url', f"https://doi.org/{cite.get('doi')}" if cite.get('doi') else ''),
+                                            'source': 'OpenAlex (Cited by)',
+                                            'citation_type': 'forward'
+                                        })
+                            except:
+                                pass
+        except Exception as e:
+            print(f"OpenAlex citation error: {e}")
+        
+        return citations
+        
 class Deduplicator:
     @staticmethod
     def normalize_text(text: str) -> str:
@@ -1579,12 +2431,102 @@ class Deduplicator:
                 dups.append(p)
         return unique, dups
 
-class QueryCleaner:
+class AITableExtractor:
+    """
+    Uses an LLM to identify and structure any tabular data that appears in a
+    paper's abstract or extracted text.  This is a best-effort complement to
+    direct PDF/PMC table extraction: abstracts often report key result tables
+    inline (e.g. "Group A: 45% vs Group B: 23%, p<0.001").
+    """
+
+    @staticmethod
+    def extract_from_text(text: str, model_name: str) -> List[Dict]:
+        """
+        Ask the LLM to find tabular data in *text* and return it as a list of
+        structured table dicts matching the same schema used by PDFService.
+
+        Returns [] if no tables are found or extraction fails.
+        """
+        if not text or len(text.strip()) < 50:
+            return []
+
+        model = AIService.get_model(model_name)
+        if not model:
+            return []
+
+        prompt = f"""You are a scientific data extractor specialising in medical literature.
+
+TASK:
+Examine the text below and extract EVERY table or structured numeric comparison you can find.
+This includes result tables, demographic tables, outcome tables, and any structured list of values
+comparing groups.
+
+TEXT:
+\"\"\"
+{text[:3000]}
+\"\"\"
+
+OUTPUT RULES:
+- Return ONLY a valid JSON array.  No preamble, no markdown fences.
+- If NO tabular data exists, return an empty array: []
+- Each table must follow this exact schema:
+  {{
+    "label":   "Table N – short description",
+    "caption": "One-sentence description of what the table shows",
+    "headers": ["Column1", "Column2", ...],
+    "rows":    [["val", "val", ...], ...]
+  }}
+- Use empty string "" for any missing cell value.
+- Keep all numeric values exactly as written in the source.
+
+JSON array:"""
+
+        try:
+            response = model.invoke([HumanMessage(content=prompt)])
+            raw = response.content.strip()
+            # Strip markdown fences if the model added them anyway
+            raw = re.sub(r"```json|```", "", raw).strip()
+            data = json.loads(raw)
+            if isinstance(data, list):
+                # Basic validation: every entry must have headers and rows
+                valid = [
+                    t for t in data
+                    if isinstance(t, dict)
+                    and isinstance(t.get("headers"), list)
+                    and isinstance(t.get("rows"), list)
+                    and t["rows"]
+                ]
+                return valid
+        except Exception as e:
+            print(f"AITableExtractor error: {e}")
+
+        return []
+
+    @staticmethod
+    def enrich_papers(papers: List[Paper], model_name: str) -> List[Paper]:
+        """
+        For each paper without tables, attempt AI-based extraction from its
+        abstract.  Updates paper.tables in place.
+        """
+        for paper in papers:
+            if paper.tables:
+                continue  # Already has tables from PDF/PMC – skip
+            tables = AITableExtractor.extract_from_text(paper.abstract, model_name)
+            if tables:
+                paper.tables = tables
+        return papers
+
+
+
     @staticmethod
     def clean_for_general_search(query: str) -> str:
-        """Removes MeSH tags for general search engines and simplifies complex queries."""
+        """Removes MeSH tags and simplifies queries for better search engine compatibility."""
         # Remove MeSH tags
         cleaned = re.sub(r'\[.*?\]', '', query)
+        
+        # Remove extra quotes that might be causing issues
+        cleaned = re.sub(r'"{2,2}', '"', cleaned)  # Remove double quotes
+        cleaned = re.sub(r"'{2,2}", "'", cleaned)  # Remove single quotes
         
         # For very complex queries with nested parentheses, simplify them for general search
         # This helps with arXiv which doesn't handle complex Boolean well
@@ -1596,9 +2538,48 @@ class QueryCleaner:
         else:
             # Normal cleaning for non-encoded queries
             cleaned = cleaned.replace('AND', ' ').replace('OR', ' ')
+            # Remove extra quotes that might be causing arXiv issues
+            cleaned = re.sub(r'"{2,2}', '"', cleaned)
+            cleaned = re.sub(r"'{2,2}", "'", cleaned)
         
         # Return a simplified version for better arXiv compatibility
-        return " ".join(cleaned.split())
+        # Split by spaces and rejoin to remove extra spaces
+        words = cleaned.split()
+        return " ".join(words)
+
+class QueryCleaner:
+    """
+    Utility class for cleaning and optimizing search queries for different databases.
+    """
+    
+    @staticmethod
+    def clean_for_general_search(query: str) -> str:
+        """Removes MeSH tags and simplifies queries for better search engine compatibility."""
+        # Remove MeSH tags
+        cleaned = re.sub(r'\[.*?\]', '', query)
+        
+        # Remove extra quotes that might be causing issues
+        cleaned = re.sub(r'"{2,2}', '"', cleaned)  # Remove double quotes
+        cleaned = re.sub(r"'{2,2}", "'", cleaned)  # Remove single quotes
+        
+        # For very complex queries with nested parentheses, simplify them for general search
+        # This helps with arXiv which doesn't handle complex Boolean well
+        if '%28' in query or '%29' in query:  # If already URL encoded
+            # For arXiv, use a simpler approach
+            cleaned = re.sub(r'[()]', ' ', cleaned)  # Replace parentheses with spaces
+            cleaned = re.sub(r'\s+', ' ', cleaned)  # Normalize spaces
+            cleaned = cleaned.strip()
+        else:
+            # Normal cleaning for non-encoded queries
+            cleaned = cleaned.replace('AND', ' ').replace('OR', ' ')
+            # Remove extra quotes that might be causing arXiv issues
+            cleaned = re.sub(r'"{2,2}', '"', cleaned)
+            cleaned = re.sub(r"'{2,2}", "'", cleaned)
+        
+        # Return a simplified version for better arXiv compatibility
+        # Split by spaces and rejoin to remove extra spaces
+        words = cleaned.split()
+        return " ".join(words)
 
 # In utils.py
 class SearchAgent:
@@ -1629,3 +2610,691 @@ class SearchAgent:
             # ... update current_query based on LLM output ...
             
         return current_query, self.trace
+
+
+# =============================================================================
+# MULTI-AGENT SCREENING ARCHITECTURE
+# =============================================================================
+# 
+# 1. ORCHESTRATOR: Decomposes PICO into 4 specialist agents (P, I, C, O)
+# 2. WORKER TIER: Each agent is stateless, evaluates ALL papers for ONE PICO element
+# 3. AGGREGATOR: Consensus engine with PICO AND logic (all 4 must pass)
+# 4. TRACEABILITY: Per-agent votes for audit trail
+#
+# Used for title/abstract screening only - full-text screening uses separate logic
+#
+# =============================================================================
+
+@dataclass
+class AgentVote:
+    """Standardized output from each criterion agent."""
+    agent_name: str
+    agent_type: str  # 'PICO_P', 'PICO_I', 'PICO_C', 'PICO_O', 'INCLUSION', 'EXCLUSION'
+    criterion: str
+    paper_id: str
+    met: bool  # True if paper meets this criterion
+    confidence: float  # 0.0-1.0
+    evidence: str  # Quote from abstract justifying the vote
+    reasoning: str
+
+
+class CriterionAgent:
+    """
+    WORKER TIER: Stateless specialist agent.
+    
+    Each agent knows ONE criterion only. It evaluates ALL papers against that 
+    single criterion and returns standardized AgentVote objects.
+    
+    Domain isolation prevents LLM fatigue - the Population Agent doesn't get
+    distracted by intervention or study design details.
+    """
+    
+    def __init__(self, name: str, agent_type: str, criterion: str, model_name: str, api_keys: dict = None):
+        self.name = name
+        self.agent_type = agent_type
+        self.criterion = criterion
+        self.model_name = model_name
+        # Use thread-safe model initialization with explicit keys
+        if api_keys:
+            self.model = AIService.get_model_with_keys(model_name, api_keys)
+        else:
+            self.model = AIService.get_model(model_name)
+    
+    def evaluate_all_papers(self, papers: List[Paper]) -> List[AgentVote]:
+        """
+        Worker: Evaluate ALL papers against this agent's ONE criterion.
+        Returns list of AgentVote objects, one per paper.
+        """
+        if not self.model:
+            return [self._error_vote(p) for p in papers]
+        
+        # Build batch prompt for all papers
+        papers_text = "\n\n".join([
+            f"PAPER {i+1}:\nID: {p.id}\nTitle: {p.title}\nAbstract: {p.abstract[:500] if p.abstract else 'N/A'}" 
+            for i, p in enumerate(papers)
+        ])
+        
+        prompt = f"""You are a specialist screening agent. Your ONLY job is to evaluate papers against ONE specific criterion.
+
+YOUR IDENTITY: {self.name}
+YOUR CRITERION ({self.agent_type}): {self.criterion}
+
+INSTRUCTIONS - BE PERMISSIVE AND BROAD IN YOUR EVALUATION:
+1. Focus ONLY on your assigned PICO element - ignore all other criteria
+2. Papers should broadly align with your criterion, NOT match exactly
+3. Look for related terms, synonyms, and conceptual similarity
+4. If the abstract mentions anything related to your criterion, vote PASS
+5. Only vote FAIL if there's clear evidence the paper does NOT relate to your criterion
+6. Extract the exact quote from the abstract that justifies your decision
+7. Rate your confidence (0.0-1.0) - use 0.5+ for broad matches, lower for uncertain
+
+PAPERS TO EVALUATE ({len(papers)} total):
+{papers_text}
+
+OUTPUT FORMAT - Return a JSON array with one object per paper:
+[
+    {{
+        "paper_id": "paper_id_here",
+        "met": true or false,
+        "confidence": 0.0-1.0,
+        "evidence": "Exact quote from abstract supporting your decision",
+        "reasoning": "Brief explanation of your decision"
+    }},
+    ... (for ALL papers)
+]
+
+IMPORTANT: Be BROAD and INCLUSIVE. When in doubt, PASS the paper.
+
+JSON ARRAY:"""
+        
+        try:
+            response = self.model.invoke([HumanMessage(content=prompt)])
+            return self._parse_response(response.content, papers)
+        except Exception as e:
+            print(f"Agent {self.name} error: {e}")
+            return [self._error_vote(p) for p in papers]
+    
+    def _parse_response(self, content: str, papers: List[Paper]) -> List[AgentVote]:
+        """Parse agent response into AgentVote objects."""
+        try:
+            # Debug: print raw response
+            print(f"Agent {self.name} raw response (first 200 chars): {content[:200]}")
+            
+            # Extract JSON array
+            start = content.find('[')
+            end = content.rfind(']')
+            if start != -1 and end != -1 and end > start:
+                json_str = content[start:end+1]
+                data = json.loads(json_str)
+                
+                # Map results by paper_id
+                results_by_id = {r.get('paper_id'): r for r in data if isinstance(r, dict)}
+                
+                votes = []
+                for paper in papers:
+                    result = results_by_id.get(paper.id, {})
+                    if not result:
+                        print(f"Warning: No result found for paper {paper.id}")
+                    votes.append(AgentVote(
+                        agent_name=self.name,
+                        agent_type=self.agent_type,
+                        criterion=self.criterion,
+                        paper_id=paper.id,
+                        met=result.get('met', True),  # Default to PASS if unclear
+                        confidence=result.get('confidence', 0.5),
+                        evidence=result.get('evidence', 'No specific evidence'),
+                        reasoning=result.get('reasoning', 'Broad match applied')
+                    ))
+                print(f"Agent {self.name} successfully parsed {len(votes)} votes")
+                return votes
+            else:
+                print(f"Agent {self.name}: No JSON array found in response")
+        except Exception as e:
+            print(f"Agent {self.name} parse error: {e}")
+            print(f"Raw content: {content[:500]}")
+        
+        # Fallback: return permissive votes instead of errors
+        print(f"Agent {self.name}: Using fallback permissive votes")
+        return [AgentVote(
+            agent_name=self.name,
+            agent_type=self.agent_type,
+            criterion=self.criterion,
+            paper_id=paper.id,
+            met=True,  # Default to PASS on parse failure
+            confidence=0.5,
+            evidence="Parse fallback - broad match assumed",
+            reasoning=f"Agent {self.name} response parsing failed, using permissive default"
+        ) for paper in papers]
+    
+    def _error_vote(self, paper: Paper) -> AgentVote:
+        """Create error vote for failed evaluation."""
+        return AgentVote(
+            agent_name=self.name,
+            agent_type=self.agent_type,
+            criterion=self.criterion,
+            paper_id=paper.id,
+            met=False,
+            confidence=0.0,
+            evidence="Error in evaluation",
+            reasoning=f"Agent {self.name} failed to evaluate"
+        )
+
+
+class ScreeningOrchestrator:
+    """
+    ORCHESTRATOR: Central intelligence that decomposes criteria and manages workers.
+    
+    1. DECOMPOSITION: Breaks PICO + inclusion/exclusion into N specialist roles
+    2. FAN-OUT: Creates CriterionAgent for each criterion, runs in parallel
+    3. AGGREGATION: Collects all votes and applies consensus logic
+    """
+    
+    def __init__(self, pico: PICOCriteria, inclusion_criteria: List[str], 
+                 exclusion_criteria: List[str], model_name: str, api_keys: dict = None):
+        self.pico = pico
+        self.inclusion = [c for c in inclusion_criteria if c and c.strip()]
+        self.exclusion = [c for c in exclusion_criteria if c and c.strip()]
+        self.model_name = model_name
+        self.api_keys = api_keys or {}
+        
+        # Create specialist agents
+        self.agents: List[CriterionAgent] = []
+        self._create_agents()
+    
+    def _create_agents(self):
+        """Decompose criteria into specialist PICO agents only."""
+        # 4 PICO agents (always create if criteria exist)
+        if self.pico.population:
+            self.agents.append(CriterionAgent(
+                "Population Agent", "PICO_P", self.pico.population, self.model_name, self.api_keys
+            ))
+        if self.pico.intervention:
+            self.agents.append(CriterionAgent(
+                "Intervention Agent", "PICO_I", self.pico.intervention, self.model_name, self.api_keys
+            ))
+        if self.pico.comparator:
+            self.agents.append(CriterionAgent(
+                "Comparator Agent", "PICO_C", self.pico.comparator, self.model_name, self.api_keys
+            ))
+        if self.pico.outcome:
+            self.agents.append(CriterionAgent(
+                "Outcome Agent", "PICO_O", self.pico.outcome, self.model_name, self.api_keys
+            ))
+    
+    def screen_papers(self, papers: List[Paper], progress_callback=None) -> List[Dict[str, Any]]:
+        """
+        ORCHESTRATOR: Execute full multi-agent screening pipeline.
+        
+        Returns list of paper results with per-agent votes and final decision.
+        """
+        if not papers or not self.agents:
+            return []
+        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        total_agents = len(self.agents)
+        all_votes: List[AgentVote] = []
+        
+        # FAN-OUT: Run all agents in parallel, each evaluates ALL papers
+        with ThreadPoolExecutor(max_workers=min(10, total_agents)) as executor:
+            future_to_agent = {
+                executor.submit(agent.evaluate_all_papers, papers): agent 
+                for agent in self.agents
+            }
+            
+            completed_agents = 0
+            for future in as_completed(future_to_agent):
+                agent = future_to_agent[future]
+                try:
+                    votes = future.result()  # List of AgentVote for all papers
+                    all_votes.extend(votes)
+                except Exception as exc:
+                    print(f"Agent {agent.name} failed: {exc}")
+                
+                completed_agents += 1
+                if progress_callback:
+                    progress_callback(completed_agents, total_agents, 
+                                    f"Agent {completed_agents}/{total_agents}: {agent.name}")
+        
+        # AGGREGATE: Apply consensus logic per paper
+        return self._aggregate_results(papers, all_votes)
+    
+    def _aggregate_results(self, papers: List[Paper], all_votes: List[AgentVote]) -> List[Dict[str, Any]]:
+        """
+        AGGREGATOR: PICO-only consensus engine with traceability.
+        
+        Logic:
+        - PICO agents: Logical AND (must satisfy all P, I, C, O)
+        - All 4 PICO elements must pass for inclusion
+        """
+        # Group votes by paper
+        votes_by_paper: Dict[str, List[AgentVote]] = {}
+        for vote in all_votes:
+            if vote.paper_id not in votes_by_paper:
+                votes_by_paper[vote.paper_id] = []
+            votes_by_paper[vote.paper_id].append(vote)
+        
+        results = []
+        for paper in papers:
+            paper_votes = votes_by_paper.get(paper.id, [])
+            
+            # All votes are PICO votes now
+            pico_votes = [v for v in paper_votes if v.agent_type.startswith('PICO')]
+            
+            # Apply consensus logic: ALL PICO must pass
+            pico_pass = all(v.met for v in pico_votes) if pico_votes else True
+            
+            # Final decision with detailed reason
+            if not pico_pass:
+                decision = "EXCLUDE"
+                failed_votes = [v for v in pico_votes if not v.met]
+                passed_votes = [v for v in pico_votes if v.met]
+                
+                # Build a comprehensive summary of why the paper was excluded
+                parts = []
+                
+                # List which PICO elements passed (if any)
+                if passed_votes:
+                    passed_elements = [v.agent_name.replace(" Agent", "") for v in passed_votes]
+                    parts.append(f"This paper aligns with the {', '.join(passed_elements)} criteria")
+                
+                # List which PICO elements failed with full reasoning
+                fail_details = []
+                for v in failed_votes:
+                    # Get the full reasoning without truncation
+                    reason = v.reasoning if v.reasoning and v.reasoning != "No reasoning provided" else v.evidence
+                    if not reason or reason == "No specific evidence":
+                        reason = f"does not address the required criterion: {v.criterion}"
+                    fail_details.append(f"the {v.agent_name.replace(' Agent', '').lower()} criterion - {reason}")
+                
+                if passed_votes:
+                    parts.append(f"but fails to meet {', '.join(fail_details)}")
+                else:
+                    parts.append(f"This paper fails to meet {', '.join(fail_details)}")
+                
+                decision_reason = " ".join(parts) + "."
+            else:
+                decision = "INCLUDE"
+                # Build a comprehensive summary for included papers
+                if pico_votes:
+                    pico_elements = [v.agent_name.replace(" Agent", "").lower() for v in pico_votes if v.met]
+                    evidence_parts = []
+                    for v in pico_votes:
+                        if v.evidence and v.evidence != "No specific evidence":
+                            evidence_parts.append(f"{v.agent_name.replace(' Agent', '')}: {v.evidence}")
+                    
+                    if evidence_parts:
+                        decision_reason = f"This paper satisfies all PICO criteria. It demonstrates alignment with {', '.join(pico_elements)} elements. Key evidence: {'; '.join(evidence_parts)}."
+                    else:
+                        decision_reason = f"This paper satisfies all PICO criteria with alignment across {', '.join(pico_elements)} elements."
+                else:
+                    decision_reason = "This paper satisfies all PICO criteria based on available evidence."
+            
+            # Build traceability record
+            agent_trace = {}
+            for vote in paper_votes:
+                agent_trace[vote.agent_name] = {
+                    "type": vote.agent_type,
+                    "criterion": vote.criterion,
+                    "vote": "PASS" if vote.met else "FAIL",
+                    "confidence": vote.confidence,
+                    "evidence": vote.evidence,
+                    "reasoning": vote.reasoning
+                }
+            
+            results.append({
+                "paper_id": paper.id,
+                "Source": paper.source,
+                "Title": paper.title,
+                "URL": paper.url,
+                "Abstract": paper.abstract,
+                "Decision": decision,
+                "Reason": decision_reason,
+                "PICO_Score": f"{sum(v.met for v in pico_votes)}/{len(pico_votes)}",
+                "Agent_Count": len(paper_votes),
+                "Agent_Trace": agent_trace  # Full traceability for UI
+            })
+        
+        return results
+    
+    def get_agent_summary(self) -> Dict[str, int]:
+        """Return summary of specialist PICO agents created."""
+        return {
+            "pico_agents": sum(1 for a in self.agents if a.agent_type.startswith('PICO')),
+            "total_agents": len(self.agents)
+        }
+
+
+# =============================================================================
+# FULL-TEXT MULTI-AGENT SCREENING ARCHITECTURE
+# =============================================================================
+#
+# 1. ORCHESTRATOR: Decomposes inclusion/exclusion criteria into N specialist agents
+# 2. WORKER TIER: Each agent evaluates ONE paper for ONE criterion
+# 3. AGGREGATOR: Consensus engine with inclusion AND + exclusion veto logic
+# 4. TRACEABILITY: Per-agent votes for audit trail
+#
+# Used for full-text evidence screening
+#
+# =============================================================================
+
+@dataclass
+class FullTextAgentVote:
+    """Represents a single criterion agent's vote on a paper."""
+    agent_name: str
+    agent_type: str  # "INCLUSION" or "EXCLUSION"
+    criterion: str
+    paper_id: str
+    met: bool  # True = criterion satisfied (good for inclusion, bad for exclusion)
+    confidence: float
+    evidence: str
+    reasoning: str
+
+
+class FullTextCriterionAgent:
+    """
+    WORKER AGENT: Specialist that evaluates ONE criterion on ONE paper.
+    Thread-safe with explicit API key passing.
+    """
+    
+    def __init__(self, name: str, agent_type: str, criterion: str, model_name: str, api_keys: dict = None):
+        self.name = name
+        self.agent_type = agent_type  # "INCLUSION" or "EXCLUSION"
+        self.criterion = criterion
+        self.model_name = model_name
+        self.api_keys = api_keys or {}
+        
+        # Initialize model with explicit keys for thread safety
+        if self.api_keys:
+            self.model = AIService.get_model_with_keys(model_name, self.api_keys)
+        else:
+            self.model = AIService.get_model(model_name)
+    
+    def evaluate_paper(self, paper: Dict[str, Any]) -> FullTextAgentVote:
+        """Evaluate a single paper against this agent's criterion."""
+        if not self.model:
+            return self._fallback_vote(paper)
+        
+        paper_text = f"""
+        TITLE: {paper.get('Title', 'N/A')}
+        ABSTRACT: {paper.get('Abstract', 'N/A')}
+        SOURCE: {paper.get('Source', 'N/A')}
+        """
+        
+        # Different logic for inclusion vs exclusion
+        if self.agent_type == "INCLUSION":
+            prompt = f"""You are a specialist screening agent evaluating INCLUSION criteria.
+
+YOUR IDENTITY: {self.name}
+YOUR INCLUSION CRITERION: {self.criterion}
+
+TASK: Evaluate whether this paper MEETS this specific inclusion criterion.
+
+PAPER TO EVALUATE:
+{paper_text[:2000]}
+
+EVALUATION RULES:
+1. Focus ONLY on your assigned criterion
+2. The paper must CLEARLY meet this criterion to PASS
+3. Look for specific evidence in the title and abstract
+4. Be thorough - this is full-text screening
+
+OUTPUT FORMAT - Return a JSON object:
+{{
+    "met": true or false,
+    "confidence": 0.0-1.0,
+    "evidence": "Exact quote from text supporting your decision",
+    "reasoning": "Detailed explanation of why the paper does or does not meet this criterion"
+}}
+
+JSON OBJECT:"""
+        else:  # EXCLUSION
+            prompt = f"""You are a specialist screening agent evaluating EXCLUSION criteria.
+
+YOUR IDENTITY: {self.name}
+YOUR EXCLUSION CRITERION: {self.criterion}
+
+TASK: Evaluate whether this paper VIOLATES this specific exclusion criterion.
+
+PAPER TO EVALUATE:
+{paper_text[:2000]}
+
+EVALUATION RULES:
+1. Focus ONLY on your assigned criterion
+2. The paper must CLEARLY violate this criterion to FAIL
+3. Look for specific evidence in the title and abstract
+4. Be thorough - this is full-text screening
+
+OUTPUT FORMAT - Return a JSON object:
+{{
+    "met": true or false,  // true = paper violates the exclusion (bad), false = does not violate (good)
+    "confidence": 0.0-1.0,
+    "evidence": "Exact quote from text supporting your decision",
+    "reasoning": "Detailed explanation of why the paper does or does not violate this criterion"
+}}
+
+JSON OBJECT:"""
+        
+        try:
+            from langchain_core.messages import HumanMessage
+            response = self.model.invoke([HumanMessage(content=prompt)])
+            return self._parse_response(response.content, paper)
+        except Exception as e:
+            print(f"Agent {self.name} error: {e}")
+            return self._fallback_vote(paper)
+    
+    def _parse_response(self, content: str, paper: Dict[str, Any]) -> FullTextAgentVote:
+        """Parse agent response into FullTextAgentVote object."""
+        try:
+            # Extract JSON object
+            start = content.find('{')
+            end = content.rfind('}')
+            if start != -1 and end != -1 and end > start:
+                json_str = content[start:end+1]
+                data = json.loads(json_str)
+                
+                return FullTextAgentVote(
+                    agent_name=self.name,
+                    agent_type=self.agent_type,
+                    criterion=self.criterion,
+                    paper_id=paper.get('paper_id', paper.get('ID', 'unknown')),
+                    met=data.get('met', False),
+                    confidence=data.get('confidence', 0.5),
+                    evidence=data.get('evidence', 'No specific evidence'),
+                    reasoning=data.get('reasoning', 'No reasoning provided')
+                )
+            else:
+                print(f"Agent {self.name}: No JSON object found in response")
+        except Exception as e:
+            print(f"Agent {self.name} parse error: {e}")
+            print(f"Raw content: {content[:500]}")
+        
+        return self._fallback_vote(paper)
+    
+    def _fallback_vote(self, paper: Dict[str, Any]) -> FullTextAgentVote:
+        """Create a permissive fallback vote when model fails."""
+        return FullTextAgentVote(
+            agent_name=self.name,
+            agent_type=self.agent_type,
+            criterion=self.criterion,
+            paper_id=paper.get('paper_id', paper.get('ID', 'unknown')),
+            met=True,  # Default to PASS (inclusion met, exclusion not violated)
+            confidence=0.5,
+            evidence="Model fallback - permissive default",
+            reasoning=f"Agent {self.name} could not evaluate, using permissive default"
+        )
+
+
+class FullTextOrchestrator:
+    """
+    ORCHESTRATOR: Full-text screening with fan-out multi-agent architecture.
+    
+    1. DECOMPOSITION: Creates one agent per inclusion/exclusion criterion
+    2. FAN-OUT: All agents evaluate the paper in parallel
+    3. AGGREGATION: ALL inclusion must pass AND no exclusion can fail
+    """
+    
+    def __init__(self, inclusion_criteria: List[str], exclusion_criteria: List[str],
+                 model_name: str, api_keys: dict = None):
+        self.inclusion = [c for c in inclusion_criteria if c and c.strip()]
+        self.exclusion = [c for c in exclusion_criteria if c and c.strip()]
+        self.model_name = model_name
+        self.api_keys = api_keys or {}
+        
+        # Create specialist agents
+        self.agents: List[FullTextCriterionAgent] = []
+        self._create_agents()
+    
+    def _create_agents(self):
+        """Decompose criteria into specialist agents."""
+        # Create inclusion agents
+        for i, criterion in enumerate(self.inclusion):
+            self.agents.append(FullTextCriterionAgent(
+                f"Inclusion Agent {i+1}", "INCLUSION", criterion, self.model_name, self.api_keys
+            ))
+        
+        # Create exclusion agents
+        for i, criterion in enumerate(self.exclusion):
+            self.agents.append(FullTextCriterionAgent(
+                f"Exclusion Agent {i+1}", "EXCLUSION", criterion, self.model_name, self.api_keys
+            ))
+    
+    def screen_paper(self, paper: Dict[str, Any], progress_callback=None) -> Dict[str, Any]:
+        """
+        ORCHESTRATOR: Execute full multi-agent screening on a single paper.
+        
+        Returns paper result with per-agent votes and final decision.
+        """
+        if not self.agents:
+            return {
+                "decision": "Include",
+                "reason": "No criteria specified - defaulting to include",
+                "citation": "N/A"
+            }
+        
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        total_agents = len(self.agents)
+        all_votes: List[FullTextAgentVote] = []
+        
+        # FAN-OUT: Run all agents in parallel on the single paper
+        with ThreadPoolExecutor(max_workers=min(10, total_agents)) as executor:
+            future_to_agent = {
+                executor.submit(agent.evaluate_paper, paper): agent 
+                for agent in self.agents
+            }
+            
+            completed_agents = 0
+            for future in as_completed(future_to_agent):
+                agent = future_to_agent[future]
+                try:
+                    vote = future.result()  # Single FullTextAgentVote
+                    all_votes.append(vote)
+                except Exception as exc:
+                    print(f"Agent {agent.name} failed: {exc}")
+                
+                completed_agents += 1
+                if progress_callback:
+                    progress_callback(completed_agents, total_agents,
+                                    f"Agent {completed_agents}/{total_agents}: {agent.name}")
+        
+        # AGGREGATE: Apply consensus logic
+        return self._aggregate_results(paper, all_votes)
+    
+    def _aggregate_results(self, paper: Dict[str, Any], all_votes: List[FullTextAgentVote]) -> Dict[str, Any]:
+        """
+        AGGREGATOR: Full-text consensus engine with traceability.
+        
+        Logic:
+        - ALL inclusion agents must PASS (met=True)
+        - NO exclusion agents can FAIL (met=True means violation)
+        """
+        # Separate votes by type
+        inclusion_votes = [v for v in all_votes if v.agent_type == "INCLUSION"]
+        exclusion_votes = [v for v in all_votes if v.agent_type == "EXCLUSION"]
+        
+        # Apply consensus logic
+        all_inclusion_pass = all(v.met for v in inclusion_votes) if inclusion_votes else True
+        no_exclusion_violated = all(not v.met for v in exclusion_votes) if exclusion_votes else True
+        
+        # Final decision
+        if all_inclusion_pass and no_exclusion_violated:
+            decision = "Include"
+        else:
+            decision = "Exclude"
+        
+        # Build comprehensive reasoning
+        if decision == "Include":
+            # All criteria satisfied
+            passed_inclusions = [v for v in inclusion_votes if v.met]
+            
+            parts = ["This paper meets all inclusion criteria and violates no exclusion criteria."]
+            
+            if passed_inclusions:
+                parts.append("The paper demonstrates:")
+                for v in passed_inclusions:
+                    parts.append(f"- {v.criterion}: {v.reasoning}")
+            
+            if exclusion_votes:
+                parts.append("The paper avoids all exclusion criteria:")
+                for v in exclusion_votes:
+                    parts.append(f"- {v.criterion}: No violation found")
+            
+            decision_reason = " ".join(parts)
+        else:
+            # Some criteria failed
+            failed_inclusions = [v for v in inclusion_votes if not v.met]
+            violated_exclusions = [v for v in exclusion_votes if v.met]
+            
+            parts = []
+            
+            if failed_inclusions:
+                parts.append("This paper is excluded because it fails to meet the following inclusion criteria:")
+                for v in failed_inclusions:
+                    parts.append(f"- {v.criterion}: {v.reasoning} Evidence: {v.evidence}")
+            
+            if violated_exclusions:
+                if parts:
+                    parts.append("Additionally, it violates the following exclusion criteria:")
+                else:
+                    parts.append("This paper is excluded because it violates the following exclusion criteria:")
+                for v in violated_exclusions:
+                    parts.append(f"- {v.criterion}: {v.reasoning} Evidence: {v.evidence}")
+            
+            decision_reason = " ".join(parts)
+        
+        # Build traceability record
+        agent_trace = {}
+        for vote in all_votes:
+            agent_trace[vote.agent_name] = {
+                "type": vote.agent_type,
+                "criterion": vote.criterion,
+                "vote": "PASS" if vote.met else "FAIL",
+                "confidence": vote.confidence,
+                "evidence": vote.evidence,
+                "reasoning": vote.reasoning
+            }
+        
+        # Build criteria evaluations for compatibility with existing UI
+        criteria_evals = {}
+        for vote in all_votes:
+            criteria_evals[vote.criterion] = "INCLUDE" if vote.met else "EXCLUDE"
+        
+        return {
+            "decision": decision,
+            "reason": decision_reason,
+            "citation": "See agent trace for specific quotes",
+            "agent_trace": agent_trace,
+            "inclusion_score": f"{sum(v.met for v in inclusion_votes)}/{len(inclusion_votes)}",
+            "exclusion_violations": f"{sum(v.met for v in exclusion_votes)}/{len(exclusion_votes)}",
+            "agent_count": len(all_votes),
+            **criteria_evals  # Flatten for compatibility
+        }
+    
+    def get_agent_summary(self) -> Dict[str, int]:
+        """Return summary of specialist agents created."""
+        return {
+            "inclusion_agents": sum(1 for a in self.agents if a.agent_type == "INCLUSION"),
+            "exclusion_agents": sum(1 for a in self.agents if a.agent_type == "EXCLUSION"),
+            "total_agents": len(self.agents)
+        }

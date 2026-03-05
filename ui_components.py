@@ -49,6 +49,7 @@ class UIComponents:
                 ("simulation", ":material/analytics:", "Simulation"),
                 ("abstract", ":material/article:", "Abstract Screening"),
                 ("fulltext", ":material/lab_research:", "Full-Text Evidence"),
+                ("citation_snowball", ":material/hub:", "Citation Snowball"),
                 ("extraction", ":material/description:", "Text Extraction"),
                 ("prisma", ":material/account_tree:", "PRISMA Flow")
             ]
@@ -76,16 +77,64 @@ class UIComponents:
 
             # 3. SETTINGS
             with st.container():
-                model_choice = st.selectbox("AI Model", ["llama3", "mistral", "phi", "Custom"])
+                # Model selection with more options
+                model_options = [
+                    "llama3", "mistral", "phi",  # Local models
+                    "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo",  # OpenAI
+                    "claude-3-sonnet", "claude-3-haiku", "claude-3-opus",  # Anthropic
+                    "gemini-pro", "gemini-pro-vision",  # Google
+                    "Custom"
+                ]
+                
+                model_choice = st.selectbox("Select AI Model", model_options)
+                
+                # Show API key inputs based on model selection
+                if any(provider in model_choice.lower() for provider in ["gpt", "openai"]):
+                    openai_key = st.text_input(
+                        "OpenAI API Key", 
+                        type="password", 
+                        placeholder="sk-...",
+                        help="Enter your OpenAI API key",
+                        value=st.session_state.get('openai_api_key', '')
+                    )
+                    if openai_key:
+                        st.session_state.openai_api_key = openai_key
+                
+                elif any(provider in model_choice.lower() for provider in ["claude", "anthropic"]):
+                    anthropic_key = st.text_input(
+                        "Anthropic API Key", 
+                        type="password", 
+                        placeholder="sk-ant-...",
+                        help="Enter your Anthropic API key",
+                        value=st.session_state.get('anthropic_api_key', '')
+                    )
+                    if anthropic_key:
+                        st.session_state.anthropic_api_key = anthropic_key
+                
+                elif any(provider in model_choice.lower() for provider in ["gemini", "google"]):
+                    gemini_key = st.text_input(
+                        "Google Gemini API Key", 
+                        type="password", 
+                        placeholder="AIza...",
+                        help="Enter your Google Gemini API key",
+                        value=st.session_state.get('gemini_api_key', '')
+                    )
+                    if gemini_key:
+                        st.session_state.gemini_api_key = gemini_key
                 
                 # Show custom model input if "Custom" is selected
                 if model_choice == "Custom":
-                    custom_model = st.text_input("Enter Custom Model Name", placeholder="e.g., gpt-4, claude-3, llama3:70b")
+                    custom_model = st.text_input(
+                        "Enter Custom Model Name", 
+                        placeholder="e.g., gpt-4, claude-3, llama3:70b"
+                    )
                     if custom_model:
                         model_choice = custom_model
                 
+                st.divider()
+                
                 # Data Sources Selection
-                active_sources = st.multiselect("Sources", [s.value for s in DataSource], default=["PubMed"])
+                active_sources = st.multiselect("Select Sources", [s.value for s in DataSource], default=["PubMed"])
                 
                 # PDF Upload Section (only shows when Local PDFs is selected)
                 local_pdfs_selected = DataSource.LOCAL_PDF.value in active_sources
@@ -127,11 +176,17 @@ class UIComponents:
 
     @staticmethod
     def render_results(df: pd.DataFrame):
+        import streamlit as st
+        
         if df.empty:
-            st.info("No papers match the current criteria.")
-            return
-
-        # Style DataFrame to color cells based on decision and criteria
+            st.success("✅ Full-text screening complete!")
+            
+            # Show info about citation snowballing
+            included_papers = st.session_state.full_text_results[st.session_state.full_text_results['Decision'].str.contains("Include")]
+            if not included_papers.empty:
+                st.info(f"🎯 {len(included_papers)} papers passed full-text screening. Proceed to 'Citation Snowball' to find additional papers from references.")
+            
+            # Style Full-Text DataFrame to color cells based on decision and criteria
         def color_decisions(val):
             if 'Include' in str(val):
                 return 'background-color: #d4edda; color: #155724; font-weight: 500; padding: 8px;'
@@ -141,12 +196,11 @@ class UIComponents:
                 return 'padding: 8px;'
         
         def color_criteria(val):
-            if 'INCLUDE' in str(val):
+            val_str = str(val).upper().strip()
+            if 'INCLUDE' in val_str or 'Include' in str(val):
                 return 'background-color: #d4edda; color: #155724; font-weight: 500; padding: 8px;'
-            elif 'EXCLUDE' in str(val):
+            elif 'EXCLUDE' in val_str or 'Exclude' in str(val):
                 return 'background-color: #f8d7da; color: #721c24; font-weight: 500; padding: 8px;'
-            elif 'UNSPECIFIED' in str(val):
-                return 'background-color: #fff3cd; color: #856404; font-weight: 500; padding: 8px;'
             else:
                 return 'background-color: #e2e3e5; color: #383d41; font-weight: 500; padding: 8px;'
 
@@ -155,13 +209,28 @@ class UIComponents:
         if 'Decision' in styled_df.columns:
             styled_df = styled_df.style.map(color_decisions, subset=['Decision'])
         
-        # Apply styling to criteria columns
+        # Apply styling to ALL inclusion and exclusion criteria columns
         try:
-            import streamlit as st
             inclusion_criteria = st.session_state.get('inclusion_list', [])
             exclusion_criteria = st.session_state.get('exclusion_list', [])
+            all_criteria = inclusion_criteria + exclusion_criteria
             
-            for criterion in inclusion_criteria + exclusion_criteria:
+            # Also apply to any PICO columns that might exist
+            pico_criteria = []
+            if hasattr(st.session_state, 'pico'):
+                if st.session_state.pico.population:
+                    pico_criteria.append(st.session_state.pico.population)
+                if st.session_state.pico.intervention:
+                    pico_criteria.append(st.session_state.pico.intervention)
+                if st.session_state.pico.comparator:
+                    pico_criteria.append(st.session_state.pico.comparator)
+                if st.session_state.pico.outcome:
+                    pico_criteria.append(st.session_state.pico.outcome)
+            
+            # Combine all criteria
+            all_columns_to_style = list(set(all_criteria + pico_criteria))
+            
+            for criterion in all_columns_to_style:
                 if criterion in styled_df.columns:
                     styled_df = styled_df.map(color_criteria, subset=[criterion])
         except:
@@ -310,9 +379,8 @@ class UIComponents:
         
         # ROW 4: Eligibility (STAGE 2)
         dot.node('N6_elig', f"Reports assessed for eligibility\\n(n = {inc_n})")
-        # Updated to show categorized exclusion reasons
-        reasons_text = "\\n".join(reasons_lines) if reasons_lines else "No exclusions"
-        dot.node('N6_excl_side', f"Reports excluded (n={ft_excluded_total}):\\n{reasons_text}", width='5')
+        # Simplified to only show number excluded, no detailed reasons
+        dot.node('N6_excl_side', f"Reports excluded\\n(n = {ft_excluded_total})")
         
         # ROW 5: Final Result
         dot.node('N7_final', f"Studies included in review\\n(n = {final_n})")

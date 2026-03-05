@@ -23,8 +23,13 @@ class Config:
     PDF_MAX_CHARS = 3000
     DEFAULT_MODEL = "llama3"
     MIN_KEYWORD_LENGTH = 2
+    
+    # API Keys (can be set via environment variables or UI)
     SEMANTIC_SCHOLAR_KEY = os.getenv("SEMANTIC_SCHOLAR_KEY", "")
     CORE_API_KEY = os.getenv("CORE_API_KEY", "")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 
 class DataSource(Enum):
