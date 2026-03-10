@@ -20,6 +20,7 @@ biopython==1.84
 pypdf==4.3.1
 python-docx==1.1.2
 numpy==1.26.4
+beautifulsoup4
 
 # --- Critical Dependency Fixes ---
 packaging==24.1
