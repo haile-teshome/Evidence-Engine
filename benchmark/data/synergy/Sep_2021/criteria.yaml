@@ -1,0 +1,24 @@
+# Sep_2021 — Object recognition memory in the rat (or rodent)
+# SYNERGY dataset; topic inferred from positive paper titles
+# (object-in-context, object-place-context, object recognition tasks)
+# Source SR: Sep et al. 2021
+
+pico:
+  population: Rats (or rodents) used in object recognition memory paradigms (e.g., novel object recognition, object-place, object-in-context, recency)
+  intervention: Behavioral, pharmacological, lesion, or environmental manipulation administered to the animal before or during the recognition task
+  comparator: Sham, vehicle, control group, naive animals, or pre/post-manipulation
+  outcome: Performance on an object recognition memory task (discrimination index, exploration time, recognition ratio) or related cognitive measure
+
+inclusion:
+  - Used rats (or rodents) as the experimental subjects
+  - Employed an object recognition memory paradigm (novel object recognition, object-in-context, object-place, recency, or closely related variant)
+  - Reported behavioral performance on the recognition task as a primary or secondary outcome
+  - Original empirical study (experimental research article)
+  - Published in English in a peer-reviewed journal
+
+exclusion:
+  - Used species other than rats or rodents (humans, primates, fish, etc.)
+  - Did not include any object recognition memory task
+  - Conference abstracts, editorials, letters, opinion pieces
+  - Reviews, meta-analyses, or theoretical papers without primary data
+  - In vitro / cell-culture only studies with no behavioral assessment

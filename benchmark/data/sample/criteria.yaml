@@ -1,0 +1,19 @@
+pico:
+  population: Adults with type 2 diabetes mellitus
+  intervention: Metformin monotherapy
+  comparator: Placebo or no treatment
+  outcome: Cardiovascular events (myocardial infarction, stroke, or all-cause mortality)
+
+inclusion:
+  - Randomized controlled trial in adult humans (age ≥ 18)
+  - Compares metformin to placebo or no-treatment control
+  - Reports cardiovascular outcomes (MI, stroke, mortality, or composite)
+  - Published in English in a peer-reviewed journal
+  - Follow-up ≥ 6 months
+
+exclusion:
+  - Animal or in-vitro studies
+  - Non-randomized designs (cohort, case-control, case series, narrative reviews)
+  - Pediatric or pregnant populations only
+  - Pre-diabetes / type 1 diabetes only
+  - Editorials, letters, conference abstracts

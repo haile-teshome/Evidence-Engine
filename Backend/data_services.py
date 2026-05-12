@@ -1,0 +1,933 @@
+from Bio import Entrez
+import re
+import requests
+import xml.etree.ElementTree as ET
+import urllib.parse
+from pypdf import PdfReader
+from datetime import datetime, timedelta
+from typing import List, Dict, Any, Tuple
+import streamlit as st
+from config import Config, DataSource
+from models import Paper
+import time
+
+_last_request_time = 0.0
+
+def throttled_request(url: str, params: dict = None, headers: dict = None, method: str = "GET", max_retries: int = 3, timeout: int = 30) -> requests.Response:
+    """Ensures all outgoing requests respect a 1-request-per-second limit with retry logic."""
+    global _last_request_time
+    
+    elapsed = time.time() - _last_request_time
+    if elapsed < 1.1:  
+        time.sleep(1.1 - elapsed)
+    
+    for attempt in range(max_retries):
+        try:
+            if method.upper() == "POST":
+                response = requests.post(url, json=params, headers=headers, timeout=timeout)
+            else:
+                response = requests.get(url, params=params, headers=headers, timeout=timeout)
+            
+            _last_request_time = time.time()
+            return response
+            
+        except requests.exceptions.Timeout:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff: 1, 2, 4 seconds
+                time.sleep(wait_time)
+                continue
+            raise  # Re-raise on final attempt
+        except requests.exceptions.RequestException:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
+            raise
+    
+    _last_request_time = time.time()
+    return response
+
+class PubMedService:
+    """Handles PubMed data fetching."""
+    
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        """Fetch papers from PubMed."""
+        Entrez.email = Config.ENTREZ_EMAIL
+        
+        # Add title/abstract search if not specified
+        if "[tiab]" not in query.lower() and "[" not in query:
+            query = f"({query})[tiab]"
+        
+        try:
+            search_handle = Entrez.esearch(
+                db="pubmed",
+                term=query,
+                retmax=max_results
+            )
+            id_list = Entrez.read(search_handle)["IdList"]
+            
+            if not id_list:
+                return []
+            
+            fetch_handle = Entrez.efetch(
+                db="pubmed",
+                id=id_list,
+                rettype="xml",
+                retmode="text"
+            )
+            records = Entrez.read(fetch_handle)
+            
+            papers = []
+            for article in records['PubmedArticle']:
+                citation = article['MedlineCitation']
+                pmid = str(citation['PMID']) 
+                
+                abstract_text = citation['Article'].get('Abstract', {}).get(
+                    'AbstractText', ["N/A"]
+                )[0]
+                
+                papers.append(Paper(
+                    source=DataSource.PUBMED.value,
+                    id=pmid,
+                    title=citation['Article']['ArticleTitle'],
+                    abstract=str(abstract_text),
+                    url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                ))
+            
+            return papers
+            
+        except Exception as e:
+            st.error(f"PubMed fetch error: {e}")
+            return []
+
+
+
+
+class TopJournalsService:
+    """Fetches from top epidemiology journals."""
+    
+    JOURNALS = [
+        '"Am J Epidemiol"[Journal]',
+        '"Int J Epidemiol"[Journal]',
+        '"Eur J Epidemiol"[Journal]'
+    ]
+    
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        """Fetch from AJE, IJE, and EJE."""
+        Entrez.email = Config.ENTREZ_EMAIL
+        
+        journal_filter = ' OR '.join(TopJournalsService.JOURNALS)
+        full_query = f"({query}) AND ({journal_filter})"
+        
+        try:
+            search_handle = Entrez.esearch(
+                db="pubmed",
+                term=full_query,
+                retmax=max_results
+            )
+            id_list = Entrez.read(search_handle)["IdList"]
+            
+            if not id_list:
+                return []
+            
+            fetch_handle = Entrez.efetch(
+                db="pubmed",
+                id=id_list,
+                rettype="xml",
+                retmode="text"
+            )
+            records = Entrez.read(fetch_handle)
+            
+            papers = []
+            for article in records['PubmedArticle']:
+                citation = article['MedlineCitation']['Article']
+                papers.append(Paper(
+                    source=DataSource.PUBMED.value,
+                    id=str(citation['PMID']),
+                    title=citation['ArticleTitle'],
+                    abstract=str(citation['Abstract']['AbstractText'])
+                ))
+            
+            return papers
+            
+        except Exception as e:
+            st.error(f"PubMed fetch error: {e}")
+            return []
+
+
+class ArXivService:
+    """Handles arXiv data fetching."""
+    
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        """Fetch papers from arXiv."""
+        from utils import QueryCleaner
+        clean_query = QueryCleaner.clean_for_general_search(query)
+        params = {
+            'search_query': f'all:{clean_query}',
+            'start': 0,
+            'max_results': max_results
+        }
+        
+        try:
+            response = throttled_request(Config.ARXIV_API_URL, params=params)
+            
+            # Check if response is valid XML before parsing
+            content_type = response.headers.get('content-type', '').lower()
+            if 'xml' not in content_type and not response.content.strip().startswith(b'<'):
+                st.error(f"ArXiv API returned non-XML response (content-type: {content_type})")
+                return []
+            
+            # Check for HTTP error status
+            if response.status_code != 200:
+                print(f"ArXiv API returned status {response.status_code} - skipping")
+                return []
+            
+            root = ET.fromstring(response.content)
+            
+            papers = []
+            ns = {'ns': 'http://www.w3.org/2005/Atom'}
+            
+            for entry in root.findall('ns:entry', ns):
+                full_id = entry.find('ns:id', ns).text
+                paper_id = full_id.split('/')[-1]
+                
+                papers.append(Paper(
+                    source=DataSource.ARXIV.value,
+                    id=paper_id,
+                    title=entry.find('ns:title', ns).text.strip().replace('\n', ' '),
+                    abstract=entry.find('ns:summary', ns).text.strip(),
+                    url=f"https://arxiv.org/abs/{paper_id}"
+                ))
+            return papers
+        except Exception as e:
+            print(f"ArXiv fetch error (silent): {e}")
+            return []
+
+class BioRxivService:
+    """Handles BioRxiv data fetching."""
+    
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        """Fetch papers from BioRxiv (recent papers only)."""
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=Config.BIORXIV_LOOKBACK_DAYS)
+        
+        date_str = f"{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+        url = f"{Config.BIORXIV_API_URL}/{date_str}"
+        
+        try:
+            response = throttled_request(url)
+            data = response.json()
+            
+            papers = []
+            keywords = [k.lower() for k in query.split() if len(k) > 2]
+            
+            for preprint in data.get('collection', []):
+                text_to_search = (preprint['title'] + " " + preprint['abstract']).lower()
+                
+                if any(k in text_to_search for k in keywords):
+                    papers.append(Paper(
+                        source=DataSource.BIORXIV.value,
+                        id=preprint.get('doi', 'N/A'),
+                        title=preprint['title'],
+                        abstract=preprint['abstract'],
+                        url=f"https://doi.org/{preprint['doi']}"
+                    ))
+                
+                if len(papers) >= max_results:
+                    break
+                    
+            return papers
+        except Exception as e:
+            st.error(f"BioRxiv fetch error: {e}")
+            return []
+
+
+class PDFService:
+    """Handles local PDF processing."""
+    
+    @staticmethod
+    def process_files(files) -> List[Paper]:
+        """Extract text from uploaded PDF files."""
+        papers = []
+        
+        for file in files:
+            try:
+                reader = PdfReader(file)
+                text_parts = []
+                
+                for page in reader.pages[:Config.PDF_MAX_PAGES]:
+                    text_parts.append(page.extract_text())
+                
+                full_text = "".join(text_parts)
+                truncated = full_text[:Config.PDF_MAX_CHARS]
+                
+                papers.append(Paper(
+                    source=DataSource.LOCAL_PDF.value,
+                    id=file.name,
+                    title=file.name,
+                    abstract=truncated
+                ))
+                
+            except Exception as e:
+                st.warning(f"Failed to process {file.name}: {e}")
+                continue
+        
+        return papers
+
+
+class SemanticScholarService:
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        params = {
+            "query": query,
+            "limit": max_results,
+            "fields": "title,abstract,paperId"
+        }
+        headers = {"x-api-key": Config.SEMANTIC_SCHOLAR_API_KEY} if hasattr(Config, 'SEMANTIC_SCHOLAR_API_KEY') else {}
+        
+        try:
+            url = Config.SEMANTIC_SCHOLAR_API_URL if hasattr(Config, 'SEMANTIC_SCHOLAR_API_URL') else "https://api.semanticscholar.org/graph/v1/paper/search"
+            # Use the throttled_request helper instead of requests.get
+            response = throttled_request(url, params=params, headers=headers)
+            data = response.json()
+            papers = []
+            for item in data.get("data", []):
+                # FIX: Define the ID variable here
+                s2_id = item.get("paperId", "N/A")
+                
+                papers.append(Paper(
+                    source="Semantic Scholar",
+                    id=s2_id,
+                    title=item.get("title", "Untitled"),
+                    abstract=item.get("abstract") or "No abstract available.",
+                    # FIX: Use the variable 's2_id' defined above
+                    url=f"https://www.semanticscholar.org/paper/{s2_id}"
+                ))
+            return papers
+        except Exception as e:
+            st.error(f"Semantic Scholar Error: {e}")
+            return []
+
+class COREService:
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        params = {"q": query, "limit": max_results}
+        headers = {"Authorization": f"Bearer {Config.CORE_API_KEY}"} if hasattr(Config, 'CORE_API_KEY') else {}
+        
+        try:
+            url = Config.CORE_API_URL if hasattr(Config, 'CORE_API_URL') else "https://api.core.ac.uk/v3/search/works"
+            # Use the throttled_request helper
+            response = throttled_request(url, params=params, headers=headers)
+            data = response.json()
+            papers = []
+            for item in data.get("results", []):
+                papers.append(Paper(
+                    source="CORE",
+                    id=str(item.get("id", "")),
+                    title=item.get("title", "Untitled"),
+                    abstract=item.get("abstract") or "No abstract available."
+                ))
+            return papers
+        except Exception as e:
+            st.error(f"CORE API Error: {e}")
+            return []
+
+class EuropePMCService:
+    """Handles Europe PMC data fetching."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        try:
+            epmc_query = re.sub(r"\[[^\]]+\]", "", query)
+            epmc_query = re.sub(r"\s+", " ", epmc_query).strip()
+            url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+            params = {
+                "query": epmc_query or query,
+                "format": "json",
+                "pageSize": max_results,
+                "resultType": "lite",
+            }
+            resp = throttled_request(url, params=params).json()
+            papers: List[Paper] = []
+            for r in resp.get("resultList", {}).get("result", []):
+                pid = r.get("id") or r.get("pmid") or r.get("doi") or ""
+                src_code = r.get("source", "MED")
+                paper_url = f"https://europepmc.org/article/{src_code}/{pid}" if pid else ""
+                papers.append(Paper(
+                    source="Europe PMC",
+                    id=str(pid),
+                    title=r.get("title", "") or "",
+                    abstract=r.get("abstractText", "") or "",
+                    url=paper_url,
+                ))
+            return papers
+        except Exception as e:
+            print(f"Europe PMC fetch error: {e}")
+            return []
+
+
+def _reconstruct_inverted(idx: dict) -> str:
+    """Rebuild plain text from OpenAlex's inverted-index abstract format."""
+    if not idx:
+        return ""
+    positions = []
+    for word, locs in idx.items():
+        for loc in locs:
+            positions.append((loc, word))
+    positions.sort()
+    return " ".join(w for _, w in positions)
+
+
+class OpenAlexService:
+    """OpenAlex — 250M+ scholarly works, no API key required."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            url = "https://api.openalex.org/works"
+            params = {
+                "search": clean or query,
+                "per_page": min(max(max_results, 1), 200),
+                "select": "id,title,abstract_inverted_index,doi,open_access,publication_year",
+                "mailto": Config.ENTREZ_EMAIL,
+            }
+            resp = throttled_request(url, params=params).json()
+            papers: List[Paper] = []
+            for w in resp.get("results", []):
+                abs_idx = w.get("abstract_inverted_index") or {}
+                abstract = _reconstruct_inverted(abs_idx) if abs_idx else ""
+                doi = (w.get("doi") or "").replace("https://doi.org/", "")
+                oa = w.get("open_access", {}) or {}
+                paper_id = (w.get("id") or "").split("/")[-1] or doi
+                paper_url = oa.get("oa_url") or (f"https://doi.org/{doi}" if doi else (w.get("id") or ""))
+                papers.append(Paper(
+                    source="OpenAlex",
+                    id=str(paper_id),
+                    title=w.get("title", "") or "",
+                    abstract=abstract,
+                    url=paper_url,
+                ))
+            return papers[:max_results]
+        except Exception as e:
+            print(f"OpenAlex fetch error: {e}")
+            return []
+
+
+class CrossRefService:
+    """CrossRef — 150M+ DOI records across all disciplines."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            url = "https://api.crossref.org/works"
+            params = {
+                "query": clean or query,
+                "rows": min(max_results, 100),
+                "select": "DOI,title,abstract,URL,author",
+            }
+            headers = {"User-Agent": f"EvidenceEngine/1.0 (mailto:{Config.ENTREZ_EMAIL})"}
+            resp = throttled_request(url, params=params, headers=headers).json()
+            papers: List[Paper] = []
+            for it in resp.get("message", {}).get("items", []):
+                title = " ".join(it.get("title") or []) or ""
+                doi = it.get("DOI", "")
+                raw_abs = it.get("abstract", "") or ""
+                # CrossRef abstracts are JATS XML fragments — strip tags.
+                abstract = re.sub(r"<[^>]+>", " ", raw_abs).strip()
+                abstract = re.sub(r"\s+", " ", abstract)
+                papers.append(Paper(
+                    source="CrossRef",
+                    id=doi,
+                    title=title,
+                    abstract=abstract,
+                    url=it.get("URL") or (f"https://doi.org/{doi}" if doi else ""),
+                ))
+            return papers
+        except Exception as e:
+            print(f"CrossRef fetch error: {e}")
+            return []
+
+
+class MedRxivService:
+    """medRxiv preprints, retrieved via Europe PMC with the preprint source filter."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            epmc_query = f"({clean}) AND SRC:PPR"
+            url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+            params = {
+                "query": epmc_query,
+                "format": "json",
+                "pageSize": max_results * 2,  # over-fetch; we filter for medrxiv specifically
+                "resultType": "lite",
+            }
+            resp = throttled_request(url, params=params).json()
+            papers: List[Paper] = []
+            for it in resp.get("resultList", {}).get("result", []):
+                journal = (it.get("bookOrReportDetails", {}) or {}).get("publisher", "") or ""
+                publisher = (it.get("publisher") or "")
+                jt = (it.get("journalTitle") or "").lower()
+                doi = (it.get("doi") or "")
+                if "medrxiv" not in (jt + journal + publisher + doi).lower():
+                    continue
+                pid = it.get("id") or doi
+                papers.append(Paper(
+                    source="medRxiv",
+                    id=str(pid),
+                    title=it.get("title", "") or "",
+                    abstract=it.get("abstractText", "") or "",
+                    url=(f"https://www.medrxiv.org/content/{doi}" if doi else f"https://europepmc.org/article/PPR/{pid}"),
+                ))
+                if len(papers) >= max_results:
+                    break
+            return papers
+        except Exception as e:
+            print(f"medRxiv fetch error: {e}")
+            return []
+
+
+class DOAJService:
+    """DOAJ — Directory of Open Access Journals; all articles are open access."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        try:
+            from urllib.parse import quote
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            url = f"https://doaj.org/api/v2/search/articles/{quote(clean or query)}"
+            params = {"pageSize": min(max_results, 100)}
+            resp = throttled_request(url, params=params).json()
+            papers: List[Paper] = []
+            for it in resp.get("results", []):
+                bib = it.get("bibjson", {}) or {}
+                title = bib.get("title", "") or ""
+                abstract = bib.get("abstract", "") or ""
+                doi = ""
+                for ident in bib.get("identifier", []) or []:
+                    if (ident.get("type") or "").lower() == "doi":
+                        doi = ident.get("id", "")
+                        break
+                link = ""
+                for ln in bib.get("link", []) or []:
+                    if (ln.get("type") or "").lower() == "fulltext":
+                        link = ln.get("url", "")
+                        break
+                paper_id = it.get("id") or doi
+                papers.append(Paper(
+                    source="DOAJ",
+                    id=str(paper_id),
+                    title=title,
+                    abstract=abstract,
+                    url=link or (f"https://doi.org/{doi}" if doi else f"https://doaj.org/article/{it.get('id', '')}"),
+                ))
+            return papers
+        except Exception as e:
+            print(f"DOAJ fetch error: {e}")
+            return []
+
+
+class DataAggregator:
+    """Aggregates data from all active sources while respecting rate limits."""
+
+    SERVICE_MAP = {
+        DataSource.PUBMED.value: PubMedService.fetch,
+        DataSource.ARXIV.value: ArXivService.fetch,
+        DataSource.BIORXIV.value: BioRxivService.fetch,
+        "medRxiv": MedRxivService.fetch,
+        "Europe PMC": EuropePMCService.fetch,
+        "Semantic Scholar": SemanticScholarService.fetch,
+        "OpenAlex": OpenAlexService.fetch,
+        "CrossRef": CrossRefService.fetch,
+        "DOAJ": DOAJService.fetch,
+        "CORE": COREService.fetch,
+    }
+    
+    @staticmethod
+    def fetch_all(query: str, active_sources: List[str], max_per_source: int = 10, uploaded_files=None, limit: int = None):
+        """
+        Aggregates raw data from all active sources. 
+        Deduplication is removed to ensure PRISMA counts accurately reflect total records.
+        """
+        all_papers = []
+        source_counts = {} 
+        
+        search_count = limit if limit is not None else max_per_source
+        
+        for source in active_sources:
+            papers = []
+            # Status text placeholder - only show errors, not searching messages
+            status_text = st.empty()
+            
+            try:
+                # 1. Handle local files
+                if source == DataSource.LOCAL_PDF.value:
+                    if uploaded_files:
+                        from data_services import PDFService
+                        papers = PDFService.process_files(uploaded_files)
+                
+                # 2. Handle API-based sources (PubMed, ArXiv, Semantic Scholar, CORE, etc.)
+                elif source in DataAggregator.SERVICE_MAP:
+                    fetch_func = DataAggregator.SERVICE_MAP[source]
+                    papers = fetch_func(query, search_count)
+                
+                # 3. Track RAW counts per source and update UI
+                count = len(papers)
+                all_papers.extend(papers)
+                source_counts[source] = count
+                
+                # Status updates removed - now handled by optimization progress callback
+
+            except Exception as e:
+                # Catch failures so one source doesn't break the entire search
+                status_text.write(f"❌ {source}: Error occurred")
+                st.error(f"Error fetching from {source}: {str(e)}")
+                source_counts[source] = 0
+
+        if limit is not None:
+            return all_papers[:limit], source_counts
+            
+        return all_papers, source_counts
+
+    @staticmethod
+    def simulate_yield(query: str, active_sources: List[str]) -> Dict[str, int]:
+        """
+        Returns the absolute total of papers matching the query in each database 
+        without downloading full records.
+        """
+        from utils import QueryCleaner
+        results = {}
+        clean_query = QueryCleaner.clean_for_general_search(query)
+        
+        for source in active_sources:
+            try:
+                print(f"Processing source: {source}")
+                
+                # 1. PubMed & Top Journals
+                if source == DataSource.PUBMED.value:
+                    Entrez.email = Config.ENTREZ_EMAIL
+                    
+                    # Construct search term for PubMed
+                    search_term = query
+                    
+                    # retmax=0 makes the request instant as no records are downloaded
+                    try:
+                        handle = Entrez.esearch(db="pubmed", term=search_term, retmax=0)
+                        record = Entrez.read(handle)
+                        if record is not None:
+                            count = record.get("Count", 0)
+                            results[source] = int(count) if str(count).isdigit() else 0
+                        else:
+                            results[source] = 0
+                    except Exception as e:
+                        print(f"PubMed search error for {source}: {e}")
+                        results[source] = 0
+
+                # 2. ArXiv (Parsing OpenSearch XML for total results)
+                elif source == DataSource.ARXIV.value:
+                    try:
+                        url = f"{Config.ARXIV_API_URL}?search_query=all:{clean_query}&max_results=0"
+                        resp = throttled_request(url)
+                        root = ET.fromstring(resp.content)
+                        
+                        # Debug: Print the XML response to see what we're getting
+                        print(f"ArXiv XML response for query '{clean_query}':")
+                        print(resp.text[:500] + "..." if len(resp.text) > 500 else resp.text)
+                        
+                        # ArXiv uses opensearch namespace for result counts
+                        ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
+                        total_node = root.find('os:totalResults', ns)
+                        
+                        if total_node is not None and total_node.text:
+                            total_text = total_node.text.strip()
+                            print(f"ArXiv totalResults text: '{total_text}'")
+                            
+                            # Try to convert to int, handle non-numeric gracefully
+                            try:
+                                results[source] = int(total_text)
+                            except ValueError:
+                                # If not a pure number, try to extract digits
+                                digits = re.findall(r'\d+', total_text)
+                                if digits:
+                                    results[source] = int(''.join(digits))
+                                else:
+                                    print(f"Could not extract numeric count from: '{total_text}'")
+                                    results[source] = 0
+                        else:
+                            print("ArXiv totalResults node not found")
+                            results[source] = 0
+                    except Exception as e:
+                        print(f"ArXiv search error for {source}: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        results[source] = 0
+
+                # 3. BioRxiv (Metadata-only request)
+                elif source == DataSource.BIORXIV.value:
+                    try:
+                        # BioRxiv API provides counts for a date range in the 'messages' field
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=Config.BIORXIV_LOOKBACK_DAYS)
+                        date_str = f"{start_date.strftime('%Y-%m-%d')}/{end_date.strftime('%Y-%m-%d')}"
+                        
+                        # We use the 'details' endpoint which returns a 'messages' count for the range
+                        url = f"{Config.BIORXIV_API_URL}/{date_str}/0"
+                        resp = throttled_request(url).json()
+                        
+                        # Note: BioRxiv count is for the time window; keyword filtering 
+                        # for counts usually requires fetching, so this is an upper-bound estimate.
+                        messages = resp.get('messages', [])
+                        if messages:
+                            total = messages[0].get('total', 0)
+                            results[source] = int(total) if str(total).isdigit() else 0
+                        else:
+                            results[source] = 0
+                    except Exception as e:
+                        print(f"BioRxiv search error for {source}: {e}")
+                        results[source] = 0
+
+                # 3b. Europe PMC (Accessing 'hitCount' in JSON response)
+                elif source == "Europe PMC":
+                    try:
+                        # Europe PMC accepts free-text + a subset of fielded operators.
+                        # Strip PubMed-only tags ([Mesh], [tiab]) before sending.
+                        epmc_query = re.sub(r"\[[^\]]+\]", "", query)
+                        epmc_query = re.sub(r"\s+", " ", epmc_query).strip()
+                        url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+                        params = {
+                            "query": epmc_query or query,
+                            "format": "json",
+                            "pageSize": 1,
+                            "resultType": "lite",
+                        }
+                        resp = throttled_request(url, params=params).json()
+                        total = resp.get("hitCount", 0)
+                        results[source] = int(total) if str(total).isdigit() else 0
+                    except Exception as e:
+                        print(f"Europe PMC search error for {source}: {e}")
+                        results[source] = 0
+
+                # 4. Semantic Scholar (Accessing 'total' in JSON response)
+                elif source == "Semantic Scholar":
+                    try:
+                        params = {'query': query, 'limit': 0} 
+                        headers = {'x-api-key': Config.SEMANTIC_SCHOLAR_KEY} if Config.SEMANTIC_SCHOLAR_KEY else {}
+                        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+                        resp = throttled_request(url, params=params, headers=headers).json()
+                        total = resp.get('total', 0)
+                        results[source] = int(total) if str(total).isdigit() else 0
+                    except Exception as e:
+                        print(f"Semantic Scholar search error for {source}: {e}")
+                        results[source] = 0
+
+                # 4b. OpenAlex (uses meta.count from results)
+                elif source == "OpenAlex":
+                    try:
+                        oa_query = re.sub(r"\[[^\]]+\]", "", query).strip()
+                        url = "https://api.openalex.org/works"
+                        params = {"search": oa_query or query, "per_page": 1, "select": "id", "mailto": Config.ENTREZ_EMAIL}
+                        resp = throttled_request(url, params=params).json()
+                        count = (resp.get("meta") or {}).get("count", 0)
+                        results[source] = int(count) if str(count).isdigit() else 0
+                    except Exception as e:
+                        print(f"OpenAlex count error: {e}")
+                        results[source] = 0
+
+                # 4c. CrossRef (uses message.total-results)
+                elif source == "CrossRef":
+                    try:
+                        cr_query = re.sub(r"\[[^\]]+\]", "", query).strip()
+                        url = "https://api.crossref.org/works"
+                        params = {"query": cr_query or query, "rows": 0}
+                        headers = {"User-Agent": f"EvidenceEngine/1.0 (mailto:{Config.ENTREZ_EMAIL})"}
+                        resp = throttled_request(url, params=params, headers=headers).json()
+                        total = (resp.get("message") or {}).get("total-results", 0)
+                        results[source] = int(total) if str(total).isdigit() else 0
+                    except Exception as e:
+                        print(f"CrossRef count error: {e}")
+                        results[source] = 0
+
+                # 4d. medRxiv (via Europe PMC preprint source filter)
+                elif source == "medRxiv":
+                    try:
+                        clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+                        epmc_query = f"({clean}) AND SRC:PPR AND (publisher:medRxiv OR journal:medRxiv)"
+                        url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+                        params = {"query": epmc_query, "format": "json", "pageSize": 1}
+                        resp = throttled_request(url, params=params).json()
+                        total = resp.get("hitCount", 0)
+                        results[source] = int(total) if str(total).isdigit() else 0
+                    except Exception as e:
+                        print(f"medRxiv count error: {e}")
+                        results[source] = 0
+
+                # 4e. DOAJ (uses 'total' in JSON response)
+                elif source == "DOAJ":
+                    try:
+                        from urllib.parse import quote
+                        clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+                        url = f"https://doaj.org/api/v2/search/articles/{quote(clean or query)}"
+                        params = {"pageSize": 1}
+                        resp = throttled_request(url, params=params).json()
+                        total = resp.get("total", 0)
+                        results[source] = int(total) if str(total).isdigit() else 0
+                    except Exception as e:
+                        print(f"DOAJ count error: {e}")
+                        results[source] = 0
+
+                # 5. CORE (Accessing 'totalHits' in JSON response)
+                elif source == "CORE":
+                    try:
+                        headers = {"Authorization": f"Bearer {Config.CORE_API_KEY}"} if Config.CORE_API_KEY else {}
+                        # CORE v3 uses 'limit: 0' for count-only queries
+                        payload = {"q": query, "limit": 0}
+                        resp = throttled_request(Config.CORE_API_URL, params=payload, headers=headers, method="POST").json()
+                        total_hits = resp.get('totalHits', 0)
+                        results[source] = int(total_hits) if str(total_hits).isdigit() else 0
+                    except Exception as e:
+                        print(f"CORE search error for {source}: {e}")
+                        results[source] = 0
+
+                # 6. Local PDFs (Current count in session)
+                elif source == DataSource.LOCAL_PDF.value:
+                    try:
+                        # Accessing papers already loaded in the aggregator if available
+                        results[source] = len(st.session_state.get('uploaded_files', []))
+                    except Exception as e:
+                        print(f"Local PDFs error for {source}: {e}")
+                        results[source] = 0
+                        
+                else:
+                    print(f"Unknown source: {source}")
+                    results[source] = 0
+
+            except Exception as e:
+                # This is the outer catch-all for any unexpected errors
+                print(f"Unexpected error simulating yield for {source}: {e}")
+                import traceback
+                traceback.print_exc()  # Print full stack trace
+                results[source] = 0
+                
+        return results
+
+    @staticmethod
+    def get_total_counts(query: str, sources: List[str]) -> Dict[str, int]:
+        """Fetches only the total result count for a query from selected sources."""
+        from utils import QueryCleaner
+        results = {}
+        clean_query = QueryCleaner.clean_for_general_search(query)
+        
+        for source in sources:
+            try:
+                # PubMed: Use esearch with retmax=0
+                if source == DataSource.PUBMED.value:
+                    Entrez.email = Config.ENTREZ_EMAIL
+                    handle = Entrez.esearch(db="pubmed", term=query, retmax=0)
+                    record = Entrez.read(handle)
+                    results[source] = int(record.get('Count', 0))
+
+                # ArXiv: Parse the totalResults from the OpenSearch XML
+                elif source == DataSource.ARXIV.value:
+                    url = f"{Config.ARXIV_API_URL}?search_query=all:{clean_query}&max_results=0"
+                    resp = throttled_request(url)
+                    root = ET.fromstring(resp.content)
+                    ns = {'os': 'http://a9.com/-/spec/opensearch/1.1/'}
+                    total_node = root.find('os:totalResults', ns)
+                    results[source] = int(total_node.text) if total_node is not None else 0
+
+                # Semantic Scholar: Use the 'total' field in response metadata
+                elif source == "Semantic Scholar":
+                    params = {'query': query, 'limit': 1, 'fields': 'title'} # Added fields
+                    resp = throttled_request(url, params=params, headers=headers).json()
+                    # Debug print here would show you the raw JSON if it's 0
+                    results[source] = int(resp.get('total', 0))
+
+                # CORE: Use 'totalHits' field
+                elif source == "CORE":
+                    payload = {"q": query, "limit": 0} # limit 0 is faster for just counts
+                    resp = throttled_request(Config.CORE_API_URL, params=payload, headers=headers).json()
+                    # CORE v3 usually returns a 'totalHits' at the top level
+                    results[source] = int(resp.get('totalHits', 0))
+                
+                # BioRxiv: The 'messages' array contains the total 'count'
+                elif source == DataSource.BIORXIV.value:
+                    # Note: BioRxiv search is usually date-based in your current config
+                    # This assumes you are fetching the last N days as per Config
+                    url = f"{Config.BIORXIV_API_URL}/biorxiv/last/{Config.BIORXIV_LOOKBACK_DAYS}"
+                    resp = throttled_request(url).json()
+                    results[source] = int(resp.get('messages', [{}])[0].get('count', 0))
+
+            except Exception as e:
+                st.warning(f"Could not fetch count for {source}: {e}")
+                results[source] = 0
+                
+        return results
+
+    @staticmethod
+    def get_all_counts(query: str, selected_sources: List[str] = None) -> Dict[str, int]:
+        """Hits the 'count' endpoints of APIs to quickly gauge yield."""
+        results = {}
+        
+        # Default to all sources if none specified
+        if selected_sources is None:
+            selected_sources = ["PubMed", "arXiv", "Semantic Scholar"]
+        
+        # Only query the selected sources
+        
+        # PubMed Count
+        if "PubMed" in selected_sources:
+            try:
+                Entrez.email = Config.ENTREZ_EMAIL
+                
+                # Use modern Entrez API (esearch instead of deprecated egquery)
+                handle = Entrez.esearch(db="pubmed", term=query, retmax=0)
+                record = Entrez.read(handle)
+                
+                # Get count from esearch result
+                count = int(record["Count"]) if record.get("Count", "0").isdigit() else 0
+                results["PubMed"] = count
+            except Exception as e:
+                st.error(f"❌ PubMed count error: {e}")
+                results["PubMed"] = 0
+        
+        # arXiv Count
+        if "arXiv" in selected_sources:
+            try:
+                from utils import QueryCleaner
+                clean_arxiv_query = QueryCleaner.clean_for_general_search(query)
+                url = f"{Config.ARXIV_API_URL}?search_query=all:{urllib.parse.quote(clean_arxiv_query)}&max_results=0"
+                resp = throttled_request(url)
+                
+                # Validate response before parsing
+                if resp.status_code != 200:
+                    st.warning(f"⚠️ arXiv count unavailable (status {resp.status_code})")
+                    results["arXiv"] = 0
+                elif not resp.content.strip().startswith(b'<'):
+                    st.warning("⚠️ arXiv returned non-XML response")
+                    results["arXiv"] = 0
+                else:
+                    root = ET.fromstring(resp.content)
+                    total_results = root.find('{http://a9.com/-/spec/opensearch/1.1/}totalResults').text
+                    results["arXiv"] = int(total_results) if total_results and total_results.isdigit() else 0
+            except Exception as e:
+                st.error(f"❌ arXiv count error: {e}")
+                results["arXiv"] = 0
+
+        # Semantic Scholar Count
+        if "Semantic Scholar" in selected_sources:
+            try:
+                url = Config.SEMANTIC_SCHOLAR_URL
+                params = {'query': query, 'limit': 1}
+                resp = throttled_request(url, params=params).json()
+                results["Semantic Scholar"] = int(resp.get('total', 0))
+            except Exception as e:
+                st.error(f"❌ Semantic Scholar count error: {e}")
+                results["Semantic Scholar"] = 0
+        
+        return results

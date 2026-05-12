@@ -1,0 +1,193 @@
+import { useEffect, useRef, useState } from "react";
+import { Card } from "./ui/card";
+import { Label } from "./ui/label";
+import { Checkbox } from "./ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
+import { Slider } from "./ui/slider";
+import { Button } from "./ui/button";
+import { Separator } from "./ui/separator";
+import { Badge } from "./ui/badge";
+import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Loader2, Gauge } from "lucide-react";
+import { ALL_SOURCES } from "../lib/mockServices";
+import { useStore, PageId } from "../lib/store";
+import { SessionsPanel } from "./SessionsPanel";
+
+const TASK_LABEL: Record<string, string> = {
+  "home-analysis": "Strategy analysis",
+  "ai-optimize": "AI Optimize",
+  "quality-assess": "Quality assessment",
+  "abstract-screen": "Abstract screening",
+  "fulltext-fetch": "Full-text fetch",
+  "full-text-screen": "Full-text screening",
+  "snowball": "Citation snowball",
+  "snowball-screen": "Snowball screening",
+  "table-extract": "Table extraction",
+  "text-extract": "Text extraction",
+};
+
+const NAV: { id: PageId; label: string; icon: any }[] = [
+  { id: "home", label: "Home", icon: Home },
+  { id: "simulation", label: "Simulation", icon: BarChart3 },
+  { id: "quality", label: "Quality Assessment", icon: ShieldCheck },
+  { id: "abstract", label: "Abstract Screening", icon: FileSearch },
+  { id: "acquisition", label: "Full-Text Acquisition", icon: FileDown },
+  { id: "fulltext", label: "Full-Text Evidence", icon: FlaskConical },
+  { id: "snowball", label: "Citation Snowball", icon: Network },
+  { id: "extraction", label: "Table Extraction", icon: Table2 },
+  { id: "textextraction", label: "Text Extraction", icon: ScanText },
+  { id: "prisma", label: "PRISMA Flow", icon: GitBranch },
+  { id: "benchmark", label: "Benchmark", icon: Gauge },
+];
+
+export function Sidebar() {
+  const s = useStore();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [localModels, setLocalModels] = useState<string[]>([]);
+  const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    fetch("/api/models/local")
+      .then(r => r.json())
+      .then(d => {
+        const models: string[] = Array.isArray(d.models) ? d.models : [];
+        setLocalModels(models);
+        setOllamaRunning(!!d.running);
+        // If the currently-selected model isn't installed locally, pick the first one
+        // that is (preferring a medical-tuned model if present).
+        if (models.length > 0 && !models.includes(s.model) && !/^(claude|gpt|gemini)/.test(s.model)) {
+          const preferred = models.find(m => /medgemma/i.test(m))
+            || models.find(m => /qwen2\.5/i.test(m))
+            || models.find(m => /llama3\.1/i.test(m))
+            || models[0];
+          s.setModel(preferred);
+        }
+      })
+      .catch(() => setOllamaRunning(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleSource = (src: string) => {
+    s.setSources(s.sources.includes(src) ? s.sources.filter(x => x !== src) : [...s.sources, src]);
+  };
+
+  return (
+    <aside className="w-72 shrink-0 border-r bg-muted/30 overflow-y-auto h-screen sticky top-0">
+      <div className="p-4">
+        <div className="flex items-center gap-2 mb-4">
+          <Microscope className="size-5 text-primary" />
+          <span className="font-semibold">Evidence Synthesis</span>
+        </div>
+
+        {/* Active tasks (persists across page navigation) */}
+        {Object.values(s.tasks).filter(t => t.status === "running").length > 0 && (
+          <Card className="p-2 mb-3 bg-primary/5 border-primary/30 space-y-1">
+            {Object.values(s.tasks)
+              .filter(t => t.status === "running")
+              .map(t => (
+                <div key={t.kind} className="flex items-center gap-2 text-xs">
+                  <Loader2 className="size-3 animate-spin text-primary shrink-0" />
+                  <div className="flex-1 truncate font-medium">{TASK_LABEL[t.kind] || t.kind}</div>
+                  <button
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => s.cancelTask(t.kind)}
+                    title="Cancel"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+          </Card>
+        )}
+
+        {/* Navigation */}
+        <nav className="space-y-1 mb-4">
+          {NAV.map(n => {
+            const Icon = n.icon;
+            const active = s.page === n.id;
+            return (
+              <button key={n.id} onClick={() => s.setPage(n.id)}
+                className={`w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
+                <Icon className="size-4" />{n.label}
+              </button>
+            );
+          })}
+        </nav>
+
+        <Separator className="my-4" />
+
+        <div className="mb-3">
+          <SessionsPanel />
+        </div>
+
+        <Card className="p-3 mb-3">
+          <Label className="mb-2 block">AI Model</Label>
+          <Select value={s.model} onValueChange={s.setModel}>
+            <SelectTrigger><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {localModels.length > 0 && (
+                <>
+                  <div className="px-2 py-1 text-xs text-muted-foreground">Local (Ollama)</div>
+                  {localModels.map(m => (
+                    <SelectItem key={m} value={m}>{m}</SelectItem>
+                  ))}
+                </>
+              )}
+              <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground">Cloud (API key required)</div>
+              <SelectItem value="claude-opus-4-7">Claude Opus 4.7</SelectItem>
+              <SelectItem value="claude-sonnet-4-6">Claude Sonnet 4.6</SelectItem>
+              <SelectItem value="claude-haiku-4-5">Claude Haiku 4.5</SelectItem>
+              <SelectItem value="gpt-4o">GPT-4o</SelectItem>
+              <SelectItem value="gpt-4o-mini">GPT-4o mini</SelectItem>
+              <SelectItem value="gemini-1.5-pro">Gemini 1.5 Pro</SelectItem>
+            </SelectContent>
+          </Select>
+          {ollamaRunning === false && (
+            <p className="text-xs text-amber-600 mt-2">
+              Ollama isn't reachable on localhost:11434. Start it with <code className="text-[10px]">ollama serve</code> or pull a model with <code className="text-[10px]">ollama pull &lt;name&gt;</code>.
+            </p>
+          )}
+          {ollamaRunning && localModels.length === 0 && (
+            <p className="text-xs text-amber-600 mt-2">
+              Ollama is running but no models pulled. Try <code className="text-[10px]">ollama pull qwen2.5</code>.
+            </p>
+          )}
+        </Card>
+
+        <Card className="p-3 mb-3">
+          <Label className="mb-2 block">Active Databases</Label>
+          <div className="space-y-2">
+            {ALL_SOURCES.map(src => (
+              <label key={src} className="flex items-center gap-2 cursor-pointer">
+                <Checkbox checked={s.sources.includes(src)} onCheckedChange={() => toggleSource(src)} />
+                <span className="text-sm">{src}</span>
+              </label>
+            ))}
+          </div>
+          <Separator className="my-3" />
+          <Label className="mb-2 block text-sm">Papers per source: <span className="text-primary">{s.numPerSource}</span></Label>
+          <Slider value={[s.numPerSource]} min={5} max={50} step={5} onValueChange={(v) => s.setNumPerSource(v[0])} />
+        </Card>
+
+        <Card className="p-3">
+          <Label className="mb-2 block">Local PDFs</Label>
+          <input ref={fileRef} type="file" multiple accept=".pdf" className="hidden"
+            onChange={(e) => e.target.files && s.setFiles([...s.files, ...Array.from(e.target.files)])} />
+          <Button variant="outline" size="sm" className="w-full" onClick={() => fileRef.current?.click()}>
+            <Upload className="size-4 mr-2" /> Upload PDFs
+          </Button>
+          {s.files.length > 0 && (
+            <div className="mt-3 space-y-1">
+              {s.files.map((f, i) => (
+                <div key={i} className="flex items-center justify-between text-xs bg-background rounded px-2 py-1">
+                  <span className="flex items-center gap-1 truncate"><FileText className="size-3" />{f.name}</span>
+                  <button onClick={() => s.setFiles(s.files.filter((_, j) => j !== i))}><X className="size-3" /></button>
+                </div>
+              ))}
+              <Badge variant="secondary">{s.files.length} file(s)</Badge>
+            </div>
+          )}
+        </Card>
+      </div>
+    </aside>
+  );
+}
