@@ -1,0 +1,25 @@
+# van Dis et al. 2020 — Long-term outcomes of cognitive behavioral therapy for anxiety-related disorders
+# Published as: van Dis EAM et al. JAMA Psychiatry 2020;77(3):265-273.
+# https://jamanetwork.com/journals/jamapsychiatry/fullarticle/2755191
+
+pico:
+  population: Adults (≥18) with anxiety disorders (GAD, panic, social anxiety, specific phobia, PTSD, OCD) per DSM or ICD
+  intervention: Cognitive behavioral therapy (CBT) — individual or group, in-person or remote
+  comparator: Any (active comparator, waitlist, treatment-as-usual, pill placebo)
+  outcome: Anxiety symptom severity at long-term follow-up (≥ 12 months post-treatment)
+
+inclusion:
+  - Randomized controlled trial design
+  - Adults aged 18 years or older
+  - Primary diagnosis of an anxiety-related disorder (GAD, panic, social anxiety, specific phobia, PTSD, or OCD) per DSM or ICD criteria
+  - Trial of cognitive behavioral therapy (CBT) as the intervention
+  - Reports anxiety symptom outcomes at long-term follow-up of 12 months or more after treatment ended
+  - Published in English in a peer-reviewed journal
+
+exclusion:
+  - Non-randomized design (cohort, case-control, case series, open-label trial)
+  - Pediatric or adolescent populations only (under 18)
+  - Primary diagnosis other than an anxiety disorder
+  - No long-term follow-up (< 12 months post-treatment)
+  - Editorials, letters, conference abstracts, study protocols, dissertations
+  - Animal or preclinical studies

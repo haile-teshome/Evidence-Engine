@@ -1,0 +1,25 @@
+# Muthu_2021 — RCTs in lumbar spine surgery / posterior lumbar fusion
+# Topic inferred from positive paper titles (lumbar fusion, lumbar disc arthroplasty,
+# spinal stenosis, scoliosis surgery)
+# Source SR: Muthu et al. 2021 (lumbar spine surgery RCT SLR)
+
+pico:
+  population: Adults undergoing lumbar spine surgery for degenerative conditions (degenerative disc disease, spinal stenosis, spondylolisthesis, scoliosis, herniated disc) or related lumbar pathology
+  intervention: A surgical technique, implant, biologic, or perioperative adjunct used during lumbar spine surgery (lumbar fusion, lumbar disc arthroplasty, posterior fusion, decompression, BMP, autograft, lidocaine, etc.)
+  comparator: An alternative surgical technique, implant, biologic, or perioperative protocol (or placebo / standard of care)
+  outcome: Clinical outcome of lumbar spine surgery — functional improvement (ODI, VAS, JOA), pain, fusion rates, complications, blood loss, operative time, or reoperation
+
+inclusion:
+  - Randomized controlled trial design (or randomized comparison)
+  - Adult patients (≥18 years) undergoing lumbar spine surgery
+  - Compared two or more surgical techniques, implants, biologics, or perioperative protocols
+  - Reported at least one outcome relevant to lumbar surgery (functional, radiographic, complication, or perioperative)
+  - Published in English in a peer-reviewed journal
+
+exclusion:
+  - Non-randomized study design (retrospective case series, cohort, registry analysis, case reports)
+  - Pediatric population only (under 18 years)
+  - Cervical or thoracic spine surgery only (not lumbar)
+  - Non-surgical interventions only (conservative care without operative comparison)
+  - Animal or cadaveric / biomechanical studies
+  - Reviews, meta-analyses, editorials, conference abstracts

@@ -1,0 +1,63 @@
+# --- macOS / OS clutter ---
+.DS_Store
+Thumbs.db
+
+# --- Secrets / environment ---
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.python-version
+
+# --- Node / pnpm / Vite ---
+node_modules/
+dist/
+build/
+.vite/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# --- Benchmark reports (large; user-regenerated) ---
+benchmark/reports/
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Claude Code local state ---
+.claude/
+
+# --- Misc artifacts ---
+*.tmp
+*.bak
+
+# --- Publication / paper artefacts (kept outside the repo) ---
+paper/
+manuscript*.md
+manuscript*.docx
+manuscript*.pdf
+cover_letter*
+*_submission_*.md
+*_submission_*.csv
+*_tasks.csv
+*_tasks.md
+tripod_llm_checklist*
+REPRODUCIBILITY.md
+submission_*/
+~$*
