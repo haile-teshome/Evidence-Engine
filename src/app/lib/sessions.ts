@@ -17,6 +17,8 @@ export type SessionData = {
   duplicatesCount: number;
   qualityReports: any[] | null;
   excludedByQuality: string[];
+  rerankThreshold?: number;
+  rerankResults?: any | null;
   results: any[] | null;
   fullTextResults: any[] | null;
   snowballResults: any[] | null;

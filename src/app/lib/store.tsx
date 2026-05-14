@@ -1,8 +1,8 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport } from "./mockServices";
-import { apiConfig } from "./apiClient";
+import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method } from "./apiClient";
 
-export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "benchmark";
+export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta";
 
 export type FullTextRecord = { paper_id: string; title: string; url: string; source: string; status: "found" | "missing" | "pending"; text?: string; reason?: string };
 export type TextExtractionResult = { paper_id: string; title: string; query: string; summary: string; spans: { start: number; end: number; label?: string }[]; values: { field: string; value: string; quote?: string }[] };
@@ -88,6 +88,24 @@ type Ctx = {
   qualityReports: QualityReport[] | null; setQualityReports: (v: QualityReport[] | null) => void;
   excludedByQuality: Set<string>; setExcludedByQuality: React.Dispatch<React.SetStateAction<Set<string>>>;
 
+  // Relevance reranking — LEADS-scored papers from the home-analysis pipeline.
+  // Threshold is user-tunable in the sidebar; rerankResults holds the full
+  // ranked list so the UI can re-filter without re-running LLM calls.
+  rerankThreshold: number; setRerankThreshold: (v: number) => void;
+  rerankResults: RerankResult | null; setRerankResults: (v: RerankResult | null) => void;
+
+  // Meta-analysis agent — extracted effect sizes + full analysis bundle
+  // (pool + subgroup + LOO + funnel + Egger + Begg + trim-and-fill +
+  // meta-regression). All editable by the user; rows can be removed or
+  // corrected without re-running LLM extraction, then re-run the analysis
+  // against the edited list.
+  metaOutcome: string; setMetaOutcome: (v: string) => void;
+  metaMeasure: EffectMeasure | ""; setMetaMeasure: (v: EffectMeasure | "") => void;
+  metaTau2Method: Tau2Method; setMetaTau2Method: (v: Tau2Method) => void;
+  metaUseKnappHartung: boolean; setMetaUseKnappHartung: (v: boolean) => void;
+  metaExtractions: StudyEffect[] | null; setMetaExtractions: React.Dispatch<React.SetStateAction<StudyEffect[] | null>>;
+  metaRun: MetaRunResult | null; setMetaRun: (v: MetaRunResult | null) => void;
+
   // Results
   results: ScreenResult[] | null; setResults: (v: ScreenResult[] | null) => void;
   screeningDuration: number; setScreeningDuration: (v: number) => void;
@@ -140,7 +158,11 @@ const StoreCtx = createContext<Ctx | null>(null);
 
 export function StoreProvider({ children }: { children: ReactNode }) {
   const [page, setPage] = useState<PageId>("home");
-  const [model, setModel] = useState("llama3.1");
+  // Default to LEADS — the benchmark's highest-performing screening model
+  // (LEADS-mistral-7b × LEADS-native @ score ≥ +0.20: recall=1.000,
+  // specificity=0.676, MCC=+0.260 on van_Dis_2020). The Backend resolves
+  // "leads" to the full GGUF tag and routes to the LEADS-native pipeline.
+  const [model, setModel] = useState("leads");
   const [sources, setSources] = useState<string[]>(["PubMed", "Europe PMC", "Semantic Scholar"]);
   const [numPerSource, setNumPerSource] = useState(15);
   const [files, setFiles] = useState<File[]>([]);
@@ -163,6 +185,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [duplicatesCount, setDuplicatesCount] = useState(0);
   const [qualityReports, setQualityReports] = useState<QualityReport[] | null>(null);
   const [excludedByQuality, setExcludedByQuality] = useState<Set<string>>(new Set());
+
+  // Relevance rerank: -0.2 keeps "maybe relevant" and better. Tunable in sidebar.
+  const [rerankThreshold, setRerankThreshold] = useState<number>(-0.2);
+  const [rerankResults, setRerankResults] = useState<RerankResult | null>(null);
+
+  // Meta-analysis agent state. The extractions list is mutable so the user
+  // can correct individual rows before pooling. metaRun holds all derived
+  // analyses (pool, subgroup, LOO, funnel, Egger, Begg, trim-and-fill,
+  // meta-regression) so the tabs can render without re-hitting the backend.
+  const [metaOutcome, setMetaOutcome] = useState<string>("");
+  const [metaMeasure, setMetaMeasure] = useState<EffectMeasure | "">("");
+  const [metaTau2Method, setMetaTau2Method] = useState<Tau2Method>("DL");
+  const [metaUseKnappHartung, setMetaUseKnappHartung] = useState<boolean>(false);
+  const [metaExtractions, setMetaExtractions] = useState<StudyEffect[] | null>(null);
+  const [metaRun, setMetaRun] = useState<MetaRunResult | null>(null);
 
   const [results, setResults] = useState<ScreenResult[] | null>(null);
   const [screeningDuration, setScreeningDuration] = useState(0);
@@ -247,6 +284,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     sources, numPerSource, model,
     rawPapers, uniquePapers, duplicatesCount, qualityReports,
     excludedByQuality: Array.from(excludedByQuality),
+    rerankThreshold, rerankResults,
     results, fullTextResults, snowballResults, snowballScreened, extractedPapers, prisma,
   });
 
@@ -267,6 +305,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setDuplicatesCount(d.duplicatesCount ?? 0);
     setQualityReports(d.qualityReports ?? null);
     setExcludedByQuality(new Set(d.excludedByQuality || []));
+    if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
+    setRerankResults(d.rerankResults ?? null);
     setResults(d.results ?? null);
     setFullTextResults(d.fullTextResults ?? null);
     setSnowballResults(d.snowballResults ?? null);
@@ -281,6 +321,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setSimulation(null); setDbTestResults(null); setAgenticTrace(null); setAgenticSummary(null);
     setRawPapers(null); setUniquePapers(null); setDuplicatesCount(0);
     setQualityReports(null); setExcludedByQuality(new Set());
+    setRerankThreshold(-0.2); setRerankResults(null);
+    setMetaOutcome(""); setMetaMeasure(""); setMetaTau2Method("DL");
+    setMetaUseKnappHartung(false);
+    setMetaExtractions(null); setMetaRun(null);
     setResults(null); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
     setSnowballResults(null); setSnowballScreened(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
@@ -295,6 +339,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
     rawPapers, setRawPapers, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
     qualityReports, setQualityReports, excludedByQuality, setExcludedByQuality,
+    rerankThreshold, setRerankThreshold, rerankResults, setRerankResults,
+    metaOutcome, setMetaOutcome, metaMeasure, setMetaMeasure,
+    metaTau2Method, setMetaTau2Method, metaUseKnappHartung, setMetaUseKnappHartung,
+    metaExtractions, setMetaExtractions, metaRun, setMetaRun,
     results, setResults, screeningDuration, setScreeningDuration, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
