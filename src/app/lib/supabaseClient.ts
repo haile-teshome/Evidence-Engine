@@ -1,14 +1,28 @@
-import { createClient } from "@supabase/supabase-js";
-import { projectId, publicAnonKey } from "../../../utils/supabase/info";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { projectId, publicAnonKey, supabaseConfigured } from "../../../utils/supabase/info";
 
-export const supabase = createClient(
-  `https://${projectId}.supabase.co`,
-  publicAnonKey,
+// When Supabase isn't configured we still construct a client (with placeholder
+// URL/key) so consumers can import `supabase` safely — but we never actually
+// call its network methods. `supabaseConfigured` is the runtime gate consumers
+// must respect (see auth.tsx).
+export const supabase: SupabaseClient = createClient(
+  supabaseConfigured ? `https://${projectId}.supabase.co` : "https://placeholder.supabase.co",
+  supabaseConfigured ? publicAnonKey : "placeholder-anon-key",
 );
 
-export const SERVER_BASE = `https://${projectId}.supabase.co/functions/v1/make-server-7e4eb0f2`;
+export const SERVER_BASE = supabaseConfigured
+  ? `https://${projectId}.supabase.co/functions/v1/make-server-7e4eb0f2`
+  : "";
+
+export { supabaseConfigured };
 
 export async function apiFetch(path: string, opts: RequestInit = {}) {
+  if (!supabaseConfigured) {
+    throw new Error(
+      "Supabase is not configured (sessions / cloud features disabled). " +
+        "Set VITE_SUPABASE_PROJECT_ID and VITE_SUPABASE_ANON_KEY in .env.local to enable."
+    );
+  }
   const { data: { session } } = await supabase.auth.getSession();
   const token = session?.access_token || publicAnonKey;
   const res = await fetch(`${SERVER_BASE}${path}`, {

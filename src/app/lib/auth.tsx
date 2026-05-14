@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { supabase, apiFetch } from "./supabaseClient";
+import { supabase, apiFetch, supabaseConfigured } from "./supabaseClient";
 
 type AuthUser = { id: string; email: string; name?: string };
 
@@ -21,6 +21,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    // No Supabase configured → render as a logged-out demo user, no network calls.
+    if (!supabaseConfigured) {
+      setLoading(false);
+      return;
+    }
     let active = true;
     supabase.auth.getSession().then(({ data }) => {
       if (!active) return;
@@ -35,16 +40,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => { active = false; sub.subscription.unsubscribe(); };
   }, []);
 
+  function ensureConfigured() {
+    if (!supabaseConfigured) {
+      throw new Error(
+        "Supabase auth is not configured. Set VITE_SUPABASE_PROJECT_ID and " +
+          "VITE_SUPABASE_ANON_KEY in .env.local to enable sign-in."
+      );
+    }
+  }
+
   async function signIn(email: string, password: string) {
+    ensureConfigured();
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw new Error(`Sign-in failed: ${error.message}`);
   }
   async function signUp(email: string, password: string, name: string) {
+    ensureConfigured();
     await apiFetch("/signup", { method: "POST", body: JSON.stringify({ email, password, name }) });
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) throw new Error(`Auto sign-in after signup failed: ${error.message}`);
   }
   async function signInWithProvider(provider: OAuthProvider) {
+    ensureConfigured();
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: { redirectTo: window.location.origin },
@@ -52,6 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) throw new Error(`OAuth (${provider}) failed: ${error.message}. Make sure the provider is enabled in your Supabase project.`);
   }
   async function signOut() {
+    if (!supabaseConfigured) { setUser(null); return; }
     const { error } = await supabase.auth.signOut();
     if (error) console.error(`Sign-out error: ${error.message}`);
   }
