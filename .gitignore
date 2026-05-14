@@ -31,8 +31,8 @@ build/
 npm-debug.log*
 pnpm-debug.log*
 
-# --- Benchmark reports (large; user-regenerated) ---
-benchmark/reports/
+# --- Benchmark workspace (moved out of this repo) ---
+benchmark/
 
 # --- Editor / IDE ---
 .vscode/
@@ -46,6 +46,9 @@ benchmark/reports/
 # --- Misc artifacts ---
 *.tmp
 *.bak
+
+# --- setup.sh runtime state (PIDs + logs of background services) ---
+.runtime/
 
 # --- Publication / paper artefacts (kept outside the repo) ---
 paper/

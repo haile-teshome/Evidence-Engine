@@ -30,6 +30,11 @@ const FLAVOR: Record<string, string[]> = {
     "Asking Semantic Scholar for related work…",
     "Gathering an initial evidence sample…",
   ],
+  rerank: [
+    "Scoring papers for PICO relevance with LEADS…",
+    "Filtering out tangential hits…",
+    "Ranking by per-PICO eligibility…",
+  ],
   question: [
     "Phrasing the formal research question…",
     "Tightening clinical specificity…",

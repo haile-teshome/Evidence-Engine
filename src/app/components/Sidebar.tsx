@@ -7,7 +7,7 @@ import { Slider } from "./ui/slider";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { Badge } from "./ui/badge";
-import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Loader2, Gauge } from "lucide-react";
+import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2 } from "lucide-react";
 import { ALL_SOURCES } from "../lib/mockServices";
 import { useStore, PageId } from "../lib/store";
 import { SessionsPanel } from "./SessionsPanel";
@@ -25,6 +25,20 @@ const TASK_LABEL: Record<string, string> = {
   "text-extract": "Text extraction",
 };
 
+// Friendly display names for known model tags. Keep the value field
+// pointing at the actual Ollama / provider id; only the label changes.
+function formatModelName(m: string): string {
+  if (/leads.*mistral/i.test(m)) return "LEADS-Mistral 7B  (default — screening)";
+  if (/medgemma.*27b/i.test(m)) return "MedGemma 27B  (clinical)";
+  if (/medgemma/i.test(m)) return "MedGemma";
+  if (/qwen2\.5.*7b/i.test(m)) return "Qwen 2.5 7B";
+  if (/qwen2\.5/i.test(m)) return "Qwen 2.5";
+  if (/llama3\.2.*3b/i.test(m)) return "Llama 3.2 3B  (fast)";
+  if (/llama3\.1/i.test(m)) return "Llama 3.1";
+  if (/llama/i.test(m)) return m.replace(/:latest$/, "");
+  return m.replace(/^hf\.co\//, "").replace(/-GGUF.*$/, "").replace(/:latest$/, "");
+}
+
 const NAV: { id: PageId; label: string; icon: any }[] = [
   { id: "home", label: "Home", icon: Home },
   { id: "simulation", label: "Simulation", icon: BarChart3 },
@@ -36,7 +50,7 @@ const NAV: { id: PageId; label: string; icon: any }[] = [
   { id: "extraction", label: "Table Extraction", icon: Table2 },
   { id: "textextraction", label: "Text Extraction", icon: ScanText },
   { id: "prisma", label: "PRISMA Flow", icon: GitBranch },
-  { id: "benchmark", label: "Benchmark", icon: Gauge },
+  { id: "meta", label: "Meta-analysis", icon: Sigma },
 ];
 
 export function Sidebar() {
@@ -52,10 +66,17 @@ export function Sidebar() {
         const models: string[] = Array.isArray(d.models) ? d.models : [];
         setLocalModels(models);
         setOllamaRunning(!!d.running);
-        // If the currently-selected model isn't installed locally, pick the first one
-        // that is (preferring a medical-tuned model if present).
-        if (models.length > 0 && !models.includes(s.model) && !/^(claude|gpt|gemini)/.test(s.model)) {
-          const preferred = models.find(m => /medgemma/i.test(m))
+        // Pick a sensible installed model. LEADS-mistral wins by benchmark
+        // (recall=1.0, spec=0.68); fall back to medical-tuned > qwen2.5 > llama.
+        const leadsTag = models.find(m => /leads.*mistral/i.test(m));
+        const isLeadsAlias = s.model === "leads";
+        if (isLeadsAlias && leadsTag) {
+          // Resolve the "leads" alias to the actual Ollama tag so the dropdown
+          // selection matches a real <SelectItem> and renders the friendly name.
+          s.setModel(leadsTag);
+        } else if (models.length > 0 && !models.includes(s.model) && !/^(claude|gpt|gemini)/.test(s.model)) {
+          const preferred = leadsTag
+            || models.find(m => /medgemma/i.test(m))
             || models.find(m => /qwen2\.5/i.test(m))
             || models.find(m => /llama3\.1/i.test(m))
             || models[0];
@@ -127,9 +148,16 @@ export function Sidebar() {
               {localModels.length > 0 && (
                 <>
                   <div className="px-2 py-1 text-xs text-muted-foreground">Local (Ollama)</div>
-                  {localModels.map(m => (
-                    <SelectItem key={m} value={m}>{m}</SelectItem>
-                  ))}
+                  {/* Sort so the LEADS tag floats to the top of the local list. */}
+                  {[...localModels]
+                    .sort((a, b) => {
+                      const aLeads = /leads.*mistral/i.test(a) ? 0 : 1;
+                      const bLeads = /leads.*mistral/i.test(b) ? 0 : 1;
+                      return aLeads - bLeads || a.localeCompare(b);
+                    })
+                    .map(m => (
+                      <SelectItem key={m} value={m}>{formatModelName(m)}</SelectItem>
+                    ))}
                 </>
               )}
               <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground">Cloud (API key required)</div>
@@ -166,6 +194,23 @@ export function Sidebar() {
           <Separator className="my-3" />
           <Label className="mb-2 block text-sm">Papers per source: <span className="text-primary">{s.numPerSource}</span></Label>
           <Slider value={[s.numPerSource]} min={5} max={50} step={5} onValueChange={(v) => s.setNumPerSource(v[0])} />
+          <Separator className="my-3" />
+          <Label className="mb-2 block text-sm">
+            Relevance threshold (LEADS):{" "}
+            <span className="text-primary tabular-nums">
+              {s.rerankThreshold >= 0 ? "+" : ""}{s.rerankThreshold.toFixed(2)}
+            </span>
+          </Label>
+          <Slider
+            value={[s.rerankThreshold]}
+            min={-1}
+            max={1}
+            step={0.1}
+            onValueChange={(v) => s.setRerankThreshold(Number(v[0].toFixed(2)))}
+          />
+          <p className="text-[10px] text-muted-foreground mt-1">
+            Pre-summary relevance filter. Lower = more papers kept. Default −0.20 keeps "maybe relevant" and better; +0.20 is the paper's screening-grade cutoff.
+          </p>
         </Card>
 
         <Card className="p-3">

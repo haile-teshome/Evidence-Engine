@@ -189,11 +189,142 @@ const INITIAL_STAGES: Stage[] = [
   { id: "pico", label: "Infer PICO framework", status: "pending" },
   { id: "query", label: "Generate MeSH search string", status: "pending" },
   { id: "papers", label: "Fetch an initial sample of papers", status: "pending" },
+  { id: "rerank", label: "Score papers for relevance (LEADS)", status: "pending" },
   { id: "question", label: "Draft formal research question", status: "pending" },
   { id: "summary", label: "Summarize the literature found", status: "pending" },
   { id: "suggestions", label: "Suggest refinements", status: "pending" },
   { id: "adversarial", label: "Build adversarial search", status: "pending" },
 ];
+
+// Default LEADS aggregate score threshold for the pre-summary relevance filter.
+// The actual value used at runtime is s.rerankThreshold from the store
+// (user-tunable in the sidebar). This default seeds new sessions.
+// −0.2 keeps "maybe relevant" and better; tuned looser than the screening-grade
+// +0.20 sweet spot so the summary has more grounding candidates to choose from.
+const DEFAULT_RERANK_THRESHOLD = -0.2;
+
+function scoreBadgeClass(score: number, threshold: number): string {
+  if (score >= 0.5) return "bg-emerald-100 text-emerald-800";
+  if (score >= threshold) return "bg-emerald-50 text-emerald-700";
+  if (score >= threshold - 0.3) return "bg-amber-50 text-amber-700";
+  return "bg-rose-50 text-rose-700";
+}
+
+function RelevanceExplorer() {
+  const s = useStore();
+  const r = s.rerankResults;
+  if (!r) return null;
+  // Re-filter live against the current slider value rather than the value used
+  // at run time, so moving the slider updates the kept/dropped split without
+  // re-running LEADS.
+  const threshold = s.rerankThreshold;
+  const kept = r.ranked.filter(x => x.leads_score >= threshold);
+  const dropped = r.ranked.filter(x => x.leads_score < threshold);
+  const ranAtThreshold = r.threshold;
+  const drift = Math.abs(threshold - ranAtThreshold) > 0.005;
+
+  return (
+    <Collapsible>
+      <CollapsibleTrigger asChild>
+        <Button variant="outline" size="sm" className="w-full justify-between mt-3">
+          <span>
+            Relevance rerank · {kept.length} kept / {dropped.length} dropped
+            <span className="text-muted-foreground ml-2 text-xs tabular-nums">
+              (threshold {threshold >= 0 ? "+" : ""}{threshold.toFixed(2)})
+            </span>
+          </span>
+          <ChevronDown className="size-4" />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="pt-4 space-y-4">
+        {drift && (
+          <Alert>
+            <AlertDescription>
+              Threshold has been changed since this run (was {ranAtThreshold >= 0 ? "+" : ""}{ranAtThreshold.toFixed(2)}, now {threshold >= 0 ? "+" : ""}{threshold.toFixed(2)}).
+              The kept / dropped split below reflects the current threshold, but the summary above was generated at the old one.
+              Re-submit to regenerate the summary with the new threshold.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {dropped.length === 0 && (
+          <p className="text-sm text-muted-foreground">No papers were dropped at this threshold.</p>
+        )}
+
+        {dropped.length > 0 && (
+          <section>
+            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
+              Dropped — below relevance threshold
+            </div>
+            <ul className="space-y-1.5">
+              {dropped.map((d, i) => (
+                <li key={(d.paper as any).id || i} className="flex items-start gap-2 text-sm">
+                  <span
+                    className={`shrink-0 rounded px-2 py-0.5 text-xs font-mono tabular-nums ${scoreBadgeClass(d.leads_score, threshold)}`}
+                    title={d.reason}
+                  >
+                    {d.leads_score >= 0 ? "+" : ""}{d.leads_score.toFixed(2)}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <a
+                      href={(d.paper as any).url || "#"}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="hover:underline break-words"
+                    >
+                      {(d.paper as any).title || "(untitled)"}
+                    </a>
+                    {(d.paper as any).source && (
+                      <span className="text-xs text-muted-foreground ml-2">[{(d.paper as any).source}]</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        {kept.length > 0 && (
+          <section>
+            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
+              Kept — above relevance threshold (used for summary)
+            </div>
+            <ul className="space-y-1.5">
+              {kept.map((d, i) => (
+                <li key={(d.paper as any).id || i} className="flex items-start gap-2 text-sm">
+                  <span
+                    className={`shrink-0 rounded px-2 py-0.5 text-xs font-mono tabular-nums ${scoreBadgeClass(d.leads_score, threshold)}`}
+                    title={d.reason}
+                  >
+                    {d.leads_score >= 0 ? "+" : ""}{d.leads_score.toFixed(2)}
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <a
+                      href={(d.paper as any).url || "#"}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="hover:underline break-words"
+                    >
+                      {(d.paper as any).title || "(untitled)"}
+                    </a>
+                    {(d.paper as any).source && (
+                      <span className="text-xs text-muted-foreground ml-2">[{(d.paper as any).source}]</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+
+        <p className="text-xs text-muted-foreground">
+          Scored by LEADS-Mistral 7B at this run.
+          Adjust the Relevance threshold slider in the sidebar to re-filter without re-scoring.
+        </p>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
 
 export function HomePage() {
   const s = useStore();
@@ -269,9 +400,43 @@ export function HomePage() {
         s.setRawPapers(papers);
       }
 
+      // 3. LEADS-native relevance rerank. Papers that pass the threshold get
+      //    fed to the summariser; the rest are discarded so the summary stops
+      //    citing tangential hits (zoonoses, etc.) just because they matched
+      //    the keyword query. This uses LEADS for its trained task regardless
+      //    of which model is selected in the sidebar.
+      const threshold = typeof s.rerankThreshold === "number"
+        ? s.rerankThreshold
+        : DEFAULT_RERANK_THRESHOLD;
+      let relevantPapers = papers;
+      if (papers.length > 0) {
+        const reranked = await runStage("rerank", signal, sig =>
+          DataAggregator.rerankByRelevance(
+            papers,
+            newPico,
+            analysis.inclusion,
+            analysis.exclusion,
+            threshold,
+            undefined,
+            sig,
+          )
+        );
+        if (reranked) {
+          relevantPapers = reranked.kept.map(r => r.paper);
+          s.setRerankResults(reranked);
+          markStage("rerank", {
+            status: "done",
+            detail: `${reranked.total_kept} of ${reranked.total_scored} kept (LEADS ≥ ${reranked.threshold.toFixed(2)})`,
+          });
+        }
+      } else {
+        s.setRerankResults(null);
+        markStage("rerank", { status: "done", detail: "no papers to score" });
+      }
+
       const formalQ = await runStage("question", signal, sig => AIService.generateFormalQuestion(newPico, sig));
-      const summaryWithRefs = await runStage("summary", signal, sig => AIService.generateComprehensiveSummaryWithRefs(t, papers, sig));
-      const suggs = await runStage("suggestions", signal, sig => AIService.getRefinementSuggestions(t, papers, sig));
+      const summaryWithRefs = await runStage("summary", signal, sig => AIService.generateComprehensiveSummaryWithRefs(t, relevantPapers, sig));
+      const suggs = await runStage("suggestions", signal, sig => AIService.getRefinementSuggestions(t, relevantPapers, sig));
       const adv = await runStage("adversarial", signal, sig => AIService.generateAdversarialQuery(newPico, sig));
 
       if (signal.aborted) {
@@ -389,6 +554,12 @@ export function HomePage() {
                 )}
               </CollapsibleContent>
             </Collapsible>
+
+            {/* Relevance-rerank explorer — only for the most recent run,
+                since rerankResults holds only the latest LEADS pass. */}
+            {idx === s.history.length - 1 && s.rerankResults && (
+              <RelevanceExplorer />
+            )}
             </div>
           </Card>
         </div>

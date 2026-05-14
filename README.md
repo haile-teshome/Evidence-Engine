@@ -1,23 +1,25 @@
 # Evidence Engine — Systematic Review Platform
 
-An LLM-powered systematic-review screening platform plus a reproducible benchmark suite for comparing screening architectures × models on real SR datasets.
+An LLM-powered systematic-review screening platform. Abstract / full-text screening, PICO refinement, multi-database search, citation snowballing, table + text extraction, and PRISMA reporting — all driven by a local FastAPI backend + a React/Vite frontend.
+
+The default screening model is **LEADS-mistral-7b**, run locally via Ollama with the LEADS-native PICO-element prompt and a +0.20 score threshold. This was selected based on a separate benchmark (recall=1.000, specificity=0.676, MCC=+0.260, WSS@95=0.61 on van_Dis_2020). The benchmark workspace lives outside this repo at `~/Desktop/screening-benchmark/`.
 
 ## Components
 
 | Path | What it is |
 |---|---|
-| `Backend/` | FastAPI HTTP layer wrapping the original Streamlit screening logic. Serves SSE-streamed progress + supports server-side cancel. |
+| `Backend/` | FastAPI HTTP layer. Routes screening to the LEADS-native pipeline when the model is `"leads"`, or to a generic prompt for cloud LLMs (Claude / GPT / Gemini). Serves SSE-streamed progress + server-side cancel. |
 | `src/`, `index.html`, `vite.config.ts`, `package.json` | React + Vite frontend (shadcn UI). Talks to the Backend over REST/SSE. |
-| `benchmark/` | Standalone evaluation harness. 11 screening architectures × 6 model tiers × N SR datasets, with metrics, stratification, statistical tests, threshold sweeps, ensembling, cost-recall curves, and figure generation. See [`benchmark/README.md`](benchmark/README.md). |
-| `supabase/`, `utils/` | Supabase edge functions + client used by the frontend for auth + session storage. |
+| `supabase/`, `utils/` | Optional Supabase edge functions + client. Used for auth + session storage when configured; the app runs fine without it. |
 
 ## Quick start
 
 ```bash
-./setup.sh
+./setup.sh                  # installs Backend (venv) + frontend (pnpm)
+./setup.sh --pull-ollama    # additionally pull the default LEADS-mistral GGUF (~4 GB)
 ```
 
-That installs the Backend (Python venv), the frontend (pnpm), and the benchmark (separate Python venv). Then:
+Then in two terminals:
 
 ```bash
 # Backend (FastAPI on :8000)
@@ -25,33 +27,31 @@ cd Backend && source .venv/bin/activate && bash run_api.sh
 
 # Frontend (Vite on :5173) — in a second terminal
 pnpm dev
-
-# Benchmark smoke test — in a third terminal
-cd benchmark && source .venv/bin/activate && \
-  python run_benchmark.py --datasets sample --architectures single_combined --models small
 ```
+
+Open <http://localhost:5173>.
 
 ### Setup flags
 
 ```bash
-./setup.sh --help              # show all flags
-./setup.sh --backend-only      # just the FastAPI server
-./setup.sh --frontend-only     # just the React app
-./setup.sh --benchmark-only    # just the benchmark suite
-./setup.sh --pull-ollama       # also fetch recommended local Ollama models
+./setup.sh --help            # show all flags
+./setup.sh --backend-only    # just the FastAPI server
+./setup.sh --frontend-only   # just the React app
+./setup.sh --pull-ollama     # also pull the LEADS-mistral Ollama model
 ```
 
 ## Prerequisites
 
 - **Python ≥ 3.10**
 - **Node.js ≥ 18** with **pnpm** (the setup script will `npm i -g pnpm` if missing)
-- **(Optional) Ollama** — required for local-LLM tiers (`small`, `medium`, `specialized`, `large`, `leads`). Install from <https://ollama.com>, then `./setup.sh --pull-ollama` or pull models manually.
-- **(Optional) API keys** — for cloud-LLM tiers, populate `Backend/.env` (copied from `Backend/.env.example`) with any of:
+- **Ollama** — required for the default screening model. Install from <https://ollama.com>, then `./setup.sh --pull-ollama` (or pull `hf.co/mradermacher/leads-mistral-7b-v1-GGUF:latest` manually).
+- **(Optional) API keys** — only needed if you switch off the default LEADS model. Populate `Backend/.env` (copied from `Backend/.env.example`) with any of:
   - `ANTHROPIC_API_KEY` (Claude)
   - `OPENAI_API_KEY` (GPT)
   - `GEMINI_API_KEY` (Gemini)
+- **(Optional) Supabase** — only needed for cross-device session sync + auth. Create `.env.local` at the project root with `VITE_SUPABASE_PROJECT_ID` and `VITE_SUPABASE_ANON_KEY`. The app renders and screens fine without these.
 
-## Repo layout 
+## Repo layout
 
 ```
 .
@@ -59,19 +59,18 @@ cd benchmark && source .venv/bin/activate && \
 ├── README.md                   # this file
 ├── ATTRIBUTIONS.md
 ├── .gitignore
-├── package.json, pnpm-lock.yaml, vite.config.ts, …    # frontend build config
+├── package.json, pnpm-lock.yaml, vite.config.ts, tsconfig.json, …
 ├── index.html, default_shadcn_theme.css, postcss.config.mjs
 ├── src/                        # React app
+│   ├── app/
+│   │   ├── App.tsx, components/, pages/, lib/
+│   └── vite-env.d.ts
 ├── Backend/                    # FastAPI server
-├── supabase/                   # Supabase edge functions
-├── utils/                      # frontend Supabase client
-└── benchmark/                  # screening-architecture benchmark
-    ├── README.md
-    ├── run_benchmark.py
-    ├── architectures/          # 11 screening architectures
-    ├── data/                   # SR datasets (PICO + records.csv)
-    ├── datasets/               # dataset loader
-    ├── scripts/                # analysis + visualization scripts
-    ├── metrics.py, models.py, field_tagger.py, …
-    └── requirements.txt
+│   ├── api.py                  # HTTP layer + LEADS routing
+│   ├── leads_screening.py      # LEADS-native pipeline (prompt + scoring)
+│   ├── app.py, utils.py, data_services.py, …
+│   ├── requirements.txt, run_api.sh
+│   └── .env.example
+├── supabase/                   # Supabase edge functions (optional)
+└── utils/                      # frontend Supabase client (optional)
 ```

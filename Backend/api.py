@@ -36,6 +36,14 @@ from config import Config
 from models import Paper as BackendPaper, PICOCriteria
 from utils import AIService, Deduplicator, AITableExtractor
 from data_services import DataAggregator
+from leads_screening import (
+    LEADS_MODEL_NAME,
+    LEADS_SCORE_THRESHOLD,
+    is_leads_model,
+    resolve_for_thinking,
+    resolve_model_name,
+    screen_paper_leads,
+)
 
 import requests
 from bs4 import BeautifulSoup
@@ -113,7 +121,20 @@ app.add_middleware(
 
 
 def _default_model() -> str:
-    return os.getenv("DEFAULT_MODEL", Config.DEFAULT_MODEL or "claude-sonnet-4-6")
+    """Default screening model.
+
+    Order of precedence:
+      1. `DEFAULT_MODEL` env var (explicit override)
+      2. `Config.DEFAULT_MODEL` (legacy config.py value)
+      3. `"leads"` — the highest-performing cell measured in the benchmark
+         (LEADS-mistral-7b × LEADS-native @ threshold +0.20: recall=1.000,
+         specificity=0.676, MCC=+0.260, WSS@95=0.61 on van_Dis_2020).
+
+    Cloud-LLM keys (Claude/GPT) are not required for the default — LEADS runs
+    locally on Ollama with no API key. Set `DEFAULT_MODEL=claude-sonnet-4-6`
+    (or similar) in `.env` if you'd rather use a cloud model.
+    """
+    return os.getenv("DEFAULT_MODEL") or Config.DEFAULT_MODEL or "leads"
 
 
 # ---------------------------------------------------------------------------
@@ -190,15 +211,63 @@ class Analysis(BaseModel):
     query: str
 
 
+def _pico_value(v: Any) -> str:
+    """Flatten whatever an LLM returned for a PICO field into a plain string.
+
+    Smaller / instruction-following models sometimes return nested objects like
+      {"specific_target_population": "adults with T2DM", "description": "..."}
+    instead of a bare string. Join the values so downstream pydantic stays happy.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    if isinstance(v, dict):
+        parts = [str(x).strip() for x in v.values() if x and isinstance(x, (str, int, float))]
+        return "; ".join(parts) if parts else ""
+    if isinstance(v, list):
+        return "; ".join(p for p in (_pico_value(x) for x in v) if p)
+    return str(v).strip()
+
+
+def _coerce_str_list(v: Any) -> List[str]:
+    """Inclusion / exclusion criteria may come back as a list of strings, a list
+    of dicts, or even a single string. Normalise to List[str]."""
+    if not v:
+        return []
+    if isinstance(v, str):
+        return [v]
+    if isinstance(v, list):
+        out: List[str] = []
+        for item in v:
+            if isinstance(item, str):
+                if item.strip():
+                    out.append(item.strip())
+            elif isinstance(item, dict):
+                s = _pico_value(item)
+                if s:
+                    out.append(s)
+            else:
+                s = str(item).strip()
+                if s:
+                    out.append(s)
+        return out
+    return [_pico_value(v)] if _pico_value(v) else []
+
+
 @app.post("/api/pico/infer", response_model=Analysis)
 def pico_infer(req: InferRequest):
-    model_name = req.model or _default_model()
+    model_name = resolve_for_thinking(req.model)
     data = AIService.infer_pico_and_query(req.input, model_name, req.previous_goal or "")
+    p_str = _pico_value(data.get("p", ""))
+    i_str = _pico_value(data.get("i", ""))
+    c_str = _pico_value(data.get("c", ""))
+    o_str = _pico_value(data.get("o", ""))
     pico = PICOCriteria(
-        population=data.get("p", ""),
-        intervention=data.get("i", ""),
-        comparator=data.get("c", ""),
-        outcome=data.get("o", ""),
+        population=p_str,
+        intervention=i_str,
+        comparator=c_str,
+        outcome=o_str,
     )
     try:
         query = AIService.generate_mesh_query(pico, model_name)
@@ -206,12 +275,12 @@ def pico_infer(req: InferRequest):
         print(f"[pico_infer] mesh query failed: {e}")
         query = ""
     return Analysis(
-        p=data.get("p", ""),
-        i=data.get("i", ""),
-        c=data.get("c", ""),
-        o=data.get("o", ""),
-        inclusion=list(data.get("inclusion", []) or []),
-        exclusion=list(data.get("exclusion", []) or []),
+        p=p_str,
+        i=i_str,
+        c=c_str,
+        o=o_str,
+        inclusion=_coerce_str_list(data.get("inclusion")),
+        exclusion=_coerce_str_list(data.get("exclusion")),
         query=query or "",
     )
 
@@ -224,7 +293,7 @@ class FormalQuestionRequest(BaseModel):
 
 @app.post("/api/pico/formal-question")
 def pico_formal_question(req: FormalQuestionRequest):
-    q = AIService.generate_formal_question(_to_pico(req.pico), req.model or _default_model(), req.history)
+    q = AIService.generate_formal_question(_to_pico(req.pico), resolve_for_thinking(req.model), req.history)
     return {"question": q}
 
 
@@ -366,7 +435,7 @@ def pico_summary(req: SummaryRequest):
             ),
             "references": [],
         }
-    summary = _plain_summary(req.goal, relevant, req.model or _default_model())
+    summary = _plain_summary(req.goal, relevant, resolve_for_thinking(req.model))
     references = [
         {"title": (p.title or "").strip(), "url": p.url, "source": p.source, "id": str(p.id)}
         for p in relevant
@@ -384,7 +453,7 @@ class RefinementRequest(BaseModel):
 @app.post("/api/pico/suggestions")
 def pico_suggestions(req: RefinementRequest):
     bps = [_to_backend_paper(p) for p in req.papers]
-    suggs = AIService.get_refinement_suggestions(req.goal, bps, req.model or _default_model())
+    suggs = AIService.get_refinement_suggestions(req.goal, bps, resolve_for_thinking(req.model))
     return {"suggestions": list(suggs or [])}
 
 
@@ -395,7 +464,7 @@ class AdversarialRequest(BaseModel):
 
 @app.post("/api/pico/adversarial")
 def pico_adversarial(req: AdversarialRequest):
-    q = AIService.generate_adversarial_query(_to_pico(req.pico), req.model or _default_model())
+    q = AIService.generate_adversarial_query(_to_pico(req.pico), resolve_for_thinking(req.model))
     return {"query": q}
 
 
@@ -431,7 +500,7 @@ def session_title(req: TitleRequest):
         return {"title": "Untitled session"}
     try:
         from langchain_core.messages import HumanMessage
-        model = AIService.get_model(req.model or _default_model())
+        model = AIService.get_model(resolve_for_thinking(req.model))
         if not model:
             return {"title": fallback}
         prompt = (
@@ -456,7 +525,7 @@ def session_title(req: TitleRequest):
 def pico_refine(req: RefineRequest):
     """Identify the single PICO element that is most under-specified and suggest a sharper value."""
     from langchain_core.messages import HumanMessage
-    model = AIService.get_model(req.model or _default_model())
+    model = AIService.get_model(resolve_for_thinking(req.model))
     if not model:
         return {"field": None, "current": "", "suggested": "", "reason": "Model unavailable."}
 
@@ -614,6 +683,14 @@ def _normalize_abstract_decision(raw: Dict[str, Any], inclusion: List[str], excl
     }
 
 
+def _screen_one(paper: BackendPaper, pico: PICOCriteria, model_name: str,
+                inclusion: List[str], exclusion: List[str]) -> Dict[str, Any]:
+    """Route a single paper to LEADS or to the generic screener depending on model."""
+    if is_leads_model(model_name):
+        return screen_paper_leads(paper, pico)
+    return AIService.screen_paper(paper, pico, model_name, inclusion, exclusion)
+
+
 @app.post("/api/screen/abstract")
 def screen_abstract(req: ScreenAbstractRequest):
     paper = _to_backend_paper(req.paper)
@@ -621,7 +698,8 @@ def screen_abstract(req: ScreenAbstractRequest):
     # Make criteria available to legacy functions that read session_state
     _ss["inclusion_list"] = list(req.inclusion or [])
     _ss["exclusion_list"] = list(req.exclusion or [])
-    raw = AIService.screen_paper(paper, pico, req.model or _default_model(), req.inclusion, req.exclusion)
+    model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
+    raw = _screen_one(paper, pico, model_name, req.inclusion, req.exclusion)
     return _normalize_abstract_decision(raw, req.inclusion, req.exclusion, req.paper)
 
 
@@ -638,11 +716,11 @@ def screen_abstract_batch(req: ScreenAbstractBatchRequest):
     _ss["inclusion_list"] = list(req.inclusion or [])
     _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
-    model_name = req.model or _default_model()
+    model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
 
     def _one(p_in: PaperIn) -> Dict[str, Any]:
         bp = _to_backend_paper(p_in)
-        raw = AIService.screen_paper(bp, pico, model_name, req.inclusion, req.exclusion)
+        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion)
         return _normalize_abstract_decision(raw, req.inclusion, req.exclusion, p_in)
 
     results: List[Dict[str, Any]] = []
@@ -654,6 +732,72 @@ def screen_abstract_batch(req: ScreenAbstractBatchRequest):
             except Exception as e:
                 print(f"[screen_abstract_batch] worker error: {e}")
     return {"results": results}
+
+
+class RerankRequest(BaseModel):
+    """Score fetched papers for relevance against the PICO using LEADS, so the
+    downstream summariser cites papers that pass a real screening pass rather
+    than papers that merely keyword-matched the database query."""
+    papers: List[PaperIn]
+    pico: PicoIn
+    inclusion: List[str] = Field(default_factory=list)
+    exclusion: List[str] = Field(default_factory=list)
+    model: Optional[str] = None
+    # LEADS aggregate score in [-1, +1]. Keep papers with score >= threshold.
+    # -0.2 keeps "maybe relevant" and better — the right default for a summary
+    # pre-filter (looser than the screening-grade +0.20 sweet spot).
+    threshold: float = -0.2
+    # Hard cap on output size after sorting. None = keep all that pass threshold.
+    top_k: Optional[int] = None
+
+
+@app.post("/api/papers/rerank")
+def papers_rerank(req: RerankRequest):
+    """Score each paper against PICO using LEADS-native, return ranked list
+    with per-paper LEADS scores. Use LEADS unconditionally (this is its
+    trained task) regardless of which model the user selected for thinking
+    tasks elsewhere."""
+    _ss["inclusion_list"] = list(req.inclusion or [])
+    _ss["exclusion_list"] = list(req.exclusion or [])
+    pico = _to_pico(req.pico)
+    # Route to LEADS specifically: this is exactly the per-PICO relevance task
+    # the model was fine-tuned for. Override whatever the caller asked for.
+    model_name = resolve_model_name(req.model) or LEADS_MODEL_NAME
+
+    def _score_one(p_in: PaperIn) -> Dict[str, Any]:
+        bp = _to_backend_paper(p_in)
+        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion)
+        score = float(raw.get("_leads_score", 0.0))
+        return {
+            "paper": p_in.dict() if hasattr(p_in, "dict") else p_in.__dict__,
+            "leads_score": score,
+            "decision": str(raw.get("decision", "Exclude")),
+            "reason": raw.get("reason", ""),
+        }
+
+    scored: List[Dict[str, Any]] = []
+    workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, len(req.papers) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for fut in as_completed([ex.submit(_score_one, p) for p in req.papers]):
+            try:
+                scored.append(fut.result())
+            except Exception as e:
+                print(f"[papers_rerank] worker error: {e}")
+
+    # Sort descending by LEADS score (most relevant first).
+    scored.sort(key=lambda r: r["leads_score"], reverse=True)
+    kept = [r for r in scored if r["leads_score"] >= req.threshold]
+    if req.top_k is not None:
+        kept = kept[: req.top_k]
+
+    return {
+        "ranked": scored,           # All papers, with scores, for transparency
+        "kept": kept,               # Subset above threshold — feed this to summary
+        "threshold": req.threshold,
+        "total_scored": len(scored),
+        "total_kept": len(kept),
+        "model_used": model_name,
+    }
 
 
 class ScreenFullTextRequest(BaseModel):
@@ -719,7 +863,7 @@ def screen_fulltext(req: ScreenFullTextRequest):
         "URL": req.paper.url,
         "paper_id": req.paper.id,
     }
-    raw = AIService.screen_full_text(paper_dict, pico, req.model or _default_model())
+    raw = AIService.screen_full_text(paper_dict, pico, resolve_model_name(req.model) or resolve_model_name(_default_model()))
 
     decision_raw = str(raw.get("decision", "Exclude")).strip().lower()
     decision = "Include" if decision_raw.startswith("inc") else "Exclude"
@@ -808,7 +952,7 @@ def simulation_agentic_stream(req: AgenticOptimizeRequest):
       event: error      data: {message}
     """
     pico = _to_pico(req.pico)
-    model_name = req.model or _default_model()
+    model_name = resolve_for_thinking(req.model)
     cancel_event = _register_cancel(req.task_id)
 
     event_queue: "queue.Queue[Tuple[str, dict]]" = queue.Queue()
@@ -864,7 +1008,7 @@ def simulation_agentic_stream(req: AgenticOptimizeRequest):
 @app.post("/api/simulation/agentic")
 def simulation_agentic(req: AgenticOptimizeRequest):
     pico = _to_pico(req.pico)
-    model_name = req.model or _default_model()
+    model_name = resolve_for_thinking(req.model)
     try:
         # Python signature: (current_query, pico, model_name, active_sources, research_goal="", progress_callback=None)
         out = AIService.agentic_optimize_per_source(
@@ -1293,7 +1437,7 @@ def extract_tables(req: ExtractTablesRequest):
         try:
             ai_tables = AITableExtractor.extract_from_text(
                 req.Title + "\n",  # minimal seed; caller can resend with fulltext
-                req.model or _default_model(),
+                resolve_for_thinking(req.model),
             )
             for i, t in enumerate(ai_tables or []):
                 tables.append({
@@ -1402,94 +1546,6 @@ def list_local_models():
         return {"running": False, "models": [], "error": str(e)}
 
 
-# ---------------------------------------------------------------------------
-# Benchmark dashboard endpoints
-# ---------------------------------------------------------------------------
-# The benchmark CLI (`benchmark/run_benchmark.py`) writes metrics.csv +
-# predictions.csv + summary.md into `benchmark/reports/<run_id>/`. These
-# endpoints expose those files to the dashboard so the user can browse
-# comparisons in the UI without leaving the app.
-
-import csv as _csv
-from pathlib import Path as _Path
-
-_BENCHMARK_REPORTS = _Path(__file__).resolve().parent.parent / "benchmark" / "reports"
-
-
-def _list_run_ids() -> List[str]:
-    if not _BENCHMARK_REPORTS.exists():
-        return []
-    return sorted(
-        [p.name for p in _BENCHMARK_REPORTS.iterdir() if p.is_dir() and (p / "metrics.csv").exists()],
-        reverse=True,
-    )
-
-
-def _read_csv(path: _Path) -> List[Dict[str, Any]]:
-    if not path.exists():
-        return []
-    with open(path, newline="") as fh:
-        reader = _csv.DictReader(fh)
-        rows: List[Dict[str, Any]] = []
-        for row in reader:
-            # Coerce numeric-looking fields
-            out: Dict[str, Any] = {}
-            for k, v in row.items():
-                try:
-                    if v == "" or v is None:
-                        out[k] = None
-                    elif v.lower() in {"true", "false"}:
-                        out[k] = v.lower() == "true"
-                    else:
-                        f = float(v)
-                        out[k] = int(f) if f.is_integer() and "." not in v else f
-                except (ValueError, AttributeError):
-                    out[k] = v
-            rows.append(out)
-        return rows
-
-
-@app.get("/api/benchmark/runs")
-def benchmark_runs():
-    """List all available benchmark runs (newest first)."""
-    runs = []
-    for run_id in _list_run_ids():
-        metrics_path = _BENCHMARK_REPORTS / run_id / "metrics.csv"
-        try:
-            rows = _read_csv(metrics_path)
-            datasets = sorted({str(r.get("dataset")) for r in rows if r.get("dataset")})
-            arches = sorted({str(r.get("architecture")) for r in rows if r.get("architecture")})
-            models = sorted({str(r.get("model_tier")) for r in rows if r.get("model_tier")})
-            runs.append({
-                "id": run_id,
-                "datasets": datasets,
-                "architectures": arches,
-                "model_tiers": models,
-                "cell_count": len(rows),
-            })
-        except Exception as e:
-            print(f"[benchmark_runs] skipping {run_id}: {e}")
-    return {"runs": runs}
-
-
-@app.get("/api/benchmark/runs/{run_id}")
-def benchmark_run(run_id: str):
-    """Return all metrics + (optional) predictions + summary for a single run."""
-    folder = _BENCHMARK_REPORTS / run_id
-    if not folder.exists():
-        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
-    metrics = _read_csv(folder / "metrics.csv")
-    predictions = _read_csv(folder / "predictions.csv")
-    summary_path = folder / "summary.md"
-    summary = summary_path.read_text() if summary_path.exists() else ""
-    return {
-        "id": run_id,
-        "metrics": metrics,
-        "predictions": predictions,
-        "summary": summary,
-    }
-
-
 @app.get("/api/health")
 def health():
     # Surface any in-flight server-side tasks so the user can see what is
@@ -1530,3 +1586,131 @@ def cancel_all_tasks():
         for ev in _cancel_events.values():
             ev.set()
     return {"canceled": ids, "count": len(ids)}
+
+
+# ---------------------------------------------------------------------------
+# Meta-analysis agent
+# ---------------------------------------------------------------------------
+from meta_analysis import (
+    StudyEffect,
+    compute_effect_size,
+    pool as _ma_pool,
+    extract_effect_size,
+    subgroup_analysis as _ma_subgroup,
+    leave_one_out as _ma_loo,
+    cumulative_meta_analysis as _ma_cumulative,
+    funnel_plot_data as _ma_funnel,
+    egger_test as _ma_egger,
+    begg_test as _ma_begg,
+    trim_and_fill as _ma_trim_fill,
+    meta_regression as _ma_metareg,
+)
+from dataclasses import asdict as _ma_asdict
+
+
+class MetaExtractRequest(BaseModel):
+    papers: List[PaperIn]
+    outcome: str = ""                            # plain-English target outcome
+    measure: str = ""                            # preferred effect measure hint
+    model: Optional[str] = None                  # LLM for extraction
+    # Per-paper full text (paper_id → text), opt-in. If absent, abstract only.
+    full_texts: Dict[str, str] = Field(default_factory=dict)
+
+
+@app.post("/api/meta/extract")
+def meta_extract(req: MetaExtractRequest):
+    """Run the meta-analysis extraction agent on a list of papers.
+
+    Uses the platform's "thinking" model (Qwen/Claude/etc.) — NOT LEADS, which
+    is fine-tuned for screening verdicts, not numerical extraction."""
+    model_name = resolve_for_thinking(req.model)
+
+    def _one(p: PaperIn) -> Dict[str, Any]:
+        d = p.dict() if hasattr(p, "dict") else dict(p.__dict__)
+        ft = req.full_texts.get(str(d.get("id") or "")) or None
+        se = extract_effect_size(
+            d, model_name=model_name,
+            outcome_hint=req.outcome, measure_hint=req.measure,
+            full_text=ft,
+        )
+        return _ma_asdict(se)
+
+    out: List[Dict[str, Any]] = []
+    workers = max(1, min(Config.PARALLEL_AGENT_WORKERS, len(req.papers) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for fut in as_completed([ex.submit(_one, p) for p in req.papers]):
+            try:
+                out.append(fut.result())
+            except Exception as e:
+                print(f"[meta_extract] worker error: {e}")
+    return {"extractions": out, "model_used": model_name, "outcome": req.outcome}
+
+
+class MetaPoolRequest(BaseModel):
+    """Pool a set of pre-extracted (or user-edited) effect sizes.
+
+    Accept the JSON shape returned by /api/meta/extract so the frontend can
+    let the user edit individual numbers (or remove studies) and re-pool
+    without re-running the LLM."""
+    extractions: List[Dict[str, Any]]
+    tau2_method: str = "DL"               # "DL" | "PM" | "REML"
+    use_knapp_hartung: bool = False
+
+
+def _hydrate_studies(rows: List[Dict[str, Any]]) -> List[StudyEffect]:
+    """Convert API JSON rows back into StudyEffect dataclasses, re-computing
+    yi/vi from raw inputs whenever the caller may have edited them."""
+    out: List[StudyEffect] = []
+    for d in rows:
+        try:
+            se = StudyEffect(**{k: v for k, v in d.items() if k in StudyEffect.__dataclass_fields__})
+            # Always recompute from raw inputs if any of those changed.
+            if se.effect_measure and se.effect_measure.upper() != "GENERIC":
+                # Clear computed fields so they get re-derived from inputs.
+                se.yi = None
+                se.vi = None
+                se.se = None
+                se.ci_low = None
+                se.ci_high = None
+                compute_effect_size(se)
+            elif se.yi is None or se.vi is None:
+                compute_effect_size(se)
+            out.append(se)
+        except Exception as e:
+            out.append(StudyEffect(
+                paper_id=str(d.get("paper_id", "")),
+                title=str(d.get("title", "")),
+                error=f"row could not be parsed: {e}",
+            ))
+    return out
+
+
+@app.post("/api/meta/pool")
+def meta_pool(req: MetaPoolRequest):
+    studies = _hydrate_studies(req.extractions)
+    return _ma_pool(studies, tau2_method=req.tau2_method, use_knapp_hartung=req.use_knapp_hartung)
+
+
+class MetaAnalysisRunRequest(BaseModel):
+    """Run subgroup analysis, sensitivity analyses, publication-bias
+    diagnostics, and meta-regression in a single call. The frontend can
+    cache the result and switch tabs without re-hitting the backend."""
+    extractions: List[Dict[str, Any]]
+    tau2_method: str = "DL"
+    use_knapp_hartung: bool = False
+
+
+@app.post("/api/meta/run")
+def meta_run(req: MetaAnalysisRunRequest):
+    studies = _hydrate_studies(req.extractions)
+    return {
+        "pool": _ma_pool(studies, tau2_method=req.tau2_method, use_knapp_hartung=req.use_knapp_hartung),
+        "subgroup": _ma_subgroup(studies, tau2_method=req.tau2_method),
+        "leave_one_out": _ma_loo(studies, tau2_method=req.tau2_method),
+        "cumulative": _ma_cumulative(studies, tau2_method=req.tau2_method),
+        "funnel": _ma_funnel(studies, tau2_method=req.tau2_method),
+        "egger": _ma_egger(studies),
+        "begg": _ma_begg(studies),
+        "trim_fill": _ma_trim_fill(studies, tau2_method=req.tau2_method),
+        "meta_regression": _ma_metareg(studies, tau2_method=req.tau2_method),
+    }

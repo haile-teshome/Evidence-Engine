@@ -14,8 +14,8 @@ import { SnowballPage } from "./pages/SnowballPage";
 import { ExtractionPage } from "./pages/ExtractionPage";
 import { AcquisitionPage } from "./pages/AcquisitionPage";
 import { TextExtractionPage } from "./pages/TextExtractionPage";
-import { BenchmarkPage } from "./pages/BenchmarkPage";
-import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Gauge } from "lucide-react";
+import { MetaAnalysisPage } from "./pages/MetaAnalysisPage";
+import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma } from "lucide-react";
 
 const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> = {
   home: { title: "Research Strategy", subtitle: "PICO-driven question framing and search design", icon: Home },
@@ -28,7 +28,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> 
   extraction: { title: "Table Extraction", subtitle: "Pull tables from included papers", icon: Table2 },
   textextraction: { title: "Text Extraction", subtitle: "Ask questions in natural language and pull values from the text", icon: ScanText },
   prisma: { title: "PRISMA Flow", subtitle: "Reporting diagram for the review", icon: GitBranch },
-  benchmark: { title: "Benchmark", subtitle: "Compare screening architectures and models", icon: Gauge },
+  meta: { title: "Meta-analysis", subtitle: "Automated effect-size extraction and pooling (fixed + random effects)", icon: Sigma },
 };
 
 function Shell() {
@@ -61,7 +61,7 @@ function Shell() {
           {s.page === "extraction" && <ExtractionPage />}
           {s.page === "textextraction" && <TextExtractionPage />}
           {s.page === "prisma" && <PrismaFlow counts={s.prisma} />}
-          {s.page === "benchmark" && <BenchmarkPage />}
+          {s.page === "meta" && <MetaAnalysisPage />}
         </div>
       </main>
     </div>

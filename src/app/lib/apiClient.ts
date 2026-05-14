@@ -304,6 +304,22 @@ export const QualityService = {
 // DataAggregator
 // ---------------------------------------------------------------------------
 
+export type RerankItem = {
+  paper: Paper;
+  leads_score: number;
+  decision: string;
+  reason: string;
+};
+
+export type RerankResult = {
+  ranked: RerankItem[];
+  kept: RerankItem[];
+  threshold: number;
+  total_scored: number;
+  total_kept: number;
+  model_used: string;
+};
+
 export const DataAggregator = {
   async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 10, signal?: AbortSignal): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
     return postJSON("/papers/fetch", { query, sources, max_per_source: maxPerSource }, signal);
@@ -313,11 +329,234 @@ export const DataAggregator = {
     const r = await postJSON<{ counts: Record<string, number> }>("/simulation/yield", { query, sources }, signal);
     return r.counts || {};
   },
+
+  // Score fetched papers for relevance against PICO using LEADS-native.
+  // Returns both the full ranked list (with scores) and the subset that passed
+  // the relevance threshold. Feed `kept` to the summariser.
+  async rerankByRelevance(
+    papers: Paper[],
+    pico: Pico,
+    inclusion: string[] = [],
+    exclusion: string[] = [],
+    threshold = -0.2,
+    topK?: number,
+    signal?: AbortSignal,
+  ): Promise<RerankResult> {
+    return postJSON<RerankResult>(
+      "/papers/rerank",
+      {
+        papers, pico, inclusion, exclusion,
+        threshold,
+        top_k: topK,
+        model: apiConfig.model,
+      },
+      signal,
+    );
+  },
 };
 
 // ---------------------------------------------------------------------------
 // Deduplicator — kept client-side (pure logic, no backend round-trip)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Meta-analysis agent
+// ---------------------------------------------------------------------------
+
+export type EffectMeasure =
+  | "OR" | "RR" | "RD" | "PETO_OR" | "HR"
+  | "MD" | "SMD"
+  | "PROP" | "IR" | "ZCOR"
+  | "GENERIC" | "UNKNOWN";
+
+export type Tau2Method = "DL" | "PM" | "REML";
+
+export type StudyEffect = {
+  paper_id: string;
+  title: string;
+  url?: string | null;
+  outcome: string;
+  effect_measure: EffectMeasure;
+
+  // Binary 2x2
+  events_t?: number | null; n_t?: number | null;
+  events_c?: number | null; n_c?: number | null;
+
+  // Continuous two-arm
+  mean_t?: number | null; sd_t?: number | null;
+  mean_c?: number | null; sd_c?: number | null;
+
+  // Time-to-event reported as HR + CI
+  hr?: number | null;
+  hr_ci_low?: number | null;
+  hr_ci_high?: number | null;
+  log_hr?: number | null;
+  log_hr_se?: number | null;
+
+  // Single-arm prevalence / proportion
+  events_total?: number | null;
+  n_total?: number | null;
+
+  // Single-arm incidence rate
+  person_time?: number | null;
+
+  // Correlation
+  correlation?: number | null;
+
+  // Generic IV / computed-effect storage
+  yi?: number | null; vi?: number | null; se?: number | null;
+  ci_low?: number | null; ci_high?: number | null;
+
+  // Moderators
+  subgroup?: string | null;
+  moderator?: number | null;
+
+  // LLM transparency
+  extraction_quote?: string | null;
+  extraction_confidence?: number | null;
+  extraction_notes?: string | null;
+  error?: string | null;
+  weight_fe?: number;
+  weight_re?: number;
+};
+
+export type PooledEstimate = {
+  estimate: number; se: number; ci_low: number; ci_high: number;
+  z?: number; p_value?: number;
+};
+
+export type MetaPoolResult = {
+  k: number;
+  effect_measures: EffectMeasure[];
+  tau2_method: Tau2Method;
+  use_knapp_hartung: boolean;
+  valid_studies: StudyEffect[];
+  invalid_studies: StudyEffect[];
+  fixed: PooledEstimate | null;
+  random: (PooledEstimate & { tau2: number; tau: number }) | null;
+  heterogeneity: { Q: number; df: number; Q_p_value: number; I2_pct: number; H2: number; tau2: number } | null;
+  prediction_interval: { low: number; high: number } | null;
+};
+
+export type SubgroupResult = {
+  groups: Array<{
+    name: string;
+    k: number;
+    estimate: number | null;
+    ci_low: number | null;
+    ci_high: number | null;
+    se: number | null;
+    tau2: number | null;
+    I2_pct: number | null;
+  }>;
+  Q_between: number;
+  df_between: number;
+  Q_between_p: number;
+};
+
+export type LOORow = {
+  paper_id: string;
+  title: string;
+  estimate_without: number | null;
+  ci_low_without: number | null;
+  ci_high_without: number | null;
+  delta: number | null;
+};
+
+export type CumulativeRow = {
+  k: number;
+  last_added: string;
+  estimate: number | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  I2_pct: number | null;
+};
+
+export type FunnelData = {
+  center: number | null;
+  studies: Array<{ paper_id: string; title: string; yi: number; se: number }>;
+};
+
+export type EggerResult = {
+  intercept: number | null; se: number | null;
+  t: number | null; p_value: number | null;
+  k: number; note?: string;
+};
+
+export type BeggResult = {
+  tau: number | null; z?: number; p_value: number | null;
+  k: number; note?: string;
+};
+
+export type TrimFillResult = {
+  k0: number; side?: "left" | "right";
+  filled_estimate: number | null;
+  filled_ci_low: number | null;
+  filled_ci_high: number | null;
+  filled_k?: number;
+  note?: string;
+};
+
+export type MetaRegressionResult = {
+  slope: number | null; se: number | null;
+  intercept: number | null; z: number | null;
+  p_value: number | null; R2: number | null;
+  k: number; tau2?: number; note?: string;
+};
+
+export type MetaRunResult = {
+  pool: MetaPoolResult;
+  subgroup: SubgroupResult;
+  leave_one_out: LOORow[];
+  cumulative: CumulativeRow[];
+  funnel: FunnelData;
+  egger: EggerResult;
+  begg: BeggResult;
+  trim_fill: TrimFillResult;
+  meta_regression: MetaRegressionResult;
+};
+
+export const MetaAnalysisService = {
+  async extract(
+    papers: Paper[],
+    outcome: string,
+    measure: string = "",
+    fullTexts: Record<string, string> = {},
+    signal?: AbortSignal,
+  ): Promise<{ extractions: StudyEffect[]; model_used: string; outcome: string }> {
+    return postJSON<{ extractions: StudyEffect[]; model_used: string; outcome: string }>(
+      "/meta/extract",
+      { papers, outcome, measure, full_texts: fullTexts, model: apiConfig.model },
+      signal,
+    );
+  },
+
+  async pool(
+    extractions: StudyEffect[],
+    tau2Method: Tau2Method = "DL",
+    useKnappHartung: boolean = false,
+    signal?: AbortSignal,
+  ): Promise<MetaPoolResult> {
+    return postJSON<MetaPoolResult>(
+      "/meta/pool",
+      { extractions, tau2_method: tau2Method, use_knapp_hartung: useKnappHartung },
+      signal,
+    );
+  },
+
+  async run(
+    extractions: StudyEffect[],
+    tau2Method: Tau2Method = "DL",
+    useKnappHartung: boolean = false,
+    signal?: AbortSignal,
+  ): Promise<MetaRunResult> {
+    return postJSON<MetaRunResult>(
+      "/meta/run",
+      { extractions, tau2_method: tau2Method, use_knapp_hartung: useKnappHartung },
+      signal,
+    );
+  },
+};
 
 export const Deduplicator = {
   run(papers: Paper[]): { unique: Paper[]; duplicates: Paper[] } {
