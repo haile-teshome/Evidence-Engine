@@ -1,13 +1,16 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { supabase, apiFetch, supabaseConfigured } from "./supabaseClient";
+import { projectId, publicAnonKey } from "../../../utils/supabase/info";
 
 type AuthUser = { id: string; email: string; name?: string };
 
 export type OAuthProvider = "google" | "azure" | "github";
+const SUPPORTED_PROVIDERS: OAuthProvider[] = ["google", "azure", "github"];
 
 type AuthCtx = {
   user: AuthUser | null;
   loading: boolean;
+  enabledProviders: Set<OAuthProvider>;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string, name: string) => Promise<void>;
   signInWithProvider: (provider: OAuthProvider) => Promise<void>;
@@ -19,6 +22,7 @@ const Ctx = createContext<AuthCtx | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
+  const [enabledProviders, setEnabledProviders] = useState<Set<OAuthProvider>>(new Set());
 
   useEffect(() => {
     // No Supabase configured → render as a logged-out demo user, no network calls.
@@ -37,6 +41,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const u = session?.user;
       setUser(u ? { id: u.id, email: u.email || "", name: (u.user_metadata as any)?.name } : null);
     });
+    // Probe Supabase Auth for which external providers are enabled. On failure
+    // (network or misconfig) the set stays empty and OAuth buttons stay hidden.
+    fetch(`https://${projectId}.supabase.co/auth/v1/settings`, {
+      headers: { apikey: publicAnonKey },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { external?: Record<string, boolean> } | null) => {
+        if (!active || !data?.external) return;
+        setEnabledProviders(new Set(SUPPORTED_PROVIDERS.filter((p) => Boolean(data.external![p]))));
+      })
+      .catch(() => { /* silent — providers stay hidden */ });
     return () => { active = false; sub.subscription.unsubscribe(); };
   }, []);
 
@@ -74,12 +89,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) console.error(`Sign-out error: ${error.message}`);
   }
 
-  return <Ctx.Provider value={{ user, loading, signIn, signUp, signInWithProvider, signOut }}>{children}</Ctx.Provider>;
+  return <Ctx.Provider value={{ user, loading, enabledProviders, signIn, signUp, signInWithProvider, signOut }}>{children}</Ctx.Provider>;
 }
 
 const noopAuth: AuthCtx = {
   user: null,
   loading: false,
+  enabledProviders: new Set(),
   signIn: async () => { throw new Error("AuthProvider missing"); },
   signUp: async () => { throw new Error("AuthProvider missing"); },
   signInWithProvider: async () => { throw new Error("AuthProvider missing"); },

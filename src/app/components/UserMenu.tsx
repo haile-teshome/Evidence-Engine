@@ -32,7 +32,7 @@ function MicrosoftIcon() {
 }
 
 export function UserMenu() {
-  const { user, signIn, signUp, signInWithProvider, signOut } = useAuth();
+  const { user, enabledProviders, signIn, signUp, signInWithProvider, signOut } = useAuth();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [email, setEmail] = useState("");
@@ -90,20 +90,30 @@ export function UserMenu() {
             <DialogTitle>Sign in</DialogTitle>
             <DialogDescription>Sign in to save your research sessions across devices.</DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <Button variant="outline" className="w-full" disabled={busy} onClick={() => onSSO("google")}>
-              <GoogleIcon /><span className="ml-2">Continue with Google</span>
-            </Button>
-            <Button variant="outline" className="w-full" disabled={busy} onClick={() => onSSO("azure")}>
-              <MicrosoftIcon /><span className="ml-2">Continue with Microsoft</span>
-            </Button>
-            <Button variant="outline" className="w-full" disabled={busy} onClick={() => onSSO("github")}>
-              <Github className="size-4" /><span className="ml-2">Continue with GitHub</span>
-            </Button>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <div className="h-px bg-border flex-1" /> or with email <div className="h-px bg-border flex-1" />
-          </div>
+          {enabledProviders.size > 0 && (
+            <>
+              <div className="space-y-2">
+                {enabledProviders.has("google") && (
+                  <Button variant="outline" className="w-full" disabled={busy} onClick={() => onSSO("google")}>
+                    <GoogleIcon /><span className="ml-2">Continue with Google</span>
+                  </Button>
+                )}
+                {enabledProviders.has("azure") && (
+                  <Button variant="outline" className="w-full" disabled={busy} onClick={() => onSSO("azure")}>
+                    <MicrosoftIcon /><span className="ml-2">Continue with Microsoft</span>
+                  </Button>
+                )}
+                {enabledProviders.has("github") && (
+                  <Button variant="outline" className="w-full" disabled={busy} onClick={() => onSSO("github")}>
+                    <Github className="size-4" /><span className="ml-2">Continue with GitHub</span>
+                  </Button>
+                )}
+              </div>
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <div className="h-px bg-border flex-1" /> or with email <div className="h-px bg-border flex-1" />
+              </div>
+            </>
+          )}
           <Tabs defaultValue="signin">
             <TabsList className="grid grid-cols-2 w-full">
               <TabsTrigger value="signin">Sign in</TabsTrigger>
