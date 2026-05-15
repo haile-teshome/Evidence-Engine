@@ -16,6 +16,7 @@ export default defineConfig({
   assetsInclude: ['**/*.svg', '**/*.csv'],
 
   server: {
+    allowedHosts: ['evidence.badmath.org'],
     proxy: {
       '/api': {
         target: process.env.VITE_API_BASE_URL || 'http://localhost:8000',
