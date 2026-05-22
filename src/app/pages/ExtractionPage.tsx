@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService } from "../lib/mockServices";
+import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -23,7 +24,8 @@ export function ExtractionPage() {
 
   if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first to unlock Table Extraction.</AlertDescription></Alert>;
 
-  const passed = s.results.filter(r => r.Decision === "INCLUDE");
+  // Honour reviewer overrides from abstract screening.
+  const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
   if (passed.length === 0) return <Alert><AlertDescription>No included papers available for extraction.</AlertDescription></Alert>;
 
   async function extract() {

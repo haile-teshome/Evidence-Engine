@@ -18,12 +18,35 @@ export type ClarifyingQuestion = {
 export type AgentVote = { vote: "PASS" | "FAIL" | "N/A"; reasoning: string; evidence?: string };
 export type AgentTrace = Record<string, AgentVote>;
 
+// Per-PICO structured appraisal returned by the screen-abstract endpoint.
+// vote semantics:
+//   PASS     — abstract clearly satisfies this PICO element
+//   PARTIAL  — partial / related match
+//   FAIL     — clearly does not match
+//   NA       — abstract lacks enough information to judge
+export type PicoVote = "PASS" | "PARTIAL" | "FAIL" | "NA";
+
+export type PicoFieldAssessment = {
+  vote: PicoVote;
+  evidence: string;     // short verbatim quote from the abstract, may be ""
+  reasoning: string;    // one-sentence explanation
+};
+
+export type PicoAssessment = {
+  population: PicoFieldAssessment;
+  intervention: PicoFieldAssessment;
+  comparator: PicoFieldAssessment;
+  outcome: PicoFieldAssessment;
+  overall_reasoning: string;  // 2-3 sentence synthesis across PICO
+};
+
 export type ScreenResult = {
   paper_id: string;
   Source: string; Title: string; URL: string; Abstract: string;
   Decision: "INCLUDE" | "EXCLUDE";
   Reason: string;
   Agent_Trace: AgentTrace;
+  Pico_Assessment?: PicoAssessment;
 };
 
 export type CriterionEvidence = { decision: "INCLUDE" | "EXCLUDE"; evidence: string; reasoning: string };
@@ -45,11 +68,29 @@ export type FullTextResult = {
   exclusion_violations: number;
 };
 
+// Legacy type kept exported only because mockServices re-exports it.
+// The new QualityReport schema does not use it.
 export type QualityIssue = {
   severity: "high" | "medium" | "low";
   category: string;
   message: string;
   evidence?: string;
+};
+
+export type RoBJudgment =
+  | "Low"
+  | "Some Concerns"
+  | "High"
+  | "No information"
+  | "Not applicable";
+
+export type RoBDomain = {
+  id: string;
+  name: string;
+  judgment: RoBJudgment;
+  rationale: string;
+  supporting_quote: string;
+  section: string;        // "Methods" | "Results" | "Discussion" | "Abstract" | "Other" | ""
 };
 
 export type QualityReport = {
@@ -58,10 +99,24 @@ export type QualityReport = {
   source: string;
   url: string;
   abstract: string;
-  score: number;
-  rating: "Excellent" | "Good" | "Fair" | "Poor";
-  issues: QualityIssue[];
-  highlightedAbstract: { text: string; flagged: boolean; reason?: string }[];
+  study_design: string;        // detected design label
+  rubric: string;              // "RoB 2" | "ROBINS-I" | "JBI cross-sectional" | "JBI qualitative" | "AMSTAR 2"
+  domains: RoBDomain[];
+  overall_judgment: RoBJudgment;
+  overall_rationale: string;
+  used_full_text: boolean;
+};
+
+// Reviewer override on an AI-generated domain judgment. Captured for the
+// audit log so every change has a timestamp, original value, and rationale.
+export type QualityOverride = {
+  paper_id: string;
+  domain_id: string;
+  original_judgment: RoBJudgment;
+  new_judgment: RoBJudgment;
+  reason: string;
+  reviewer: string;       // optional; populated when auth is configured
+  timestamp: string;      // ISO-8601
 };
 
 // ---------------------------------------------------------------------------
@@ -335,8 +390,21 @@ export const AIService = {
 // ---------------------------------------------------------------------------
 
 export const QualityService = {
-  async assessPaper(paper: Paper, signal?: AbortSignal): Promise<QualityReport> {
-    return postJSON<QualityReport>("/quality/assess", { paper }, signal);
+  async assessPaper(
+    paper: Paper,
+    signal?: AbortSignal,
+    opts: { fullText?: string; rubricOverride?: string } = {},
+  ): Promise<QualityReport> {
+    return postJSON<QualityReport>(
+      "/quality/assess",
+      {
+        paper,
+        full_text: opts.fullText,
+        rubric_override: opts.rubricOverride,
+        model: apiConfig.model,
+      },
+      signal,
+    );
   },
 };
 
