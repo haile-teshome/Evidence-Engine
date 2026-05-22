@@ -40,4 +40,5 @@ export type {
   TrimFillResult,
   MetaRegressionResult,
   MetaRunResult,
+  ClarifyingQuestion,
 } from "./apiClient";

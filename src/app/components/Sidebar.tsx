@@ -3,7 +3,6 @@ import { Card } from "./ui/card";
 import { Label } from "./ui/label";
 import { Checkbox } from "./ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { Slider } from "./ui/slider";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { Badge } from "./ui/badge";
@@ -191,26 +190,11 @@ export function Sidebar() {
               </label>
             ))}
           </div>
-          <Separator className="my-3" />
-          <Label className="mb-2 block text-sm">Papers per source: <span className="text-primary">{s.numPerSource}</span></Label>
-          <Slider value={[s.numPerSource]} min={5} max={50} step={5} onValueChange={(v) => s.setNumPerSource(v[0])} />
-          <Separator className="my-3" />
-          <Label className="mb-2 block text-sm">
-            Relevance threshold (LEADS):{" "}
-            <span className="text-primary tabular-nums">
-              {s.rerankThreshold >= 0 ? "+" : ""}{s.rerankThreshold.toFixed(2)}
-            </span>
-          </Label>
-          <Slider
-            value={[s.rerankThreshold]}
-            min={-1}
-            max={1}
-            step={0.1}
-            onValueChange={(v) => s.setRerankThreshold(Number(v[0].toFixed(2)))}
-          />
-          <p className="text-[10px] text-muted-foreground mt-1">
-            Pre-summary relevance filter. Lower = more papers kept. Default −0.20 keeps "maybe relevant" and better; +0.20 is the paper's screening-grade cutoff.
-          </p>
+          {/* Papers-per-source and relevance-threshold sliders were removed in
+              favour of automatic behaviour: the fetch budget is a fixed sane
+              default, and the rerank endpoint auto-detects the natural
+              relevance break from the score distribution itself. See
+              `_auto_relevance_cutoff` in Backend/api.py. */}
         </Card>
 
         <Card className="p-3">
