@@ -19,33 +19,56 @@ export function PrismaFlow({ counts }: { counts: Counts }) {
       {children}
     </div>
   );
-  const Aside = ({ title, items }: { title: string; items: Record<string, number> }) => (
-    <div className="bg-muted/50 border rounded-lg p-3 text-sm">
-      <div className="font-medium mb-2">{title}</div>
-      {Object.entries(items).length === 0 ? <div className="text-muted-foreground">—</div> :
-        Object.entries(items).map(([k, v]) => (
-          <div key={k} className="flex justify-between gap-2"><span className="truncate">{k}</span><span className="font-medium shrink-0">{v}</span></div>
-        ))
-      }
-    </div>
-  );
-  const Arrow = () => (
-    <div className="grid grid-cols-[16rem_28rem_16rem] gap-4 justify-center">
+
+  // Aside is sorted by count (desc) and wraps long labels instead of
+  // truncating them. Items are typically short categorical buckets like
+  // "Population mismatch · 8" produced by the screener category mappers.
+  const Aside = ({ title, items }: { title: string; items: Record<string, number> }) => {
+    const entries = Object.entries(items).sort((a, b) => b[1] - a[1]);
+    return (
+      <div className="bg-muted/50 border rounded-lg p-3 text-sm">
+        <div className="font-medium mb-2">{title}</div>
+        {entries.length === 0 ? (
+          <div className="text-muted-foreground">—</div>
+        ) : (
+          <ul className="space-y-1.5">
+            {entries.map(([k, v]) => (
+              <li key={k} className="flex justify-between items-baseline gap-3">
+                <span className="leading-snug break-words">{k}</span>
+                <span className="font-medium tabular-nums shrink-0">{v}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  };
+
+  // Top-aligned rows so a tall aside doesn't push the central box into the
+  // middle of empty space. The arrows are absorbed into the central column's
+  // flex layout below; we don't render separate Arrow rows that span the
+  // full grid width.
+  const Row = ({ box, aside, withArrow }: {
+    box: React.ReactNode;
+    aside?: React.ReactNode;
+    withArrow?: boolean;
+  }) => (
+    <div className="grid grid-cols-[1fr_28rem_1fr] gap-4 justify-center items-start">
       <div />
-      <div className="flex justify-center"><ArrowDown className="size-6 text-muted-foreground my-1" /></div>
-      <div />
-    </div>
-  );
-  const Row = ({ box, aside }: { box: React.ReactNode; aside?: React.ReactNode }) => (
-    <div className="grid grid-cols-[16rem_28rem_16rem] gap-4 justify-center items-center">
-      <div />
-      <div>{box}</div>
+      <div className="flex flex-col items-stretch">
+        {withArrow && (
+          <div className="flex justify-center py-1">
+            <ArrowDown className="size-5 text-muted-foreground" />
+          </div>
+        )}
+        {box}
+      </div>
       <div>{aside}</div>
     </div>
   );
 
   return (
-    <div className="py-4">
+    <div className="py-2 space-y-3">
       <Row box={
         <Box title="Records identified from databases" n={counts.identified}>
           {counts.source_counts && (
@@ -55,23 +78,25 @@ export function PrismaFlow({ counts }: { counts: Counts }) {
           )}
         </Box>
       } />
-      <Arrow />
       <Row
-        box={<Box title="Records after duplicates removed" n={counts.screened} />}
-        aside={<Aside title="Duplicates Removed" items={{ "Duplicate records": counts.duplicates_removed }} />}
+        withArrow
+        box={<Box title="Records after duplicates removed" n={Math.max(0, counts.identified - counts.duplicates_removed)} />}
+        aside={<Aside title="Duplicates removed" items={{ "Duplicate records": counts.duplicates_removed }} />}
       />
-      <Arrow />
       <Row
+        withArrow
         box={<Box title="Records screened (Title/Abstract)" n={counts.screened} />}
-        aside={<Aside title="Excluded at Screening" items={counts.exclusion_breakdown} />}
+        aside={<Aside title="Excluded at screening" items={counts.exclusion_breakdown} />}
       />
-      <Arrow />
       <Row
+        withArrow
         box={<Box title="Reports assessed for eligibility" n={Math.max(0, counts.screened - counts.excluded_total)} />}
-        aside={counts.ft_exclusion_breakdown ? <Aside title="Excluded at Full-Text" items={counts.ft_exclusion_breakdown} /> : undefined}
+        aside={counts.ft_exclusion_breakdown ? <Aside title="Excluded at full-text" items={counts.ft_exclusion_breakdown} /> : undefined}
       />
-      <Arrow />
-      <Row box={<Box title="Studies included in review" n={counts.included_final ?? 0} />} />
+      <Row
+        withArrow
+        box={<Box title="Studies included in review" n={counts.included_final ?? 0} />}
+      />
     </div>
   );
 }

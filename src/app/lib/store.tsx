@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport } from "./mockServices";
+import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride } from "./mockServices";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method } from "./apiClient";
 
 export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta";
@@ -87,6 +87,27 @@ type Ctx = {
   duplicatesCount: number; setDuplicatesCount: (v: number) => void;
   qualityReports: QualityReport[] | null; setQualityReports: (v: QualityReport[] | null) => void;
   excludedByQuality: Set<string>; setExcludedByQuality: React.Dispatch<React.SetStateAction<Set<string>>>;
+
+  // Reviewer overrides on screening decisions. Keyed by paper_id; value is
+  // the reviewer's effective decision ("INCLUDE" / "EXCLUDE" for abstract,
+  // "Include" / "Exclude" for full-text — matching the case the screener
+  // already uses for each stage). The AI's original Decision stays on the
+  // result row so the override is auditable.
+  abstractOverrides: Record<string, "INCLUDE" | "EXCLUDE">;
+  setAbstractOverride: (paperId: string, decision: "INCLUDE" | "EXCLUDE") => void;
+  clearAbstractOverride: (paperId: string) => void;
+  setAbstractOverrides: (v: Record<string, "INCLUDE" | "EXCLUDE">) => void;
+  fullTextOverrides: Record<string, "Include" | "Exclude">;
+  setFullTextOverride: (paperId: string, decision: "Include" | "Exclude") => void;
+  clearFullTextOverride: (paperId: string) => void;
+  setFullTextOverrides: (v: Record<string, "Include" | "Exclude">) => void;
+  // Audit log of reviewer overrides on AI-generated RoB judgments. Stored as
+  // an append-only list; the most recent entry per (paper, domain) is the
+  // current effective judgment.
+  qualityOverrides: QualityOverride[];
+  addQualityOverride: (o: QualityOverride) => void;
+  clearQualityOverrides: (paperId?: string) => void;
+  setQualityOverrides: (v: QualityOverride[]) => void;
 
   // Relevance reranking — LEADS-scored papers from the home-analysis pipeline.
   // Threshold is user-tunable in the sidebar; rerankResults holds the full
@@ -185,6 +206,40 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [duplicatesCount, setDuplicatesCount] = useState(0);
   const [qualityReports, setQualityReports] = useState<QualityReport[] | null>(null);
   const [excludedByQuality, setExcludedByQuality] = useState<Set<string>>(new Set());
+  const [qualityOverrides, setQualityOverrides] = useState<QualityOverride[]>([]);
+
+  const [abstractOverrides, setAbstractOverrides] = useState<Record<string, "INCLUDE" | "EXCLUDE">>({});
+  const setAbstractOverride = (paperId: string, decision: "INCLUDE" | "EXCLUDE") => {
+    setAbstractOverrides(prev => ({ ...prev, [paperId]: decision }));
+  };
+  const clearAbstractOverride = (paperId: string) => {
+    setAbstractOverrides(prev => {
+      const { [paperId]: _, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  const [fullTextOverrides, setFullTextOverrides] = useState<Record<string, "Include" | "Exclude">>({});
+  const setFullTextOverride = (paperId: string, decision: "Include" | "Exclude") => {
+    setFullTextOverrides(prev => ({ ...prev, [paperId]: decision }));
+  };
+  const clearFullTextOverride = (paperId: string) => {
+    setFullTextOverrides(prev => {
+      const { [paperId]: _, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  const addQualityOverride = (o: QualityOverride) => {
+    setQualityOverrides(prev => [...prev, o]);
+  };
+  const clearQualityOverrides = (paperId?: string) => {
+    if (paperId === undefined) {
+      setQualityOverrides([]);
+    } else {
+      setQualityOverrides(prev => prev.filter(o => o.paper_id !== paperId));
+    }
+  };
 
   // Relevance rerank: -0.2 keeps "maybe relevant" and better. Tunable in sidebar.
   const [rerankThreshold, setRerankThreshold] = useState<number>(-0.2);
@@ -284,6 +339,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     sources, numPerSource, model,
     rawPapers, uniquePapers, duplicatesCount, qualityReports,
     excludedByQuality: Array.from(excludedByQuality),
+    qualityOverrides,
+    abstractOverrides,
+    fullTextOverrides,
     rerankThreshold, rerankResults,
     results, fullTextResults, snowballResults, snowballScreened, extractedPapers, prisma,
   });
@@ -305,6 +363,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setDuplicatesCount(d.duplicatesCount ?? 0);
     setQualityReports(d.qualityReports ?? null);
     setExcludedByQuality(new Set(d.excludedByQuality || []));
+    setQualityOverrides(Array.isArray(d.qualityOverrides) ? d.qualityOverrides : []);
+    setAbstractOverrides(d.abstractOverrides && typeof d.abstractOverrides === "object" ? d.abstractOverrides : {});
+    setFullTextOverrides(d.fullTextOverrides && typeof d.fullTextOverrides === "object" ? d.fullTextOverrides : {});
     if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
     setRerankResults(d.rerankResults ?? null);
     setResults(d.results ?? null);
@@ -320,7 +381,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setInclusion([]); setExclusion([]); setQuery(""); setUnifiedSearchQuery(""); setPerDbQueries({});
     setSimulation(null); setDbTestResults(null); setAgenticTrace(null); setAgenticSummary(null);
     setRawPapers(null); setUniquePapers(null); setDuplicatesCount(0);
-    setQualityReports(null); setExcludedByQuality(new Set());
+    setQualityReports(null); setExcludedByQuality(new Set()); setQualityOverrides([]);
+    setAbstractOverrides({}); setFullTextOverrides({});
     setRerankThreshold(-0.2); setRerankResults(null);
     setMetaOutcome(""); setMetaMeasure(""); setMetaTau2Method("DL");
     setMetaUseKnappHartung(false);
@@ -339,6 +401,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
     rawPapers, setRawPapers, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
     qualityReports, setQualityReports, excludedByQuality, setExcludedByQuality,
+    qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
+    abstractOverrides, setAbstractOverride, clearAbstractOverride, setAbstractOverrides,
+    fullTextOverrides, setFullTextOverride, clearFullTextOverride, setFullTextOverrides,
     rerankThreshold, setRerankThreshold, rerankResults, setRerankResults,
     metaOutcome, setMetaOutcome, metaMeasure, setMetaMeasure,
     metaTau2Method, setMetaTau2Method, metaUseKnappHartung, setMetaUseKnappHartung,
