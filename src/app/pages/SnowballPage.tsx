@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService, ScreenResult } from "../lib/mockServices";
+import { effectiveFullTextDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -26,7 +27,9 @@ export function SnowballPage() {
   if (!s.fullTextResults) {
     return <Alert><AlertDescription>Complete Full-Text Evidence screening first to unlock Citation Snowballing.</AlertDescription></Alert>;
   }
-  const seeds = s.fullTextResults.filter(r => r.Decision === "Include");
+  // Honour reviewer overrides — papers the user kept by checking the
+  // full-text Keep box should seed snowballing even if the AI excluded them.
+  const seeds = s.fullTextResults.filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include");
   if (seeds.length === 0) return <Alert><AlertDescription>No papers passed full-text screening. Cannot perform snowballing.</AlertDescription></Alert>;
 
   async function start() {

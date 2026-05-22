@@ -810,7 +810,208 @@ class ScreenAbstractRequest(BaseModel):
     model: Optional[str] = None
 
 
-def _normalize_abstract_decision(raw: Dict[str, Any], inclusion: List[str], exclusion: List[str], paper: PaperIn) -> Dict[str, Any]:
+_PICO_ASSESS_VOTES = {"PASS", "PARTIAL", "FAIL", "NA"}
+
+
+def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any]:
+    """Run a single LLM call that returns per-PICO appraisal with evidence quotes.
+
+    Output shape:
+      {
+        "population":    { "vote": "PASS"|"PARTIAL"|"FAIL"|"NA", "evidence": "<short quote>", "reasoning": "<one sentence>" },
+        "intervention":  { ... },
+        "comparator":    { ... },
+        "outcome":       { ... },
+        "overall_reasoning": "<2-3 sentence synthesis across PICO>",
+      }
+
+    The "evidence" string must be a short verbatim snippet from the abstract
+    (best-effort; we re-anchor it against the abstract afterwards). A vote of
+    "NA" means the abstract does not give enough information to judge that
+    element.
+    """
+    from langchain_core.messages import HumanMessage
+
+    abstract = (paper.abstract or "").strip()
+    title = paper.title or "(untitled)"
+
+    model = AIService.get_model(model_name)
+    empty: Dict[str, Any] = {
+        "population":   {"vote": "NA", "evidence": "", "reasoning": ""},
+        "intervention": {"vote": "NA", "evidence": "", "reasoning": ""},
+        "comparator":   {"vote": "NA", "evidence": "", "reasoning": ""},
+        "outcome":      {"vote": "NA", "evidence": "", "reasoning": ""},
+        "overall_reasoning": "",
+    }
+    if not model or not abstract:
+        return empty
+
+    prompt = f"""You are screening a paper against a PICO frame for a systematic review.
+For EACH of the four PICO elements below, decide a vote of PASS, PARTIAL, or FAIL.
+Never use "NA" or "UNCERTAIN" — pick the closest of the three labels:
+
+  • PASS    — the abstract clearly satisfies this element (explicit match).
+  • PARTIAL — the abstract relates to this element but the match is implicit,
+              broader, narrower, or otherwise "on par but not explicit"
+              (e.g. broader population, surrogate outcome, related setting).
+              USE THIS GENEROUSLY when the abstract touches the concept at all.
+  • FAIL    — the abstract addresses this element AND the match is clearly
+              wrong, OR the abstract makes no mention whatsoever of anything
+              relevant to this element.
+
+For every vote also return:
+  • evidence: a SHORT verbatim phrase or sentence copied directly from the
+    abstract (≤ 200 characters) that best supports your vote. Pick the closest
+    matching span even when the match is loose.
+  • reasoning: one sentence explaining the vote.
+
+Also write a 2-3 sentence "overall_reasoning" synthesising across the four
+PICO elements that explains WHY the paper should be included or excluded.
+
+PICO:
+  Population:   {pico.population or '(unspecified — judge as "NA" unless clearly mismatched)'}
+  Intervention: {pico.intervention or '(unspecified)'}
+  Comparator:   {pico.comparator or '(unspecified)'}
+  Outcome:      {pico.outcome or '(unspecified)'}
+
+PAPER TITLE: {title}
+
+PAPER ABSTRACT:
+{abstract[:6000]}
+
+Return ONLY a JSON object with EXACTLY this shape:
+{{
+  "population":    {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
+  "intervention":  {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
+  "comparator":    {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
+  "outcome":       {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
+  "overall_reasoning": "..."
+}}
+
+NEVER fabricate a quote that does not appear in the abstract.
+"""
+
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+    except Exception as e:
+        print(f"[pico_assess] LLM error: {e}")
+        return empty
+
+    # Pre-compute a normalised abstract + tokenised sentences for fast anchoring.
+    _norm_abs = re.sub(r"\s+", " ", abstract).strip().lower()
+    _abs_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", abstract) if s.strip()]
+
+    def _best_sentence(seed_text: str, min_overlap: int = 1) -> str:
+        """Return the abstract sentence that shares the most ≥3-char tokens
+        with `seed_text`. Returns "" if no sentence has at least `min_overlap`
+        shared tokens."""
+        toks = {t for t in re.findall(r"\w{3,}", seed_text.lower())}
+        if not toks or not _abs_sentences:
+            return ""
+        best, best_score = "", 0
+        for sentence in _abs_sentences:
+            slo = sentence.lower()
+            score = sum(1 for t in toks if t in slo)
+            if score > best_score:
+                best, best_score = sentence, score
+        return best if best_score >= min_overlap else ""
+
+    def _clean_field(raw: Any, pico_seed: str) -> Dict[str, str]:
+        if not isinstance(raw, dict):
+            # Abstract present but model returned nothing — try a PICO-keyword
+            # rescue. If even that finds something, mark PARTIAL; otherwise NA.
+            rescued = _best_sentence(pico_seed, min_overlap=1)[:240]
+            if rescued:
+                return {
+                    "vote": "PARTIAL",
+                    "evidence": rescued,
+                    "reasoning": "Closest abstract sentence by keyword match — model did not return a structured response.",
+                }
+            return {"vote": "NA", "evidence": "", "reasoning": ""}
+
+        vote = str(raw.get("vote") or "").strip().upper()
+        # Normalise loose / legacy variants.
+        if vote in {"YES", "INCLUDE", "TRUE"}: vote = "PASS"
+        elif vote in {"NO", "EXCLUDE", "FALSE"}: vote = "FAIL"
+        elif vote in {"PARTIAL"}: pass
+        elif vote in {"UNCERTAIN", "UNKNOWN", "NA", ""}:
+            # The new prompt forbids NA — but the model still emits it
+            # sometimes. Treat NA / UNCERTAIN as "could be partial" and rely
+            # on the quote-anchoring below to decide PARTIAL vs NA.
+            vote = "NA"
+        elif vote not in {"PASS", "FAIL"}:
+            vote = "NA"
+
+        raw_evidence = str(raw.get("evidence") or "").strip().strip('"').strip("'")
+        evidence = ""
+
+        # Tier 1: direct (whitespace-normalised) substring match.
+        if raw_evidence:
+            _norm_q = re.sub(r"\s+", " ", raw_evidence).strip().lower()
+            if _norm_q and _norm_q in _norm_abs:
+                evidence = raw_evidence[:240]
+            else:
+                # Tier 2: best sentence by token overlap with the model's quote.
+                evidence = _best_sentence(raw_evidence, min_overlap=1)[:240]
+        # Tier 3: PICO-keyword rescue — find the best sentence using the PICO
+        # element text itself. Catches the case where the model emitted no
+        # quote OR an unusable quote, but the abstract clearly addresses the
+        # element through related vocabulary.
+        if not evidence:
+            evidence = _best_sentence(pico_seed, min_overlap=1)[:240]
+
+        reasoning = str(raw.get("reasoning") or "").strip()[:300]
+
+        # Reclassification rules (no more silent NA when the abstract exists):
+        #   • If the model said NA but we DID anchor a quote → PARTIAL.
+        #     This is the "on par but not explicit" case.
+        #   • If the model said NA and we anchored nothing → keep NA.
+        #     (Abstract genuinely doesn't address this element.)
+        #   • If the model said PASS/PARTIAL/FAIL but we couldn't anchor a
+        #     quote at all → downgrade to NA (we promised the user that every
+        #     non-NA chip has a quote).
+        if vote == "NA" and evidence:
+            vote = "PARTIAL"
+            if not reasoning:
+                reasoning = "Abstract content relates to this PICO element but does not match explicitly."
+        elif vote == "NA":
+            reasoning = ""
+        if vote != "NA" and not evidence:
+            vote = "NA"
+            reasoning = ""
+
+        return {"vote": vote, "evidence": evidence, "reasoning": reasoning}
+
+    population   = _clean_field(data.get("population"),   pico.population   or "")
+    intervention = _clean_field(data.get("intervention"), pico.intervention or "")
+    comparator   = _clean_field(data.get("comparator"),   pico.comparator   or "")
+    outcome      = _clean_field(data.get("outcome"),      pico.outcome      or "")
+
+    # Invariant: if every PICO field came back NA (no quote could be anchored
+    # anywhere), overall_reasoning is empty too. There is nothing defensible
+    # to summarise across an empty assessment.
+    overall_reasoning = str(data.get("overall_reasoning") or "").strip()[:800]
+    if all(f["vote"] == "NA" for f in (population, intervention, comparator, outcome)):
+        overall_reasoning = ""
+
+    return {
+        "population":   population,
+        "intervention": intervention,
+        "comparator":   comparator,
+        "outcome":      outcome,
+        "overall_reasoning": overall_reasoning,
+    }
+
+
+def _normalize_abstract_decision(
+    raw: Dict[str, Any],
+    inclusion: List[str],
+    exclusion: List[str],
+    paper: PaperIn,
+    pico: Optional[PicoIn] = None,
+    model_name: Optional[str] = None,
+) -> Dict[str, Any]:
     decision = str(raw.get("decision", "Exclude")).strip().lower()
     decision_upper = "INCLUDE" if decision.startswith("inc") else "EXCLUDE"
     reason = str(raw.get("reason") or raw.get("bucket") or "")
@@ -846,6 +1047,44 @@ def _normalize_abstract_decision(raw: Dict[str, Any], inclusion: List[str], excl
             "evidence": _evidence_for(crit),
         }
 
+    # Per-PICO structured assessment with evidence quotes. The "overall_reasoning"
+    # synthesises across population/intervention/comparator/outcome and becomes
+    # the new Reason string shown in the screening table.
+    pico_assessment: Dict[str, Any] = {
+        "population":   {"vote": "NA", "evidence": "", "reasoning": ""},
+        "intervention": {"vote": "NA", "evidence": "", "reasoning": ""},
+        "comparator":   {"vote": "NA", "evidence": "", "reasoning": ""},
+        "outcome":      {"vote": "NA", "evidence": "", "reasoning": ""},
+        "overall_reasoning": "",
+    }
+    if pico is not None and model_name:
+        try:
+            pico_assessment = _pico_assess(paper, pico, model_name)
+        except Exception as e:
+            print(f"[normalize_abstract] pico_assess failed: {e}")
+
+    # Honour the invariant from _pico_assess: if every PICO field came back NA
+    # (i.e. the abstract was missing or no defensible quote could be anchored
+    # anywhere), the cross-cutting Reason must also be empty — we have no
+    # basis for a free-text justification either. Only fall back to the
+    # screener-supplied reason / boilerplate when at least one PICO element
+    # has a real verdict.
+    pico_fields = (
+        pico_assessment.get("population"),
+        pico_assessment.get("intervention"),
+        pico_assessment.get("comparator"),
+        pico_assessment.get("outcome"),
+    )
+    all_pico_na = all(
+        (isinstance(f, dict) and f.get("vote") == "NA") for f in pico_fields
+    )
+    if all_pico_na:
+        overall_reasoning = ""
+    else:
+        overall_reasoning = pico_assessment.get("overall_reasoning") or reason or (
+            "Meets inclusion criteria" if decision_upper == "INCLUDE" else "Excluded"
+        )
+
     return {
         "paper_id": paper.id,
         "Source": paper.source,
@@ -853,8 +1092,9 @@ def _normalize_abstract_decision(raw: Dict[str, Any], inclusion: List[str], excl
         "URL": paper.url,
         "Abstract": abstract,
         "Decision": decision_upper,
-        "Reason": reason or ("Meets inclusion criteria" if decision_upper == "INCLUDE" else "Excluded"),
+        "Reason": overall_reasoning,
         "Agent_Trace": agent_trace,
+        "Pico_Assessment": pico_assessment,
     }
 
 
@@ -875,7 +1115,12 @@ def screen_abstract(req: ScreenAbstractRequest):
     _ss["exclusion_list"] = list(req.exclusion or [])
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
     raw = _screen_one(paper, pico, model_name, req.inclusion, req.exclusion)
-    return _normalize_abstract_decision(raw, req.inclusion, req.exclusion, req.paper)
+    # Per-PICO assessment uses the reasoning-tier model regardless of screening
+    # model, because structured JSON output is its strength.
+    pico_model = resolve_for_thinking(req.model)
+    return _normalize_abstract_decision(
+        raw, req.inclusion, req.exclusion, req.paper, pico=req.pico, model_name=pico_model,
+    )
 
 
 class ScreenAbstractBatchRequest(BaseModel):
@@ -893,10 +1138,14 @@ def screen_abstract_batch(req: ScreenAbstractBatchRequest):
     pico = _to_pico(req.pico)
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
 
+    pico_model = resolve_for_thinking(req.model)
+
     def _one(p_in: PaperIn) -> Dict[str, Any]:
         bp = _to_backend_paper(p_in)
         raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion)
-        return _normalize_abstract_decision(raw, req.inclusion, req.exclusion, p_in)
+        return _normalize_abstract_decision(
+            raw, req.inclusion, req.exclusion, p_in, pico=req.pico, model_name=pico_model,
+        )
 
     results: List[Dict[str, Any]] = []
     workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, len(req.papers) or 1))
@@ -1182,6 +1431,31 @@ def screen_fulltext(req: ScreenFullTextRequest):
 
     pico_evidence = _pico_evidence_for_text(source_text, pico)
 
+    # Deterministically synthesise a one-paragraph Reason from the PICO match
+    # quality + criteria stats so the UI's Reason column is never empty / N/A.
+    # The LLM's raw reason (if any) is appended verbatim at the end.
+    def _pico_label(elem: str) -> str:
+        m = (pico_evidence.get(elem, {}) or {}).get("match", "no")
+        if m == "yes":     return f"{elem} match"
+        if m == "partial": return f"{elem} partial"
+        return f"{elem} mismatch"
+
+    pico_summary = "; ".join(_pico_label(e) for e in ("Population", "Intervention", "Comparator", "Outcome"))
+    inc_total = len(req.inclusion or [])
+    exc_total = len(req.exclusion or [])
+    parts: List[str] = [f"PICO: {pico_summary}."]
+    if inc_total > 0 or exc_total > 0:
+        parts.append(
+            f"Met {inclusion_score} of {inc_total} inclusion criteria; "
+            f"{exclusion_violations} of {exc_total} exclusion violation"
+            f"{'' if exclusion_violations == 1 else 's'}."
+        )
+    raw_reason = str(raw.get("reason", "")).strip()
+    # Drop trivial / placeholder reasons that don't add information.
+    if raw_reason and raw_reason.lower() not in {"include", "exclude", "n/a", "na", "none", ""}:
+        parts.append(raw_reason)
+    synthesised_reason = " ".join(parts)
+
     return {
         "paper_id": req.paper.id,
         "Title": req.paper.title,
@@ -1189,7 +1463,7 @@ def screen_fulltext(req: ScreenFullTextRequest):
         "Source": req.paper.source,
         "Abstract": req.paper.abstract,
         "Decision": decision,
-        "Reason": str(raw.get("reason", "")),
+        "Reason": synthesised_reason,
         "criteriaEval": criteria_eval,
         "criteriaEvidence": criteria_evidence,
         "picoEvidence": pico_evidence,
@@ -1728,71 +2002,462 @@ def extract_tables(req: ExtractTablesRequest):
 
 class QualityRequest(BaseModel):
     paper: PaperIn
+    full_text: Optional[str] = None     # if available; falls back to abstract
+    rubric_override: Optional[str] = None  # force a specific rubric ("RoB 2", "ROBINS-I", ...)
+    model: Optional[str] = None
 
 
-FLAG_PATTERNS = [
-    (re.compile(r"retract", re.I), "Retraction language"),
-    (re.compile(r"predator", re.I), "Predatory venue"),
-    (re.compile(r"conflict of interest|undisclosed", re.I), "Conflict of interest"),
-    (re.compile(r"funded by|sponsored by", re.I), "Funding disclosure"),
-    (re.compile(r"\bn\s*=\s*([1-9]|[1-2]\d)\b", re.I), "Very small sample size"),
-    (re.compile(r"preliminary|pilot study", re.I), "Preliminary / pilot data"),
-    (re.compile(r"no significant|not significant", re.I), "Null / underpowered finding"),
+# ---------------------------------------------------------------------------
+# Rubric registry — domain definitions per study-design rubric.
+# Each domain pairs a signalling question with a one-line description so the
+# LLM appraiser has enough structure to make a defensible judgment.
+# ---------------------------------------------------------------------------
+
+ROB2_DOMAINS = [
+    {
+        "id": "randomization",
+        "name": "Bias arising from the randomization process",
+        "signalling": (
+            "Was the allocation sequence random and concealed? Were baseline "
+            "differences between groups suggestive of a problem with the "
+            "randomization?"
+        ),
+    },
+    {
+        "id": "deviations",
+        "name": "Bias due to deviations from intended interventions",
+        "signalling": (
+            "Were participants and personnel aware of group assignment? Were "
+            "there deviations from the intended intervention that affected "
+            "outcomes? Was analysis appropriate (e.g., intention-to-treat)?"
+        ),
+    },
+    {
+        "id": "missing_data",
+        "name": "Bias due to missing outcome data",
+        "signalling": (
+            "Were outcome data available for most participants? Was the "
+            "proportion of missingness similar across groups? Was the missingness "
+            "likely related to the true value of the outcome?"
+        ),
+    },
+    {
+        "id": "measurement",
+        "name": "Bias in measurement of the outcome",
+        "signalling": (
+            "Was the outcome measurement method appropriate? Could measurement "
+            "differ between intervention groups? Were outcome assessors blinded?"
+        ),
+    },
+    {
+        "id": "selection_reporting",
+        "name": "Bias in selection of the reported result",
+        "signalling": (
+            "Was the analysis pre-specified (registered protocol, statistical "
+            "analysis plan)? Were the reported results selected from multiple "
+            "analyses or outcome measurements?"
+        ),
+    },
 ]
 
-SEVERITY_WEIGHTS = {"high": 25, "medium": 12, "low": 5}
+ROBINS_I_DOMAINS = [
+    {
+        "id": "confounding",
+        "name": "Bias due to confounding",
+        "signalling": (
+            "Were important confounders identified and adjusted for? Was the "
+            "method of adjustment appropriate (matching, regression, propensity "
+            "scoring)? Were time-varying confounders handled?"
+        ),
+    },
+    {
+        "id": "selection",
+        "name": "Bias in selection of participants",
+        "signalling": (
+            "Was selection into the study related to intervention or outcome? "
+            "Was follow-up complete and did it start at intervention initiation?"
+        ),
+    },
+    {
+        "id": "classification",
+        "name": "Bias in classification of interventions",
+        "signalling": (
+            "Were intervention groups clearly defined and consistently applied? "
+            "Were misclassifications possible (e.g., from self-report)?"
+        ),
+    },
+    {
+        "id": "deviations",
+        "name": "Bias due to deviations from intended interventions",
+        "signalling": (
+            "Were co-interventions balanced across groups? Did participants "
+            "switch interventions in a way that biased the effect estimate?"
+        ),
+    },
+    {
+        "id": "missing_data",
+        "name": "Bias due to missing data",
+        "signalling": (
+            "Were data on participants and outcomes reasonably complete? Were "
+            "appropriate statistical methods used to handle missing data?"
+        ),
+    },
+    {
+        "id": "measurement",
+        "name": "Bias in measurement of outcomes",
+        "signalling": (
+            "Was the outcome measure appropriate, applied consistently, and "
+            "obtained blind to intervention status?"
+        ),
+    },
+    {
+        "id": "selection_reporting",
+        "name": "Bias in selection of the reported result",
+        "signalling": (
+            "Were results selectively reported across multiple analyses, "
+            "outcomes, or subgroups?"
+        ),
+    },
+]
+
+JBI_CROSS_SECTIONAL_DOMAINS = [
+    {"id": "inclusion_criteria", "name": "Clear inclusion criteria",
+     "signalling": "Were the criteria for inclusion in the sample clearly defined?"},
+    {"id": "subjects_setting", "name": "Subjects and setting described in detail",
+     "signalling": "Were the study subjects and the setting described in detail?"},
+    {"id": "exposure_measurement", "name": "Valid and reliable exposure measurement",
+     "signalling": "Was the exposure measured in a valid and reliable way?"},
+    {"id": "outcome_measurement", "name": "Valid and reliable outcome measurement",
+     "signalling": "Were the outcomes measured in a valid and reliable way?"},
+    {"id": "confounding_identified", "name": "Confounders identified",
+     "signalling": "Were confounding factors identified and strategies stated to deal with them?"},
+    {"id": "statistical_analysis", "name": "Appropriate statistical analysis",
+     "signalling": "Was the statistical analysis used appropriate to the data?"},
+]
+
+AMSTAR2_DOMAINS = [
+    {"id": "pico_components", "name": "Research questions and inclusion criteria include the components of PICO",
+     "signalling": "Did the SR's research questions and inclusion criteria include all PICO components?"},
+    {"id": "protocol_registered", "name": "Protocol registered before review",
+     "signalling": "Did the report contain explicit statement that review methods were established prior, and was the protocol registered?"},
+    {"id": "study_designs_explained", "name": "Explanation for selection of study designs",
+     "signalling": "Did the review authors explain their selection of the study designs for inclusion in the review?"},
+    {"id": "search_comprehensive", "name": "Comprehensive literature search",
+     "signalling": "Did the review authors use a comprehensive literature search strategy across multiple databases?"},
+    {"id": "duplicate_screening", "name": "Duplicate study selection",
+     "signalling": "Did the review authors perform study selection in duplicate?"},
+    {"id": "duplicate_extraction", "name": "Duplicate data extraction",
+     "signalling": "Did the review authors perform data extraction in duplicate?"},
+    {"id": "excluded_studies_list", "name": "List of excluded studies with justification",
+     "signalling": "Did the review authors provide a list of excluded studies and justify the exclusions?"},
+    {"id": "included_studies_detail", "name": "Adequate description of included studies",
+     "signalling": "Did the review authors describe the included studies in adequate detail?"},
+    {"id": "rob_individual_assessed", "name": "Risk-of-bias assessed for individual studies",
+     "signalling": "Did the review authors use a satisfactory technique for assessing the risk of bias in individual studies?"},
+    {"id": "funding_sources", "name": "Funding sources reported for included studies",
+     "signalling": "Did the review authors report on the sources of funding for the studies included in the review?"},
+    {"id": "meta_analysis_appropriate", "name": "Appropriate statistical combination of results",
+     "signalling": "If meta-analysis was performed, did the review authors use appropriate methods for statistical combination of results?"},
+    {"id": "rob_in_interpretation", "name": "Risk-of-bias considered in interpretation",
+     "signalling": "Did the review authors account for risk of bias in individual studies when interpreting/discussing the results of the review?"},
+    {"id": "heterogeneity_discussed", "name": "Heterogeneity discussed",
+     "signalling": "Did the review authors provide a satisfactory explanation for, and discussion of, any heterogeneity observed in the results?"},
+    {"id": "publication_bias", "name": "Publication-bias investigated",
+     "signalling": "Did the review authors investigate publication bias (small study bias)?"},
+    {"id": "coi_reported", "name": "Conflicts of interest reported",
+     "signalling": "Did the review authors report any potential sources of conflict of interest?"},
+]
+
+JBI_QUALITATIVE_DOMAINS = [
+    {"id": "philosophical_congruity", "name": "Congruity between philosophical perspective and methodology",
+     "signalling": "Is there congruity between the stated philosophical perspective and the research methodology?"},
+    {"id": "methodology_objectives", "name": "Methodology aligned with objectives",
+     "signalling": "Is there congruity between the methodology and the research question or objectives?"},
+    {"id": "data_collection", "name": "Methodology aligned with data collection",
+     "signalling": "Is there congruity between the methodology and the methods used to collect data?"},
+    {"id": "representation_findings", "name": "Methodology aligned with findings representation",
+     "signalling": "Is there congruity between the methodology and the representation and analysis of data?"},
+    {"id": "researcher_position", "name": "Researcher's positionality stated",
+     "signalling": "Has the researcher's influence on the research, and vice versa, been addressed?"},
+    {"id": "participants_voice", "name": "Participants' voices represented",
+     "signalling": "Are participants, and their voices, adequately represented?"},
+    {"id": "ethical_approval", "name": "Ethical approval reported",
+     "signalling": "Is the research ethical, according to current criteria, and is evidence of ethical approval provided?"},
+]
+
+RUBRIC_REGISTRY = {
+    "RoB 2": {"applies_to": ["RCT"], "domains": ROB2_DOMAINS},
+    "ROBINS-I": {"applies_to": ["Cohort", "Case-control", "Non-randomised"], "domains": ROBINS_I_DOMAINS},
+    "JBI cross-sectional": {"applies_to": ["Cross-sectional"], "domains": JBI_CROSS_SECTIONAL_DOMAINS},
+    "JBI qualitative": {"applies_to": ["Qualitative"], "domains": JBI_QUALITATIVE_DOMAINS},
+    "AMSTAR 2": {"applies_to": ["Systematic review", "Meta-analysis"], "domains": AMSTAR2_DOMAINS},
+}
+
+# Map normalised study-design labels → rubric name.
+DESIGN_TO_RUBRIC = {
+    "rct": "RoB 2",
+    "randomized controlled trial": "RoB 2",
+    "randomised controlled trial": "RoB 2",
+    "cluster rct": "RoB 2",
+    "crossover rct": "RoB 2",
+    "cohort": "ROBINS-I",
+    "case-control": "ROBINS-I",
+    "case control": "ROBINS-I",
+    "non-randomised": "ROBINS-I",
+    "non-randomized": "ROBINS-I",
+    "quasi-experimental": "ROBINS-I",
+    "cross-sectional": "JBI cross-sectional",
+    "cross sectional": "JBI cross-sectional",
+    "qualitative": "JBI qualitative",
+    "mixed methods": "JBI qualitative",
+    "systematic review": "AMSTAR 2",
+    "meta-analysis": "AMSTAR 2",
+    "meta analysis": "AMSTAR 2",
+    "scoping review": "AMSTAR 2",
+    "umbrella review": "AMSTAR 2",
+}
+
+JUDGMENT_VALUES = {"Low", "Some Concerns", "High", "No information", "Not applicable"}
+
+
+def _detect_study_design(paper: PaperIn, full_text: str, model_name: str) -> Tuple[str, str]:
+    """Return (design_label, raw_response) — design is one of the keys of
+    DESIGN_TO_RUBRIC (or "Other" if unrecognised).
+    """
+    from langchain_core.messages import HumanMessage
+
+    model = AIService.get_model(model_name)
+    if not model:
+        return "Other", ""
+
+    text = full_text[:6000] if full_text else (paper.abstract or "")[:6000]
+    prompt = f"""Classify the study DESIGN of this paper into ONE of these categories:
+
+  - RCT (randomised / randomized controlled trial, including cluster and crossover variants)
+  - Cohort (prospective or retrospective)
+  - Case-control
+  - Cross-sectional
+  - Case series
+  - Case report
+  - Systematic review (with or without meta-analysis)
+  - Meta-analysis
+  - Qualitative (interview, focus group, ethnographic)
+  - Mixed methods
+  - Quasi-experimental (interrupted time series, controlled before-after)
+  - Non-randomised (other intervention studies that are neither RCT nor observational)
+  - Other (animal, in vitro, methodological, editorial, narrative review, opinion)
+
+PAPER TITLE: {paper.title or "(untitled)"}
+
+TEXT (abstract or available full text):
+{text}
+
+Return ONLY the category label, exactly as written above. No explanation, no JSON, no quotes.
+"""
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        raw = (r.content or "").strip()
+        # Normalise: take the first non-empty line, strip quotes/markdown.
+        first_line = (raw.splitlines() or [""])[0].strip().strip("'\"`*").strip()
+        return first_line or "Other", raw
+    except Exception as e:
+        print(f"[quality] study-design detection error: {e}")
+        return "Other", ""
+
+
+def _resolve_rubric(design_label: str, override: Optional[str]) -> Tuple[str, List[Dict[str, str]]]:
+    """Return (rubric_name, domains). If override is given and is a valid
+    rubric name, use that; otherwise map from the detected study-design label.
+    Falls back to JBI cross-sectional when nothing matches (safest broad rubric).
+    """
+    if override and override in RUBRIC_REGISTRY:
+        rub = RUBRIC_REGISTRY[override]
+        return override, rub["domains"]
+
+    key = (design_label or "").strip().lower()
+    rubric_name = DESIGN_TO_RUBRIC.get(key)
+    if not rubric_name:
+        # Fuzzy: try substring match against the keys.
+        for k, v in DESIGN_TO_RUBRIC.items():
+            if k in key or key in k:
+                rubric_name = v
+                break
+    if not rubric_name:
+        rubric_name = "JBI cross-sectional"
+    return rubric_name, RUBRIC_REGISTRY[rubric_name]["domains"]
+
+
+def _appraise_domains(
+    paper: PaperIn,
+    full_text: str,
+    rubric_name: str,
+    domains: List[Dict[str, str]],
+    model_name: str,
+) -> List[Dict[str, Any]]:
+    """Run a batched per-domain LLM appraisal. Returns a list of domain judgments,
+    each with judgment, rationale, supporting_quote, section.
+    """
+    from langchain_core.messages import HumanMessage
+
+    model = AIService.get_model(model_name)
+    if not model:
+        return [{
+            "id": d["id"], "name": d["name"],
+            "judgment": "No information",
+            "rationale": "Model unavailable.",
+            "supporting_quote": "", "section": "",
+        } for d in domains]
+
+    text = full_text or (paper.abstract or "")
+    has_full_text = bool(full_text and len(full_text) > len(paper.abstract or ""))
+
+    domain_block = "\n".join(
+        f"  - id: \"{d['id']}\"\n    name: \"{d['name']}\"\n    signalling_question: \"{d['signalling']}\""
+        for d in domains
+    )
+
+    prompt = f"""You are a systematic-review methodologist performing a risk-of-bias appraisal
+using the {rubric_name} rubric. For EACH of the domains below, render a judgment based ONLY on
+what is stated in the paper text. Do not infer beyond what is written.
+
+PAPER TITLE: {paper.title or "(untitled)"}
+
+PAPER TEXT ({"full text available" if has_full_text else "abstract only — limited assessment"}):
+{text[:14000]}
+
+DOMAINS TO APPRAISE:
+{domain_block}
+
+For each domain, return:
+  - "judgment": one of "Low" | "Some Concerns" | "High" | "No information"
+       Use "No information" when the paper does not give you enough to decide
+       (e.g. when only the abstract is available and methods detail is missing).
+  - "rationale": 1-2 sentences explaining the judgment.
+  - "supporting_quote": a SHORT exact quote from the paper that supports the
+       judgment (≤ 200 chars). If no quote is available, return an empty string.
+  - "section": where in the paper the quote was found
+       ("Methods" | "Results" | "Discussion" | "Abstract" | "Other" | "" if no quote).
+
+Return ONLY a JSON object with this shape:
+{{
+  "judgments": [
+    {{
+      "id": "<domain id>",
+      "judgment": "Low" | "Some Concerns" | "High" | "No information",
+      "rationale": "...",
+      "supporting_quote": "...",
+      "section": "Methods" | "Results" | "Discussion" | "Abstract" | "Other" | ""
+    }},
+    ...
+  ]
+}}
+
+NEVER fabricate quotes that do not appear in the paper text. NEVER mark a domain
+"Low" without a supporting quote unless the rubric explicitly allows it.
+"""
+    out: List[Dict[str, Any]] = []
+    by_id: Dict[str, Dict[str, Any]] = {}
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+        for j in (data.get("judgments") or []):
+            if not isinstance(j, dict):
+                continue
+            did = str(j.get("id") or "").strip()
+            judgment = str(j.get("judgment") or "No information").strip()
+            if judgment not in JUDGMENT_VALUES:
+                judgment = "No information"
+            by_id[did] = {
+                "id": did,
+                "judgment": judgment,
+                "rationale": str(j.get("rationale") or "").strip()[:600],
+                "supporting_quote": str(j.get("supporting_quote") or "").strip()[:250],
+                "section": str(j.get("section") or "").strip()[:30],
+            }
+    except Exception as e:
+        print(f"[quality] domain appraisal error: {e}")
+
+    # Always return one entry per requested domain, filling in "No information"
+    # for any the model omitted.
+    for d in domains:
+        existing = by_id.get(d["id"])
+        if existing:
+            existing["name"] = d["name"]
+            out.append(existing)
+        else:
+            out.append({
+                "id": d["id"], "name": d["name"],
+                "judgment": "No information",
+                "rationale": "Domain not addressed in model response.",
+                "supporting_quote": "", "section": "",
+            })
+    return out
+
+
+def _aggregate_overall(domains: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """Aggregate domain-level judgments to an overall RoB judgment.
+
+    Follows the standard Cochrane logic:
+      • Overall = High if ANY domain is High.
+      • Overall = Some Concerns if ANY domain is Some Concerns (and none High).
+      • Overall = Low only if EVERY domain is Low.
+      • Overall = No information if every domain is No information.
+    """
+    judgments = [d["judgment"] for d in domains]
+    if all(j == "No information" for j in judgments):
+        return "No information", "All domains lacked sufficient information for an appraisal."
+    if any(j == "High" for j in judgments):
+        n = sum(1 for j in judgments if j == "High")
+        return "High", f"{n} domain(s) judged High risk of bias."
+    if any(j == "Some Concerns" for j in judgments):
+        n = sum(1 for j in judgments if j == "Some Concerns")
+        return "Some Concerns", f"{n} domain(s) raised some concerns."
+    if all(j == "Low" for j in judgments):
+        return "Low", "All domains judged Low risk of bias."
+    return "Some Concerns", "Mixed domain judgments without any High risk."
 
 
 @app.post("/api/quality/assess")
 def quality_assess(req: QualityRequest):
-    p = req.paper
-    abs_text = p.abstract or ""
-    issues: List[Dict[str, str]] = []
-    lo = abs_text.lower()
+    """Risk-of-bias appraisal using rubric appropriate to the detected study design.
 
-    if len(abs_text) < 200:
-        issues.append({"severity": "high", "category": "Incomplete Abstract",
-                       "message": "Abstract is unusually short — full methods/results may be missing.",
-                       "evidence": abs_text[:80]})
-    if "method" not in lo:
-        issues.append({"severity": "medium", "category": "Missing Methods",
-                       "message": "No explicit Methods section detected in the abstract."})
-    if "result" not in lo and "conclus" not in lo:
-        issues.append({"severity": "medium", "category": "Missing Results",
-                       "message": "No Results or Conclusions language found."})
-    if not re.search(r"(p\s*[<=>]\s*0\.\d+|95%\s*ci|confidence interval|n\s*=\s*\d+)", abs_text, re.I):
-        issues.append({"severity": "low", "category": "Statistical Reporting",
-                       "message": "No explicit statistical results (p-values, CIs, sample sizes) detected."})
-    if not p.url or not re.match(r"^https?:", p.url):
-        issues.append({"severity": "high", "category": "Missing Identifier",
-                       "message": "No valid URL/DOI for this record."})
-    if p.year and p.year < 2015:
-        issues.append({"severity": "low", "category": "Older Publication",
-                       "message": f"Published in {p.year} — may predate current guidelines."})
+    Pipeline:
+      1. Detect study design from title + (full_text or abstract).
+      2. Pick rubric: RCT → RoB 2, observational → ROBINS-I, cross-sectional →
+         JBI, qualitative → JBI qualitative, SR/MA → AMSTAR 2 (override
+         honoured if provided).
+      3. Appraise each rubric domain via batched LLM call returning structured
+         JSON with judgment, rationale, supporting_quote, section.
+      4. Aggregate to an overall judgment per Cochrane rules.
 
-    # Highlighted abstract
-    sentences = re.split(r"(?<=[.!?])\s+", abs_text)
-    highlighted = []
-    for s in sentences:
-        hit = next(((pat, reason) for pat, reason in FLAG_PATTERNS if pat.search(s)), None)
-        if hit:
-            highlighted.append({"text": s + " ", "flagged": True, "reason": hit[1]})
-        else:
-            highlighted.append({"text": s + " ", "flagged": False})
+    The legacy `score`/`rating`/`issues`/`highlightedAbstract` fields have
+    been removed — the response shape is now centred on domain-level RoB
+    judgments, which is what reviewers actually need.
+    """
+    paper = req.paper
+    abs_text = paper.abstract or ""
+    full_text = (req.full_text or "").strip() or abs_text
 
-    score = max(0, 100 - sum(SEVERITY_WEIGHTS[i["severity"]] for i in issues))
-    rating = "Excellent" if score >= 85 else "Good" if score >= 70 else "Fair" if score >= 50 else "Poor"
+    model_name = resolve_for_thinking(req.model)
+
+    design, _ = _detect_study_design(paper, full_text, model_name)
+    rubric_name, domains_spec = _resolve_rubric(design, req.rubric_override)
+    domain_results = _appraise_domains(paper, full_text, rubric_name, domains_spec, model_name)
+    overall_judgment, overall_rationale = _aggregate_overall(domain_results)
+    used_full_text = bool(req.full_text and len(req.full_text) > len(abs_text))
 
     return {
-        "paper_id": p.id,
-        "title": p.title,
-        "source": p.source,
-        "url": p.url,
+        "paper_id": paper.id,
+        "title": paper.title,
+        "source": paper.source,
+        "url": paper.url,
         "abstract": abs_text,
-        "score": score,
-        "rating": rating,
-        "issues": issues,
-        "highlightedAbstract": highlighted,
+        "study_design": design,
+        "rubric": rubric_name,
+        "domains": domain_results,
+        "overall_judgment": overall_judgment,
+        "overall_rationale": overall_rationale,
+        "used_full_text": used_full_text,
     }
 
 
