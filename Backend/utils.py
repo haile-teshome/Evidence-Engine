@@ -132,26 +132,80 @@ class AIService:
             
     @staticmethod
     def infer_pico_and_query(goal: str, model_name: str, previous_goal: str = "") -> Dict[str, Any]:
-        """Extracts PICO and criteria from the research goal with enhanced specificity."""
-        model = AIService.get_model(model_name)
-        
-        system_msg = SystemMessage(content="You are a medical data extractor. Extract PICO elements from the research goal. Be specific and descriptive based on the research context.")
-        
-        prompt = f"""
-        Current Research Goal: "{goal}"
-        
-        Extract these elements into a JSON object. Be specific and descriptive based on the research context:
-        {{
-            "p": "Specific target population/condition",
-            "i": "Specific test or intervention",
-            "c": "Specific control group or baseline",
-            "o": "Specific outcome measured",
-            "inclusion": ["specific", "actionable", "rules", "for", "including", "studies"],
-            "exclusion": ["specific", "actionable", "rules", "for", "excluding", "studies"]
-        }}
-        
-        Generate 5-8 specific inclusion criteria and 5-8 specific exclusion criteria that are directly relevant to this research question.
+        """Extract PICO and criteria from the research goal.
+
+        Core rule: never CONTRADICT what the user actually wrote. Preserve their
+        literal phrasing for elements they specified. For elements they did NOT
+        specify, infer a BROAD, INCLUSIVE default that does not conflict with the
+        stated topic — never a narrow stereotype.
         """
+        model = AIService.get_model(model_name)
+
+        system_msg = SystemMessage(content=(
+            "You are a clinical research methodologist helping a researcher scaffold "
+            "a PICO for systematic review. Stay loyal to the topic the user wrote — "
+            "preserve their literal phrasing for any element they specified, and "
+            "never replace it with a different concept. For elements they did NOT "
+            "specify, infer a BROAD, INCLUSIVE default that supports the stated topic. "
+            "Never invent narrow specifics (age ranges, dosages, comorbidities, "
+            "specific durations) the user did not state — those belong in optional "
+            "clarifying questions, not in the inferred PICO."
+        ))
+
+        prompt = f"""
+Current Research Goal: "{goal}"
+
+Extract these elements into a JSON object. RULES:
+
+1. STATED elements — preserve the user's literal phrasing. Never paraphrase
+   "Mediterranean diet" as "dietary intervention", or "longevity" as "BMI", or
+   "cancer" as "neoplasm". The exact words the user wrote must appear.
+
+2. UNSTATED elements — supply a BROAD, INCLUSIVE default that does not conflict
+   with the stated topic. Prefer breadth over specificity.
+
+3. NEVER override what the user did state. If the user wrote "Mediterranean diet",
+   the intervention is "Mediterranean diet" — never "low-carb diet" or
+   "diet intervention".
+
+4. EVERY PICO field must be a SPECIFIC, OPERATIONALISED phrase (5–18 words),
+   not a single bare word or a rambling list. Push for concreteness: name the
+   subgroup, the dose / duration / adherence index, the comparator type, the
+   validated outcome measure. The user's clarifying answers (if any) are folded
+   into the goal text — use them. Examples of strong phrasings:
+     • Population: "Community-dwelling adults aged 40+ with cardiovascular risk factors"
+     • Population: "Older adults (65+ years) without established cardiovascular disease"
+     • Intervention: "Adherence to a Mediterranean diet measured by validated index (e.g. MedDiet Score)"
+     • Intervention: "Metformin monotherapy at standard daily doses (≥ 1000 mg/day)"
+     • Comparator: "Standard Western diet or no specific dietary intervention"
+     • Comparator: "Placebo or active control (sulfonylurea or DPP-4 inhibitor)"
+     • Outcome: "All-cause mortality and lifespan, with follow-up ≥ 5 years"
+     • Outcome: "Change in HbA1c (%) from baseline at 6 months or later"
+
+5. Generate 5–7 inclusion criteria and 5–7 exclusion criteria. Each criterion
+   should be a SPECIFIC, OPERATIONALISED sentence (8–22 words) — concrete
+   enough that two reviewers screening the same paper would reach the same
+   decision. Include numeric thresholds, validated scales, and design
+   restrictions where reasonable. Cover, between the two lists, the standard
+   methodological dimensions:
+     • study design (RCT preference, prospective observational floor, follow-up duration)
+     • population restriction (age, comorbidity, exposure window)
+     • intervention / comparator operationalisation (dose, duration, adherence measure)
+     • outcome measurement (validated scale, timing, hard vs surrogate endpoint)
+     • methodological quality (sample size, attrition, blinding, language, full-text)
+   Avoid circular boilerplate ("studies relevant to this research question"),
+   and avoid generic one-word criteria ("English") — embed them in a sentence.
+
+JSON shape:
+{{
+    "p": "Population — 5-18 word operationalised phrase",
+    "i": "Intervention — verbatim if stated, plus operationalisation (5-18 words)",
+    "c": "Comparator — 5-18 word operationalised phrase",
+    "o": "Outcome — verbatim if stated, plus operationalisation (5-18 words)",
+    "inclusion": ["5-7 specific inclusion criteria, each 8-22 words, operationalised"],
+    "exclusion": ["5-7 specific exclusion criteria, each 8-22 words, operationalised"]
+}}
+"""
         try:
             response = model.invoke([system_msg, HumanMessage(content=prompt)])
             data = AIService._extract_json(response.content)
@@ -170,236 +224,555 @@ class AIService:
                 
                 inclusion = [clean_item(item) for item in data.get("inclusion", []) if item]
                 exclusion = [clean_item(item) for item in data.get("exclusion", []) if item]
-                
+
+                def _clean_pico_value(v: Any) -> str:
+                    """Normalise a PICO value. Strip pure placeholder strings — but
+                    keep '(inferred) ...' markers so the UI can style them.
+                    """
+                    s = "" if v is None else str(v).strip()
+                    if s.lower() in {"n/a", "na", "none", "not stated", "unspecified",
+                                     "not specified", "any", "empty", "null"}:
+                        return ""
+                    return s
+
                 return {
-                    "p": data.get("p") or data.get("population", goal),
-                    "i": data.get("i") or data.get("intervention", "N/A"),
-                    "c": data.get("c") or data.get("comparator", "N/A"),
-                    "o": data.get("o") or data.get("outcome", "N/A"),
-                    "inclusion": inclusion[:8],  # Limit to 8 criteria
-                    "exclusion": exclusion[:8]   # Limit to 8 criteria
+                    "p": _clean_pico_value(data.get("p") or data.get("population")),
+                    "i": _clean_pico_value(data.get("i") or data.get("intervention")),
+                    "c": _clean_pico_value(data.get("c") or data.get("comparator")),
+                    "o": _clean_pico_value(data.get("o") or data.get("outcome")),
+                    "inclusion": inclusion[:8],
+                    "exclusion": exclusion[:8],
                 }
         except Exception as e:
             print(f"PICO analysis error: {e}")
             pass
-        
-        # Enhanced fallback with basic research question analysis
-        goal_lower = goal.lower()
-        
-        # Extract key terms for more specific fallback
-        population = "Target population"
-        if any(word in goal_lower for word in ["children", "pediatric", "kids", "childhood"]):
-            population = "Children and adolescents"
-        elif any(word in goal_lower for word in ["elderly", "older adults", "senior", "geriatric"]):
-            population = "Older adults"
-        elif any(word in goal_lower for word in ["patients", "disease", "condition", "disorder"]):
-            population = "Patients with medical condition"
-        elif any(word in goal_lower for word in ["students", "education", "learning"]):
-            population = "Students"
-        elif any(word in goal_lower for word in ["workers", "employees", "workplace", "occupational"]):
-            population = "Working adults"
-        
-        intervention = "Intervention"
-        if any(word in goal_lower for word in ["therapy", "treatment", "intervention", "program"]):
-            intervention = "Therapeutic program"
-        elif any(word in goal_lower for word in ["medication", "drug", "pharmaceutical"]):
-            intervention = "Medication treatment"
-        elif any(word in goal_lower for word in ["surgery", "surgical", "operation"]):
-            intervention = "Surgical procedure"
-        elif any(word in goal_lower for word in ["exercise", "physical activity", "fitness"]):
-            intervention = "Exercise program"
-        elif any(word in goal_lower for word in ["diet", "nutrition", "food"]):
-            intervention = "Dietary intervention"
-        elif any(word in goal_lower for word in ["education", "training", "teaching"]):
-            intervention = "Educational program"
-        
-        comparator = "Control or comparator"
-        if any(word in goal_lower for word in ["control", "placebo", "sham"]):
-            comparator = "Placebo control"
-        elif any(word in goal_lower for word in ["usual", "standard", "routine"]):
-            comparator = "Standard care"
-        elif any(word in goal_lower for word in ["no", "without", "untreated"]):
-            comparator = "No treatment"
-        
-        outcome = "Outcomes measured"
-        if any(word in goal_lower for word in ["depression", "anxiety", "mental", "psychological"]):
-            outcome = "Mental health outcomes"
-        elif any(word in goal_lower for word in ["cardiovascular", "heart", "blood pressure"]):
-            outcome = "Cardiovascular outcomes"
-        elif any(word in goal_lower for word in ["diabetes", "glucose", "insulin", "blood sugar"]):
-            outcome = "Diabetes outcomes"
-        elif any(word in goal_lower for word in ["pain", "discomfort", "symptoms"]):
-            outcome = "Pain and symptom outcomes"
-        elif any(word in goal_lower for word in ["quality of life", "well-being", "satisfaction"]):
-            outcome = "Quality of life outcomes"
-        elif any(word in goal_lower for word in ["performance", "function", "ability"]):
-            outcome = "Functional outcomes"
-        
-        # Generate basic but more specific criteria
-        inclusion_criteria = [
-            "Studies relevant to this research question",
-            "Population appropriate for this research",
-            "Intervention appropriate for this research",
-            "Outcomes relevant to this research",
-            "Study design appropriate for this research"
-        ]
-        
-        exclusion_criteria = [
-            "Studies not relevant to this research question",
-            "Population not appropriate for this research",
-            "Intervention not appropriate for this research",
-            "Outcomes not relevant to this research",
-            "Study design not appropriate for this research"
-        ]
-        
+
+        # Fallback when the model failed entirely. Return blanks so the refinement
+        # popup can prompt the user to fill in PICO explicitly, rather than
+        # keyword-matching the goal into a stereotyped PICO value.
         return {
-            "p": population, 
-            "i": intervention, 
-            "c": comparator, 
-            "o": outcome, 
-            "inclusion": inclusion_criteria, 
-            "exclusion": exclusion_criteria
+            "p": "",
+            "i": "",
+            "c": "",
+            "o": "",
+            "inclusion": [],
+            "exclusion": [],
         }
 
     @staticmethod
-    def generate_mesh_query(pico: PICOCriteria, model_name: str) -> str:
-        """Generates a high-sensitivity (broad) PubMed search string."""
-        model = AIService.get_model(model_name)
-        
-        prompt = f"""
-        You are an expert Information Specialist. Convert this PICO into a high-sensitivity PubMed search string.
-        
-        PICO:
-        - Population: {pico.population}
-        - Intervention: {pico.intervention}
-        
-        CRITICAL REQUIREMENTS:
-        1. Return ONLY the PubMed search string - no explanations, no examples, no extra text
-        2. Use proper PubMed syntax with [Mesh] and [tiab] tags
-        3. Use OR between synonyms, AND between concepts
-        4. Include wildcards (*) where appropriate
-        5. Do NOT include outcomes or comparators
-        
-        EXAMPLE: ("Diabetes Mellitus"[Mesh] OR "diabet*"[tiab]) AND ("Metformin"[Mesh] OR "metformin"[tiab])
-        
-        Generate a clean, executable PubMed search string for this PICO:
+    def _pico_to_search_anchors(text: str) -> List[str]:
+        """Extract clean, search-friendly noun phrases from a PICO field.
+
+        The PICO inference prompt now asks for operationalised descriptions
+        like "Adherence to a Mediterranean diet, measured by validated index
+        (e.g., MedDiet Score)" — great for the user-facing card, terrible as a
+        verbatim search anchor. This helper strips parentheticals, operationalisation
+        suffixes, leading qualifiers, and criterion-like fragments, leaving only
+        the core noun phrases ("Mediterranean diet").
+
+        Returns up to 3 cleaned anchor phrases per field.
         """
-        
+        if not text:
+            return []
+
+        s = re.sub(r"^\s*\(inferred\)\s*", "", text, flags=re.IGNORECASE)
+
+        # Strip parenthetical content like "(e.g., MedDiet Score)" or "(65+)".
+        s = re.sub(r"\s*\([^)]*\)", "", s)
+
+        # Strip operationalisation suffixes that turn a noun phrase into a sentence.
+        for cut in [
+            r"\s*[,;]?\s*measured by.*$",
+            r"\s*[,;]?\s*defined (as|by).*$",
+            r"\s*[,;]?\s*assessed (by|via).*$",
+            r"\s*[,;]?\s*using.*$",
+            r"\s*[,;]?\s*with follow.?up.*$",
+            r"\s*[,;]?\s*at \d+\s*(months?|years?).*$",
+            r"\s*[,;]?\s*over \d+\s*(months?|years?).*$",
+            r"\s*[,;]?\s*from baseline.*$",
+            r"\s*[,;]?\s*at (least|standard).*$",
+        ]:
+            s = re.sub(cut, "", s, flags=re.IGNORECASE)
+
+        # Split compound concepts joined by " and " / " or " / commas / semicolons.
+        pieces = re.split(r"\s+(?:and|or)\s+|,|;", s, flags=re.IGNORECASE)
+
+        out: List[str] = []
+        seen: set[str] = set()
+        for p in pieces:
+            p = re.sub(r"\s+", " ", p).strip(" ,.;:")
+            # Strip leading "Adherence to a/the", "Use of the", etc.
+            p = re.sub(
+                r"^(adherence to|the use of|exposure to|presence of|use of)\s+(a |an |the )?",
+                "", p, flags=re.IGNORECASE,
+            )
+            p = re.sub(r"^(a |an |the )", "", p, flags=re.IGNORECASE)
+            if not p:
+                continue
+            # Reject criterion-like fragments (numeric thresholds, follow-up text).
+            if re.search(r"≥|>=|≤|<=|\bfollow.?up\b|\d+\s*\+?\s*(years?|months?)", p, flags=re.IGNORECASE):
+                continue
+            # Reject overly long or overly short / generic items.
+            if len(p) > 60 or len(p) < 3:
+                continue
+            if p.lower() in {"adults", "humans", "patients", "people", "subjects",
+                              "participants", "general population", "outcome",
+                              "outcomes", "intervention", "comparator"}:
+                continue
+            # Reject items that still contain stray parens or unbalanced quotes.
+            if "(" in p or ")" in p or p.count('"') % 2 != 0:
+                continue
+            key = p.lower()
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+            if len(out) >= 3:
+                break
+        return out
+
+    @staticmethod
+    def generate_mesh_query(pico: PICOCriteria, model_name: str, goal: str = "") -> str:
+        """Generate a high-sensitivity PubMed search string anchored to the user's literal phrases.
+
+        The LLM is allowed to expand synonyms and add MeSH headings, but every
+        multi-word phrase the user actually wrote (e.g. "Mediterranean diet",
+        "type 2 diabetes") MUST appear verbatim somewhere in the final query.
+        This stops the model from silently broadening "Mediterranean diet" into
+        a generic "dietary intervention" concept and then retrieving any
+        nutrition paper.
+        """
+        model = AIService.get_model(model_name)
+
+        def _strip_inferred_prefix(s: str) -> str:
+            return re.sub(r"^\s*\(inferred\)\s*", "", s or "", flags=re.IGNORECASE)
+
+        # ---- 1. Extract CLEAN search anchors from operationalised PICO -------
+        # PICO fields may carry operationalised descriptions ("Adherence to a
+        # Mediterranean diet measured by validated index (e.g., MedDiet Score)")
+        # that are useful for the user-facing card but terrible as search terms.
+        # _pico_to_search_anchors strips parentheticals, operationalisation
+        # suffixes, and criterion-like fragments to leave noun-phrase anchors.
+        intervention_anchors = AIService._pico_to_search_anchors(pico.intervention or "")
+        outcome_anchors = AIService._pico_to_search_anchors(pico.outcome or "")
+        population_anchors = AIService._pico_to_search_anchors(pico.population or "")
+
+        # must_include is the union of clean intervention + outcome anchors.
+        # Population anchors are typically too broad to enforce and are kept
+        # out of the must-include set (they go to the LLM as context only).
+        must_include: List[str] = []
+        seen_lc: set[str] = set()
+        for phrase in intervention_anchors + outcome_anchors:
+            key = phrase.lower()
+            if key not in seen_lc:
+                seen_lc.add(key)
+                must_include.append(phrase)
+
+        _ = goal  # reserved for future use; intentionally unused
+
+        # ---- 2. Ask the LLM ONLY for synonyms (not PubMed syntax) ------------
+        # Small models reliably malform PubMed syntax. We restrict the LLM to
+        # its strength — generating term synonyms — and assemble the PubMed
+        # string deterministically in Python below. We pass the CLEAN anchors
+        # (not the operationalised PICO text) so the LLM sees real noun phrases
+        # and returns synonyms that actually appear in paper titles/abstracts.
+        intervention_clean = " | ".join(intervention_anchors) or _strip_inferred_prefix(pico.intervention or "")
+        outcome_clean = " | ".join(outcome_anchors) or _strip_inferred_prefix(pico.outcome or "")
+        population_clean = " | ".join(population_anchors) or _strip_inferred_prefix(pico.population or "")
+
+        prompt = f"""
+You are a clinical librarian. For each PICO concept supplied below, list synonyms and MeSH
+controlled-vocabulary terms suitable for PubMed retrieval. DO NOT write any PubMed syntax — no
+square brackets, no quotes, no Boolean operators, no parentheses. Just the term strings.
+
+PICO concepts to expand:
+  intervention: {intervention_clean or "(none)"}
+  outcome:      {outcome_clean or "(none)"}
+  population:   {population_clean or "(none)"}
+
+Return ONLY a JSON object with these exact keys:
+{{
+  "intervention_synonyms": [ "...", "...", ...],   // 3-8 free-text synonyms / common phrasings
+  "intervention_mesh":     [ "...", "...", ...],   // 1-3 PubMed MeSH controlled-vocabulary headings
+  "outcome_synonyms":      [ "...", "...", ...],
+  "outcome_mesh":          [ "...", "...", ...],
+  "population_synonyms":   [ "...", "...", ...],   // empty array if population is broad (adults/humans)
+  "population_mesh":       [ "...", "...", ...]
+}}
+
+EXAMPLES:
+  For intervention = "Mediterranean diet":
+    intervention_synonyms: ["Mediterranean diet", "Mediterranean dietary pattern",
+                            "Mediterranean-style diet", "Med diet"]
+    intervention_mesh:     ["Diet, Mediterranean"]
+
+  For outcome = "longevity":
+    outcome_synonyms: ["longevity", "lifespan", "life expectancy", "all-cause mortality",
+                       "aging", "healthspan"]
+    outcome_mesh:     ["Longevity", "Mortality", "Aging"]
+
+  For population = "humans" (broad → no narrowing terms):
+    population_synonyms: []
+    population_mesh:     []
+
+NEVER paraphrase the user's stated terms — if the intervention says "Mediterranean diet", the
+phrase "Mediterranean diet" MUST appear in intervention_synonyms exactly as written.
+"""
+
+        synonyms: Dict[str, Dict[str, List[str]]] = {
+            "intervention": {"tiab": [], "mesh": []},
+            "outcome":      {"tiab": [], "mesh": []},
+            "population":   {"tiab": [], "mesh": []},
+        }
         try:
-            messages = [HumanMessage(content=prompt)]
-            response = model.invoke(messages)
-            raw_query = response.content.strip()
-            
-            # Clean up the response to extract only the search string
-            # Remove any markdown formatting
-            clean_query = raw_query.replace("```sql", "").replace("```", "").replace("```", "")
-            
-            # Remove any explanatory text before or after the actual query
-            # Look for patterns that indicate the start of the actual query
-            query_patterns = [
-                r'^(.*?\()(.*)',  # Anything starting with parenthesis
-                r'^"([^"]*".*)',   # Anything starting with quoted term
-                r'^\((.*)',        # Anything starting with opening parenthesis
-            ]
-            
-            for pattern in query_patterns:
-                match = re.match(pattern, clean_query.strip(), re.DOTALL)
-                if match:
-                    # Extract the query part
-                    if match.groups():
-                        query_part = match.group(1) if len(match.groups()) == 1 else match.group(0)
-                        # Ensure it ends properly
-                        if not query_part.endswith(')') and '(' in query_part:
-                            query_part += ')'
-                        return query_part.strip()
-            
-            # If no pattern matches, try to find the first parenthesis
-            if '(' in clean_query:
-                start_idx = clean_query.find('(')
-                query_part = clean_query[start_idx:]
-                # Ensure it ends properly
-                if not query_part.endswith(')') and query_part.count('(') > query_part.count(')'):
-                    query_part += ')'
-                return query_part.strip()
-            
-            # If still no match, return the cleaned version but validate it
-            if clean_query and ('[' in clean_query or '"' in clean_query):
-                return clean_query.strip()
-            
+            r = model.invoke([HumanMessage(content=prompt)])
+            data = AIService._extract_json(r.content) or {}
+
+            def _clean_term_list(raw: Any) -> List[str]:
+                out: List[str] = []
+                if isinstance(raw, list):
+                    for x in raw:
+                        if isinstance(x, str):
+                            t = x.strip().strip('"').strip("'")
+                            # Strip stray PubMed syntax fragments that may have
+                            # leaked into the synonym list.
+                            t = re.sub(r"\[[A-Za-z]+\]", "", t)
+                            t = re.sub(r"[\[\]]", "", t)  # leftover square brackets
+                            t = re.sub(r"\s+", " ", t).strip(" ,.;:")
+                            # Reject items that still have unbalanced parens
+                            # OR contain operationalisation / criterion patterns
+                            # we already filtered out of the must-include list.
+                            if "(" in t or ")" in t:
+                                continue
+                            if re.search(r"≥|>=|≤|<=|\bfollow.?up\b|\d+\s*\+?\s*(years?|months?)",
+                                          t, flags=re.IGNORECASE):
+                                continue
+                            if re.search(r"\b(measured by|defined by|assessed by|with follow|at baseline)\b",
+                                          t, flags=re.IGNORECASE):
+                                continue
+                            # Length filter: short enough to plausibly appear
+                            # in a paper title or abstract.
+                            if 2 <= len(t) <= 45:
+                                out.append(t)
+                # dedupe case-insensitively, preserve order
+                seen = set()
+                dedup = []
+                for t in out:
+                    k = t.lower()
+                    if k not in seen:
+                        seen.add(k)
+                        dedup.append(t)
+                return dedup
+
+            synonyms["intervention"]["tiab"] = _clean_term_list(data.get("intervention_synonyms"))
+            synonyms["intervention"]["mesh"] = _clean_term_list(data.get("intervention_mesh"))
+            synonyms["outcome"]["tiab"]      = _clean_term_list(data.get("outcome_synonyms"))
+            synonyms["outcome"]["mesh"]      = _clean_term_list(data.get("outcome_mesh"))
+            synonyms["population"]["tiab"]   = _clean_term_list(data.get("population_synonyms"))
+            synonyms["population"]["mesh"]   = _clean_term_list(data.get("population_mesh"))
         except Exception as e:
-            print(f"Query generation error: {e}")
-        
-        # Fallback: Generate a basic query manually
-        pop_terms = pico.population.split()[:2] if pico.population else ["adults"]
-        int_terms = pico.intervention.split()[:2] if pico.intervention else ["treatment"]
-        
-        pop_query = " OR ".join([f'"{term}"[tiab]' for term in pop_terms])
-        int_query = " OR ".join([f'"{term}"[tiab]' for term in int_terms])
-        
+            print(f"Query synonym generation error: {e}")
+
+        # Ensure every must-include phrase (clean anchor) appears in either the
+        # intervention or outcome tiab list. We try outcome anchors first when
+        # the phrase came from the outcome list, otherwise default to intervention.
+        for phrase in must_include:
+            ph_low = phrase.lower()
+            target = "intervention"
+            if any(ph_low == oa.lower() for oa in outcome_anchors):
+                target = "outcome"
+            elif any(ph_low == pa.lower() for pa in population_anchors):
+                target = "population"
+            if not any(t.lower() == ph_low for t in synonyms[target]["tiab"]):
+                synonyms[target]["tiab"].insert(0, phrase)
+
+        # ---- 3. Deterministically build the PubMed string --------------------
+        def _build_concept_block(c: Dict[str, List[str]]) -> str:
+            terms: List[str] = []
+            for t in c["mesh"]:
+                terms.append(f'"{t}"[Mesh]')
+            for t in c["tiab"]:
+                # If a tiab synonym already contains a wildcard (e.g. "diabet*")
+                # quote-and-tag it as-is; PubMed accepts "diabet*"[tiab].
+                terms.append(f'"{t}"[tiab]')
+            return "(" + " OR ".join(terms) + ")" if terms else ""
+
+        blocks: List[str] = []
+        intv = _build_concept_block(synonyms["intervention"])
+        outc = _build_concept_block(synonyms["outcome"])
+        popu = _build_concept_block(synonyms["population"])
+        if intv:
+            blocks.append(intv)
+        if outc:
+            blocks.append(outc)
+        # Population block included only when it actually narrows retrieval
+        # (the model is asked to return [] for "adults" / "humans" so this
+        # condition naturally falls through for broad inferred populations).
+        if popu and len(synonyms["population"]["tiab"]) + len(synonyms["population"]["mesh"]) >= 2:
+            blocks.append(popu)
+
+        if blocks:
+            return " AND ".join(blocks)
+
+        # ---- 4. Last-resort fallback -----------------------------------------
+        # The LLM gave us nothing usable AND we had no must-include phrases.
+        # Construct a minimal query from whatever PICO text exists.
+        if must_include:
+            return " AND ".join(f'("{p}"[tiab] OR "{p}"[Mesh])' for p in must_include)
+
+        pop_terms = (population_clean or "adults").split()[:2]
+        int_terms = (intervention_clean or "treatment").split()[:2]
+        pop_query = " OR ".join([f'"{t}"[tiab]' for t in pop_terms])
+        int_query = " OR ".join([f'"{t}"[tiab]' for t in int_terms])
         return f"({pop_query}) AND ({int_query})"
 
     @staticmethod
     def generate_adversarial_query(pico: PICOCriteria, model_name: str) -> str:
-        """Generates an adversarial search query to find contrasting evidence."""
-        model = AIService.get_model(model_name)
-        
-        prompt = f"""
-        You are an expert researcher specializing in finding contrasting evidence. Generate a search query that will find studies with OPPOSITE or CONTRADICTORY findings to the research question.
-        
-        ORIGINAL PICO:
-        - Population: {pico.population}
-        - Intervention: {pico.intervention}
-        - Comparator: {pico.comparator}
-        - Outcome: {pico.outcome}
-        
-        ADVERSARIAL SEARCH STRATEGY:
-        1. Look for studies showing NO EFFECT, HARM, or NEGATIVE OUTCOMES
-        2. Include terms like: "ineffective", "harmful", "no benefit", "adverse", "failure", "negative", "contradict"
-        3. Consider alternative interventions that might be SUPERIOR
-        4. Include studies with different methodologies that might challenge the findings
-        5. Use terms that indicate treatment failure or complications
-        
-        CRITICAL REQUIREMENTS:
-        1. Return ONLY the search string - no explanations
-        2. Use proper Boolean operators (AND, OR, NOT)
-        3. Include terms that will find contrasting evidence
-        4. Keep it focused but broad enough to find opposing viewpoints
-        
-        EXAMPLE: If original is "metformin AND diabetes", adversarial might be "metformin AND (ineffective OR harmful OR adverse) AND diabetes"
-        
-        Generate an adversarial search query for this PICO:
+        """Generate an adversarial search query (deterministic assembly).
+
+        Strategy: combine the user's intervention concept with a fixed set of
+        "negative-finding" terms. The structure is always
+            (intervention synonyms) AND (negative-finding terms) AND (outcome synonyms)
+        which guarantees well-formed PubMed syntax regardless of model quality.
         """
-        
-        try:
-            messages = [HumanMessage(content=prompt)]
-            response = model.invoke(messages)
-            raw_query = response.content.strip()
-            
-            # Clean up the response
-            clean_query = raw_query.replace("```sql", "").replace("```", "").replace("```", "")
-            
-            # Extract the actual query
-            if '(' in clean_query:
-                start_idx = clean_query.find('(')
-                query_part = clean_query[start_idx:]
-                if not query_part.endswith(')') and query_part.count('(') > query_part.count(')'):
-                    query_part += ')'
-                return query_part.strip()
-            
-            return clean_query.strip()
-            
-        except Exception as e:
-            print(f"Adversarial query generation error: {e}")
-            
-            # Fallback: Create a basic adversarial query
-            pop_terms = pico.population.split()[:2] if pico.population else ["adults"]
-            int_terms = pico.intervention.split()[:2] if pico.intervention else ["treatment"]
-            
-            pop_query = " OR ".join([f'"{term}"' for term in pop_terms])
-            int_query = " OR ".join([f'"{term}"' for term in int_terms])
-            adverse_terms = "ineffective OR harmful OR adverse OR negative OR failure"
-            
-            return f"({pop_query}) AND ({int_query}) AND ({adverse_terms})"
+        def _strip_inferred_prefix(s: str) -> str:
+            return re.sub(r"^\s*\(inferred\)\s*", "", s or "", flags=re.IGNORECASE)
+
+        intv = _strip_inferred_prefix(pico.intervention or "").strip()
+        outc = _strip_inferred_prefix(pico.outcome or "").strip()
+
+        # Fixed adversarial vocabulary — terms a methodologist would look for to
+        # surface null, harmful, or contradictory findings.
+        adverse_terms = [
+            "no effect", "null finding", "ineffective", "no benefit", "no association",
+            "harmful", "harm", "adverse", "increased risk", "worse outcome",
+            "negative finding", "contradict", "no difference", "non-significant",
+        ]
+        adverse_block = "(" + " OR ".join(f'"{t}"[tiab]' for t in adverse_terms) + ")"
+
+        def _wildcard_variant(token: str) -> Optional[str]:
+            # Strip a common suffix (length 2-3) before appending * so the
+            # wildcard actually broadens retrieval — "longevity" → "longev*",
+            # "patients" → "patient*", "diabetes" → "diabet*".
+            t = token.strip()
+            if " " in t or len(t) < 6:
+                return None
+            for suf in ("ity", "ies", "ous", "ing", "ed", "es", "s", "e"):
+                if t.lower().endswith(suf) and len(t) - len(suf) >= 4:
+                    return t[: -len(suf)] + "*"
+            return None
+
+        blocks: List[str] = []
+        if intv:
+            intv_terms = [intv]
+            wv = _wildcard_variant(intv)
+            if wv:
+                intv_terms.append(wv)
+            blocks.append("(" + " OR ".join(f'"{t}"[tiab]' for t in intv_terms) + ")")
+        blocks.append(adverse_block)
+        if outc:
+            outc_terms = [outc]
+            wv = _wildcard_variant(outc)
+            if wv:
+                outc_terms.append(wv)
+            blocks.append("(" + " OR ".join(f'"{t}"[tiab]' for t in outc_terms) + ")")
+
+        if not blocks:
+            return ""
+        return " AND ".join(blocks)
+
+    @staticmethod
+    def _adapt_query_for_source(query: str, source: str) -> str:
+        """Adapt a PubMed-style query to a target database's syntax.
+
+        Three flavours:
+          • PubMed: native syntax with [Mesh] / [tiab] / [ti] tags kept.
+          • Europe PMC, OpenAlex, CrossRef, arXiv, bioRxiv, medRxiv, CORE,
+            DOAJ: accept quoted phrases with AND/OR — strip the field tags.
+          • Semantic Scholar: does NOT honour Boolean operators or quoted
+            phrases meaningfully. We flatten to a plain space-separated
+            keyword string: take the first synonym from each AND-joined
+            concept block and join with spaces.
+        """
+        if not query:
+            return query
+        if source == "PubMed":
+            return query
+
+        if source == "Semantic Scholar":
+            # Pick the first quoted phrase from each top-level concept block
+            # and join with spaces. SS does best with 2-3 keyword anchors.
+            blocks = AIService._split_concept_blocks(query)
+            picks: List[str] = []
+            for b in blocks:
+                m = re.search(r'"([^"]+)"', b)
+                if m:
+                    picks.append(m.group(1))
+            if picks:
+                return " ".join(picks)
+            # Fallback: strip all syntax markers and AND/OR keywords.
+            text = re.sub(r"\[[A-Za-z]+\]", "", query)
+            text = re.sub(r"\b(AND|OR|NOT)\b", " ", text)
+            text = re.sub(r"[\"()]", "", text)
+            return re.sub(r"\s+", " ", text).strip()
+
+        # Everything else (Europe PMC, OpenAlex, CrossRef, arXiv, …):
+        # strip [Mesh]/[tiab]/[ti] field tags but preserve the quoted phrases
+        # and the AND/OR structure.
+        stripped = re.sub(r"\[[A-Za-z]+\]", "", query)
+        return re.sub(r"\s+", " ", stripped).strip()
+
+    @staticmethod
+    def _split_concept_blocks(query: str) -> List[str]:
+        """Split a query of shape `(A) AND (B) AND (C)` into the top-level
+        AND-joined concept blocks (preserving their outer parentheses)."""
+        if not query:
+            return []
+        parts = re.split(r"\)\s*AND\s*\(", query.strip())
+        # Re-add the outer parens that were eaten by the split.
+        blocks: List[str] = []
+        for i, p in enumerate(parts):
+            if not p.startswith("(") and i == 0:
+                p = "(" + p
+            if not p.endswith(")") and i == len(parts) - 1:
+                p = p + ")"
+            if not p.startswith("("):
+                p = "(" + p
+            if not p.endswith(")"):
+                p = p + ")"
+            blocks.append(p)
+        return blocks
+
+    @staticmethod
+    def _strip_mesh_only_terms(query: str) -> str:
+        """Remove `"X"[Mesh] OR ` fragments so each concept block falls back
+        to its `[tiab]` synonyms. Leaves [tiab] terms untouched."""
+        if not query or "[Mesh]" not in query:
+            return query
+        # Cases: `"X"[Mesh] OR ` (at start of a block) — strip including OR.
+        out = re.sub(r'"[^"]+"\[Mesh\]\s*OR\s+', "", query)
+        # `OR "X"[Mesh]` (mid/end) — strip leading OR.
+        out = re.sub(r'\s*OR\s+"[^"]+"\[Mesh\]', "", out)
+        # Bare `"X"[Mesh]` left alone — that's the only term in its block.
+        out = re.sub(r"\s+", " ", out).strip()
+        return out
+
+    @staticmethod
+    def _retag(query: str, src_tag: str, dst_tag: str) -> str:
+        """Replace one PubMed field tag with another (e.g. `[tiab]` → `[ti]`)."""
+        return query.replace(src_tag, dst_tag)
+
+    @staticmethod
+    def _query_diff(prev: str, curr: str) -> Dict[str, List[str]]:
+        """Compute the term-level diff between two queries.
+
+        Returns a dict with `added` and `removed` lists, each containing the
+        quoted terms (with their PubMed field tag if any) that appear in only
+        one of the two queries.
+        """
+        if not prev or not curr or prev == curr:
+            return {"added": [], "removed": []}
+        # Capture `"term"[tag]` and bare `"term"` patterns separately so the
+        # diff includes which field tag a term was searched under.
+        def _terms(q: str) -> set[str]:
+            tagged = set(re.findall(r'"[^"]+"\[[A-Za-z]+\]', q))
+            return tagged
+        prev_terms = _terms(prev)
+        curr_terms = _terms(curr)
+        return {
+            "added": sorted(curr_terms - prev_terms),
+            "removed": sorted(prev_terms - curr_terms),
+        }
+
+    @staticmethod
+    def _tactic_variant(base_query: str, tactic_idx: int) -> Tuple[str, str]:
+        """Apply tactic N to the base query, returning (variant_query, tactic_name).
+
+        Tactic ladder — each is a deterministic transformation of the base
+        query. Designed to span both broadening (more retrieval) and narrowing
+        (more relevance) directions so the optimiser can discover the best
+        operating point for each source.
+        """
+        if tactic_idx == 0:
+            return base_query, "base query (multi-concept AND, full synonyms + MeSH)"
+
+        blocks = AIService._split_concept_blocks(base_query)
+
+        if tactic_idx == 1:
+            # Drop the last AND-joined concept (usually population).
+            if len(blocks) >= 3:
+                return " AND ".join(blocks[:-1]), "drop population block"
+            return base_query, "base query (only 2 concepts present)"
+
+        if tactic_idx == 2:
+            # Strip MeSH-only fragments so retrieval relies on [tiab].
+            stripped = AIService._strip_mesh_only_terms(base_query)
+            return stripped, "strip MeSH-only filters, keep [tiab] synonyms"
+
+        if tactic_idx == 3:
+            # Title-only matching for the FIRST concept block (intervention).
+            if blocks:
+                blocks[0] = AIService._retag(blocks[0], "[tiab]", "[ti]")
+                blocks[0] = AIService._retag(blocks[0], "[Mesh]", "[ti]")
+                return " AND ".join(blocks), "title-only matching on intervention"
+            return base_query, "base query (no blocks to retag)"
+
+        if tactic_idx == 4:
+            # Drop both population and MeSH — narrowest broadening, keeps tiab.
+            if len(blocks) >= 3:
+                shrunk = " AND ".join(blocks[:-1])
+            else:
+                shrunk = base_query
+            return AIService._strip_mesh_only_terms(shrunk), "drop population + strip MeSH"
+
+        if tactic_idx == 5:
+            # Title-only for ALL concepts (most specific variant).
+            q = AIService._retag(base_query, "[tiab]", "[ti]")
+            q = AIService._retag(q, "[Mesh]", "[ti]")
+            return q, "title-only matching on all concepts"
+
+        if tactic_idx == 6:
+            # Keep only the FIRST synonym in each concept block. That's
+            # usually the user's literal phrase, so this collapses to
+            # `(literal-intervention) AND (literal-outcome) [AND (literal-pop)]`.
+            new_blocks: List[str] = []
+            for b in blocks:
+                m = re.search(r'\(\s*("[^"]+"\[[A-Za-z]+\])', b)
+                if m:
+                    new_blocks.append(f"({m.group(1)})")
+                else:
+                    new_blocks.append(b)
+            return " AND ".join(new_blocks), "keep only the user's literal phrase per concept"
+
+        if tactic_idx == 7:
+            # Drop the SECOND concept (outcome) — most aggressive broadening.
+            # Useful when outcome terms (mortality, longevity) are too rare.
+            if len(blocks) >= 2:
+                kept = [blocks[0]] + (blocks[2:] if len(blocks) >= 3 else [])
+                if kept:
+                    return " AND ".join(kept), "drop outcome block, keep intervention"
+            return base_query, "base query (only one concept present)"
+
+        if tactic_idx == 8:
+            # Title-only on intervention, [tiab] on outcome (asymmetric narrowing).
+            if len(blocks) >= 2:
+                int_block = AIService._retag(blocks[0], "[tiab]", "[ti]")
+                int_block = AIService._retag(int_block, "[Mesh]", "[ti]")
+                return " AND ".join([int_block] + blocks[1:]), "title-only intervention + [tiab] outcome"
+            return base_query, "base query (no second concept)"
+
+        # tactic_idx >= 9
+        # Last tactic: drop synonyms entirely, just AND the user's literal
+        # phrases together (most precise variant).
+        new_blocks2: List[str] = []
+        for b in blocks:
+            m = re.search(r'"([^"]+)"\[[A-Za-z]+\]', b)
+            if m:
+                new_blocks2.append(f'("{m.group(1)}"[ti])')
+            else:
+                new_blocks2.append(b)
+        if new_blocks2:
+            return " AND ".join(new_blocks2), "literal phrases only, title-only matching"
+        return base_query, "base query (last-resort fallback)"
 
     @staticmethod
     def agentic_optimize_per_source(
@@ -410,337 +783,304 @@ class AIService:
         research_goal: str = "",
         progress_callback: Optional[Callable] = None
     ) -> Dict[str, Any]:
-        """
-        Agentic optimization using systematic review best practices:
-        1. PICO/SPIDER framework structuring
-        2. Boolean logic (OR for synonyms, AND for concepts)
-        3. Precision syntax (phrases, truncation, wildcards)
-        4. Database-specific subject headings (MeSH, Emtree)
-        5. Iterative testing with title relevance analysis
-        
-        Returns detailed trace per database with quality metrics.
+        """Per-source query optimisation, refactored to mirror the Home page
+        retrieval quality.
+
+        Pipeline:
+          1. Build ONE well-formed PubMed-style base query via
+             `generate_mesh_query` (structured-JSON synonym expansion +
+             deterministic syntax assembly).
+          2. Per source, adapt the base query to that source's syntax
+             (PubMed and Europe PMC keep tags; everything else strips them).
+          3. Iterate up to N times per source: fetch up to 50 papers, score
+             title relevance, if yield is low, deterministically broaden
+             (drop the last AND-joined concept; strip MeSH-only filters).
+          4. Track the best query per source by relevance, then by count.
+
+        Returns the same shape the streaming endpoint and SimulationPage UI
+        expect: `final_query`, `per_source_queries`, `trace[..].sources[..]`
+        with `count`, `relevance_score`, `quality_rating`, `query`, `titles`,
+        `iteration_reasoning`.
         """
         from data_services import DataAggregator
-        
+
         model = AIService.get_model(model_name)
         if not model:
             return {
                 "final_query": current_query,
                 "trace": [],
                 "per_source_queries": {source: current_query for source in active_sources},
-                "error": "Model initialization failed"
+                "error": "Model initialization failed",
             }
-        
-        # Database-specific syntax strategies
-        db_syntax_guide = {
-            "PubMed": {
-                "mesh_tags": True,
-                "field_tags": ["[Mesh]", "[tiab]", "[pt]", "[mh]"],
-                "boolean": "AND/OR/NOT",
-                "truncation": "*",
-                "phrases": "\"exact phrase\"",
-                "explode": True,
-                "proximity": False,
-                "syntax_example": '("Diabetes Mellitus"[Mesh] OR diabetes[tiab]) AND ("Metformin"[Mesh] OR metformin[tiab])'
-            },
-            "Europe PMC": {
-                "mesh_tags": True,
-                "field_tags": [":tiab", ":mesh", ":pt"],
-                "boolean": "AND/OR/NOT",
-                "truncation": "*",
-                "phrases": "\"exact phrase\"",
-                "explode": False,
-                "proximity": False,
-                "syntax_example": '(diabetes:tiab OR diabetes:mesh) AND (metformin:tiab OR metformin:mesh)'
-            },
-            "arXiv": {
-                "mesh_tags": False,
-                "field_tags": [],
-                "boolean": "AND/OR/NOT",
-                "truncation": "*",
-                "phrases": "\"exact phrase\"",
-                "explode": False,
-                "proximity": False,
-                "syntax_example": '(diabetes OR "blood sugar") AND (metformin OR "glucose lowering")'
-            },
-            "Semantic Scholar": {
-                "mesh_tags": False,
-                "field_tags": [],
-                "boolean": "AND/OR",
-                "truncation": "*",
-                "phrases": "\"exact phrase\"",
-                "explode": False,
-                "proximity": False,
-                "syntax_example": '"diabetes mellitus" AND metformin AND treatment'
-            },
-            "Google Scholar": {
-                "mesh_tags": False,
-                "field_tags": [],
-                "boolean": "AND/OR",
-                "truncation": "*",
-                "phrases": "\"exact phrase\"",
-                "explode": False,
-                "proximity": False,
-                "syntax_example": '"diabetes mellitus" treatment metformin'
-            }
+
+        # ---- 1. Build the well-formed base query ONCE -----------------------
+        try:
+            base_query = AIService.generate_mesh_query(pico, model_name, goal=research_goal)
+        except Exception as e:
+            print(f"[agentic] base query generation failed: {e}")
+            base_query = current_query or ""
+
+        # ---- 2. Per-source iteration with tactic ladder ---------------------
+        # The optimiser walks a deterministic ladder of distinct tactics, each
+        # producing a meaningfully different variant of the base query (drop
+        # population, strip MeSH, title-only matching, literal-only, …).
+        #
+        # There is no fixed iteration cap. Each source is stopped individually
+        # when EITHER:
+        #   • 3 consecutive iterations failed to improve its best relevance, OR
+        #   • every tactic in the ladder has been tried.
+        # The loop terminates when every active source has stopped.
+        # A safety ceiling prevents an infinite loop if the stop conditions
+        # somehow fail to fire.
+        tactic_count = 10      # number of distinct tactics in the ladder (see _tactic_variant)
+        early_stop_after = 3   # stop a source after this many no-improvement iterations
+        safety_max = 50        # hard ceiling against infinite loops
+        # No client-side cap on retrieval — pass a very high ceiling and let
+        # each source's natural API limit (PubMed retmax, OpenAlex per_page,
+        # CrossRef rows, etc.) bind instead.
+        per_source_max = 10000
+        epsilon = 0.005        # minimum relevance delta that counts as an improvement
+
+        # Per-source state
+        best_queries: Dict[str, str] = {
+            source: AIService._adapt_query_for_source(base_query, source)
+            for source in active_sources
         }
-        
-        max_iterations = 10
-        trace = []
-        best_queries = {source: current_query for source in active_sources}
-        best_scores = {source: (0, 0) for source in active_sources}
-        
-        for iteration in range(max_iterations):
-            iter_data = {
+        best_relevance: Dict[str, float] = {s: 0.0 for s in active_sources}
+        best_count: Dict[str, int] = {s: 0 for s in active_sources}
+        best_iter: Dict[str, int] = {s: 0 for s in active_sources}
+        best_tactic: Dict[str, str] = {s: "" for s in active_sources}
+        no_improve: Dict[str, int] = {s: 0 for s in active_sources}
+        stopped: Dict[str, bool] = {s: False for s in active_sources}
+        prev_iter_query: Dict[str, str] = {s: "" for s in active_sources}
+
+        trace: List[Dict[str, Any]] = []
+        # Per-source reason for stopping, surfaced in the trace.
+        stop_reason: Dict[str, str] = {s: "" for s in active_sources}
+
+        iteration = 0
+        while iteration < safety_max:
+            if all(stopped[s] for s in active_sources):
+                break
+            iter_data: Dict[str, Any] = {
                 "iteration": iteration + 1,
                 "sources": {},
                 "total_papers": 0,
                 "avg_relevance": 0,
-                "status": "checking"
+                "status": "checking",
             }
-            
-            # Process each database independently
+
             for source in active_sources:
-                source_result = {
-                    "query": best_queries.get(source, current_query),
+                if stopped[source]:
+                    # Carry forward the running best so the UI keeps showing
+                    # this source instead of dropping it from the trace.
+                    iter_data["sources"][source] = {
+                        "query": best_queries[source],
+                        "count": best_count[source],
+                        "titles": [],
+                        "relevance_score": round(best_relevance[source], 2),
+                        "quality_rating": AIService._score_to_rating(best_relevance[source]),
+                        "iteration_reasoning": (
+                            stop_reason[source] or
+                            f"stopped — reverted to best (iter {best_iter[source]})"
+                        ),
+                        "tactic": "(stopped)",
+                        "query_diff": {"added": [], "removed": []},
+                        "action": "stopped",
+                        "stopped": True,
+                        "best_so_far": {
+                            "iteration": best_iter[source],
+                            "tactic": best_tactic[source],
+                            "query": best_queries[source],
+                            "relevance_score": round(best_relevance[source], 2),
+                            "count": best_count[source],
+                        },
+                    }
+                    continue
+
+                # If the ladder is exhausted, this source has nothing new left
+                # to try — stop it and emit a final summary entry.
+                if iteration >= tactic_count:
+                    stopped[source] = True
+                    stop_reason[source] = (
+                        f"all {tactic_count} tactics exhausted; best at iter {best_iter[source]} "
+                        f"(relevance {best_relevance[source]:.2f}, {best_count[source]} papers)"
+                    )
+                    iter_data["sources"][source] = {
+                        "query": best_queries[source],
+                        "count": best_count[source],
+                        "titles": [],
+                        "relevance_score": round(best_relevance[source], 2),
+                        "quality_rating": AIService._score_to_rating(best_relevance[source]),
+                        "iteration_reasoning": stop_reason[source],
+                        "tactic": "(exhausted)",
+                        "query_diff": {"added": [], "removed": []},
+                        "action": "stopped",
+                        "stopped": True,
+                        "best_so_far": {
+                            "iteration": best_iter[source],
+                            "tactic": best_tactic[source],
+                            "query": best_queries[source],
+                            "relevance_score": round(best_relevance[source], 2),
+                            "count": best_count[source],
+                        },
+                    }
+                    continue
+
+                # Apply the tactic for this iteration to get the next variant,
+                # then adapt to the source's syntax.
+                raw_variant, tactic_name = AIService._tactic_variant(base_query, iteration)
+                query = AIService._adapt_query_for_source(raw_variant, source)
+
+                source_result: Dict[str, Any] = {
+                    "query": query,
+                    "tactic": tactic_name,
                     "count": 0,
                     "titles": [],
                     "relevance_score": 0,
                     "quality_rating": "Poor",
-                    "optimization_applied": []
+                    "iteration_reasoning": "",
+                    "query_diff": AIService._query_diff(prev_iter_query[source], query),
+                    "action": "tested",
+                    "stopped": False,
                 }
-                
+
                 try:
-                    # Debug: Print what's happening
-                    print(f"\n=== ITERATION {iteration + 1} for {source} ===")
-                    print(f"Current query: {source_result['query'][:80]}...")
-                    
-                    try:
-                        # Test current query
-                        print(f"Fetching papers with current query...")
-                        papers, _ = DataAggregator.fetch_all(
-                            source_result["query"],
-                            [source],
-                            max_per_source=10,
-                            limit=10
-                        )
-                        print(f"Fetched {len(papers) if papers else 0} papers")
-                        
-                        count = len(papers) if papers else 0
-                        titles = [p.title for p in papers] if papers else []
-                        
-                        # Calculate relevance score
-                        relevance = AIService._analyze_title_relevance(
-                            titles, research_goal, pico
-                        ) if titles else 0
-                        
-                        source_result.update({
-                            "count": count,
-                            "titles": titles[:10],
-                            "relevance_score": round(relevance, 2),
-                            "quality_rating": AIService._score_to_rating(relevance),
-                            "iteration_reasoning": ""
-                        })
-                    except Exception as e:
-                        print(f"Error fetching papers: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        count = 0
-                        titles = []
-                        relevance = 0
-                    # Determine what optimization strategy to apply
-                    reasoning_parts = []
-                    if iteration == 0:
-                        reasoning_parts.append("Initial query setup using PICO framework")
-                        if count < 5:
-                            reasoning_parts.append(f"Low initial yield ({count} papers) - need to broaden with OR synonyms")
-                        elif relevance < 0.4:
-                            reasoning_parts.append(f"Low relevance ({relevance:.2f}) - need to refine precision")
-                    elif count < 20:
-                        reasoning_parts.append(f"Yield too low ({count} papers) - broadening with OR synonyms and removing filters")
-                    elif relevance < 0.5:
-                        reasoning_parts.append(f"Relevance too low ({relevance:.2f}) - adding more specific PICO terms")
-                    elif relevance < 0.6:
-                        reasoning_parts.append(f"Moderate relevance ({relevance:.2f}) - fine-tuning balance between sensitivity and precision")
-                    else:
-                        reasoning_parts.append(f"Good metrics achieved - query converged")
-                    
-                    source_result["iteration_reasoning"] = "; ".join(reasoning_parts)
-                    
-                    # If first iteration or needs improvement, optimize the query
-                    if iteration == 0 or (count < 20 and relevance < 0.6):
-                        syntax = db_syntax_guide.get(source, db_syntax_guide["PubMed"])
-                        
-                        optimization_prompt = f"""
-                        You are an expert Medical Librarian optimizing search strings.
-                        
-                        RESEARCH GOAL: {research_goal}
-                        
-                        PICO FRAMEWORK:
-                        - Population (P): {pico.population}
-                        - Intervention (I): {pico.intervention}
-                        - Comparator (C): {pico.comparator}
-                        - Outcome (O): {pico.outcome}
-                        
-                        DATABASE: {source}
-                        
-                        DATABASE SYNTAX RULES:
-                        - Supports MeSH/Subject Headings: {syntax['mesh_tags']}
-                        - Field tags available: {syntax['field_tags']}
-                        - Boolean operators: {syntax['boolean']}
-                        - Truncation symbol: {syntax['truncation']}
-                        - Phrase searching: {syntax['phrases']}
-                        - Example format: {syntax['syntax_example']}
-                        
-                        CURRENT QUERY: {source_result["query"]}
-                        
-                        CURRENT RESULTS:
-                        - Papers found: {count}
-                        - Relevance score: {relevance:.2f}/1.0
-                        - Sample titles: {titles[:3] if titles else "N/A"}
-                        
-                        OPTIMIZATION STRATEGIES TO APPLY:
-                        
-                        1. PICO STRUCTURING (Primary Strategy):
-                           - Build query around Population AND Intervention (skip Outcome - too narrow)
-                           - Group synonyms with OR within each PICO element
-                           - Join major concepts with AND
-                        
-                        2. BOOLEAN LOGIC:
-                           - OR: Use between synonyms (e.g., "heart attack" OR "myocardial infarction")
-                           - AND: Join PICO categories only (e.g., [Population] AND [Intervention])
-                           - Avoid NOT: Too risky for systematic reviews
-                        
-                        3. PRECISION SYNTAX:
-                           - Phrase quotes: Use \"\" for exact phrases (\"type 2 diabetes\")
-                           - Truncation (*): therap* → therapy, therapies, therapeutic
-                           - Wildcards: Use ? or $ for spelling variants if supported
-                        
-                        4. SUBJECT HEADINGS:
-                           {f"- Include MeSH terms with {syntax['field_tags'][0]} if applicable" if syntax['mesh_tags'] else "- Use keyword terms only (no controlled vocabulary)"}
-                           {f"- Explode broader MeSH terms to capture sub-types" if syntax.get('explode') else ""}
-                        
-                        5. TESTING ITERATION {iteration + 1}/10:
-                           - Current relevance: {relevance:.2f}
-                           - Current papers found: {count}
-                           - Target: >0.7 relevance with 20+ papers
-                           - If too few results (<20): Add OR synonyms, remove filters, broaden MeSH terms
-                           - If low relevance (<0.6): Narrow with more specific terms, add required concepts
-                        
-                        CRITICAL RULES:
-                        1. You MUST return a DIFFERENT query than CURRENT QUERY
-                        2. If count < 20: Add MORE synonyms with OR, use broader MeSH terms
-                        3. If relevance < 0.6: Add specific terms to improve precision
-                        4. NEVER return the exact same query - always modify something
-                        
-                        RETURN ONLY the optimized query string for {source}.
-                        NO explanations, NO markdown, just the executable query.
-                        MUST be different from current query."""
-                        
-                        try:
-                            response = model.invoke([HumanMessage(content=optimization_prompt)])
-                            new_query = response.content.strip()
-                            print(f"AI returned query: {new_query[:80]}...")
-                            
-                            new_query = re.sub(r'^(Query|Optimized Query|Search String):\s*', '', new_query, flags=re.IGNORECASE)
-                            new_query = new_query.replace('```sql', '').replace('```', '').replace('`', '').strip()
-                            new_query = re.sub(r'^(PubMed|pubmed)\s*[:\-]?\s*', '', new_query, flags=re.IGNORECASE)
-                            new_query = re.sub(r'^(Here is|This is).*$', '', new_query, flags=re.IGNORECASE | re.MULTILINE)
-                            new_query = re.sub(r'^(The optimized|Final|Best).*$', '', new_query, flags=re.IGNORECASE | re.MULTILINE)
-                            new_query = new_query.strip()
-                            
-                            print(f"After cleaning: {new_query[:80]}...")
-                            print(f"Comparing to current: {source_result['query'][:80]}...")
-                            
-                            if new_query and len(new_query) > 10:
-                                if new_query != source_result["query"]:
-                                    print(f"Query changed! Updating...")
-                                    source_result["query"] = new_query
-                                    source_result["optimization_applied"].append(f"iteration_{iteration + 1}")
-                                else:
-                                    print(f"Query unchanged - AI returned same query")
-                            else:
-                                print(f"New query rejected: too short or empty")
-                        except Exception as e:
-                            print(f"Optimization error for {source}: {e}")
-                            import traceback
-                            traceback.print_exc()
-                    
-                    iter_data["sources"][source] = source_result
-                    
-                    # Track best query by relevance (papers as tiebreaker)
-                    current_relevance = source_result["relevance_score"]
-                    current_count = source_result["count"]
-                    current_query = source_result["query"]
-                    
-                    if source not in best_queries:
-                        # First iteration - save it
-                        best_queries[source] = current_query
-                        best_scores[source] = (current_relevance, current_count)
-                    else:
-                        # Compare: higher relevance wins, if tie then more papers wins
-                        prev_relevance, prev_count = best_scores[source]
-                        if current_relevance > prev_relevance:
-                            best_queries[source] = current_query
-                            best_scores[source] = (current_relevance, current_count)
-                        elif current_relevance == prev_relevance and current_count > prev_count:
-                            best_queries[source] = current_query
-                            best_scores[source] = (current_relevance, current_count)
-                    
-                    # Call progress callback if provided
-                    if progress_callback:
-                        try:
-                            progress_callback(
-                                iteration=iteration + 1,
-                                total=max_iterations,
-                                source=source,
-                                count=count,
-                                relevance=relevance,
-                                reasoning=source_result.get("iteration_reasoning", "")
-                            )
-                        except Exception as e:
-                            print(f"Progress callback error: {e}")
-                        
+                    papers, _ = DataAggregator.fetch_all(
+                        query, [source], max_per_source=per_source_max, limit=per_source_max
+                    )
                 except Exception as e:
-                    print(f"\n!!! EXCEPTION in iteration {iteration + 1} for {source}: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    iter_data["sources"][source] = {
-                        "query": best_queries.get(source, current_query),
-                        "count": 0,
-                        "titles": [],
-                        "relevance_score": 0,
-                        "quality_rating": "Error",
-                        "error": str(e)
-                    }
-            
-            # Calculate aggregate metrics
-            all_scores = [s["relevance_score"] for s in iter_data["sources"].values()]
-            all_counts = [s["count"] for s in iter_data["sources"].values()]
-            
-            iter_data["avg_relevance"] = round(sum(all_scores) / len(all_scores), 2) if all_scores else 0
-            iter_data["total_papers"] = sum(all_counts)
-            
-            # Check stopping conditions (after minimum 3 iterations)
-            if iteration >= 2:
-                if iter_data["avg_relevance"] >= 0.7 and iter_data["total_papers"] >= 20:
-                    iter_data["status"] = "success"
-                    trace.append(iter_data)
-                    break
-                if iteration >= max_iterations - 1:
-                    iter_data["status"] = "max_iterations"
-                    trace.append(iter_data)
-                    break
-            
+                    print(f"[agentic] {source} fetch error iter {iteration + 1}: {e}")
+                    papers = []
+
+                count = len(papers) if papers else 0
+                titles = [p.title for p in papers] if papers else []
+                # Score relevance against ALL retrieved titles (not a fixed
+                # sample of 20). The cap was a remnant from when retrieval was
+                # always 10–50 papers per source; with no client-side cap a
+                # 20-title sample is too small to reflect the actual mix.
+                relevance = (
+                    AIService._analyze_title_relevance(titles, research_goal, pico)
+                    if titles else 0.0
+                )
+
+                source_result.update({
+                    "count": count,
+                    "titles": titles[:10],
+                    "relevance_score": round(relevance, 2),
+                    "quality_rating": AIService._score_to_rating(relevance),
+                })
+
+                # Decide accept vs backtrack. Relevance is the optimisation
+                # target; count is a tiebreaker at equal relevance.
+                action: str
+                if relevance > best_relevance[source] + epsilon:
+                    action = "new_best"
+                    best_relevance[source] = relevance
+                    best_count[source] = count
+                    best_queries[source] = query
+                    best_iter[source] = iteration + 1
+                    best_tactic[source] = tactic_name
+                    no_improve[source] = 0
+                elif (relevance >= best_relevance[source] - epsilon and
+                      count > best_count[source]):
+                    action = "tied_better_yield"
+                    best_count[source] = count
+                    best_queries[source] = query
+                    best_iter[source] = iteration + 1
+                    best_tactic[source] = tactic_name
+                    # Tie on relevance doesn't reset the no-improve counter —
+                    # we're still searching for a relevance improvement.
+                    no_improve[source] += 1
+                else:
+                    action = "backtrack"
+                    no_improve[source] += 1
+
+                source_result["action"] = action
+
+                # Snapshot of the running best AFTER this iteration's decision.
+                source_result["best_so_far"] = {
+                    "iteration": best_iter[source],
+                    "tactic": best_tactic[source],
+                    "query": best_queries[source],
+                    "relevance_score": round(best_relevance[source], 2),
+                    "count": best_count[source],
+                }
+
+                reasoning_bits = [
+                    f"tactic: {tactic_name}",
+                    f"count {count}",
+                    f"relevance {relevance:.2f}",
+                ]
+                if action == "new_best":
+                    reasoning_bits.append("↑ new best — adopted")
+                elif action == "tied_better_yield":
+                    reasoning_bits.append(
+                        f"= relevance, more papers ({count}) → kept query, still searching"
+                    )
+                else:
+                    reasoning_bits.append(
+                        f"↓ below best ({best_relevance[source]:.2f} at iter {best_iter[source]}) "
+                        f"→ backtrack; {no_improve[source]}/{early_stop_after} non-improvements"
+                    )
+                if no_improve[source] >= early_stop_after:
+                    stopped[source] = True
+                    stop_reason[source] = (
+                        f"stopped after {early_stop_after} iterations without improvement; "
+                        f"reverted to best (iter {best_iter[source]})"
+                    )
+                    reasoning_bits.append("stopping source — reverting to best")
+                source_result["iteration_reasoning"] = "; ".join(reasoning_bits)
+
+                iter_data["sources"][source] = source_result
+                prev_iter_query[source] = query
+
+                if progress_callback:
+                    try:
+                        progress_callback(
+                            iteration=iteration + 1,
+                            total=tactic_count,
+                            source=source,
+                            count=count,
+                            relevance=relevance,
+                            reasoning=source_result["iteration_reasoning"],
+                        )
+                    except Exception as e:
+                        print(f"[agentic] progress callback error: {e}")
+
+            # Aggregate metrics across sources for this iteration.
+            active_results = [
+                r for r in iter_data["sources"].values() if not r.get("stopped")
+            ] or list(iter_data["sources"].values())
+            scores = [r["relevance_score"] for r in active_results]
+            counts = [r["count"] for r in active_results]
+            iter_data["avg_relevance"] = round(sum(scores) / len(scores), 2) if scores else 0
+            iter_data["total_papers"] = sum(counts)
+
             trace.append(iter_data)
-        
+
+            # Loop control: a `while` driven by per-source `stopped` flags.
+            # Terminate when every source has stopped (either via the 3-no-
+            # improvement rule above or the tactic-exhaustion check at the
+            # top of the per-source block).
+            if all(stopped[s] for s in active_sources):
+                iter_data["status"] = "all sources converged or stopped"
+                break
+            iteration += 1
+        else:
+            # Loop exited because we hit the safety ceiling, not because
+            # every source stopped naturally. Flag it on the last trace entry
+            # so the UI can surface it as an anomaly worth investigating.
+            if trace:
+                trace[-1]["status"] = f"safety ceiling reached ({safety_max} iterations)"
+
         return {
-            "final_query": best_queries.get(active_sources[0], current_query) if active_sources else current_query,
+            "final_query": best_queries.get(active_sources[0], base_query) if active_sources else base_query,
             "per_source_queries": best_queries,
             "trace": trace,
             "iterations_run": len(trace),
-            "best_relevance": max([t["avg_relevance"] for t in trace]) if trace else 0,
-            "total_papers_found": trace[-1]["total_papers"] if trace else 0
+            "best_relevance": max([t.get("avg_relevance", 0) for t in trace]) if trace else 0,
+            "total_papers_found": trace[-1].get("total_papers", 0) if trace else 0,
         }
     
     @staticmethod

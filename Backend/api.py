@@ -270,7 +270,7 @@ def pico_infer(req: InferRequest):
         outcome=o_str,
     )
     try:
-        query = AIService.generate_mesh_query(pico, model_name)
+        query = AIService.generate_mesh_query(pico, model_name, goal=req.input or "")
     except Exception as e:
         print(f"[pico_infer] mesh query failed: {e}")
         query = ""
@@ -283,6 +283,105 @@ def pico_infer(req: InferRequest):
         exclusion=_coerce_str_list(data.get("exclusion")),
         query=query or "",
     )
+
+
+class ClarifyQuestionsRequest(BaseModel):
+    """Input to /api/pico/clarify-questions: the user's natural-language research
+    goal, used to generate 1-3 multiple-choice questions that surface what the
+    user did not specify (population focus, outcome scope, comparator, etc.)."""
+    input: str
+    model: Optional[str] = None
+
+
+@app.post("/api/pico/clarify-questions")
+def pico_clarify_questions(req: ClarifyQuestionsRequest):
+    """Generate clarifying multiple-choice questions for an under-specified goal.
+
+    Returns at most 3 questions. Each question has 4-5 option chips plus an
+    implicit 'something else' free-form input on the frontend. The frontend
+    shows a modal with one question at a time. The answers are then folded
+    into the PICO before search runs, so the system stops silently inferring
+    elements the user did not state.
+    """
+    from langchain_core.messages import HumanMessage
+
+    goal = (req.input or "").strip()
+    if not goal:
+        return {"questions": []}
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if not model:
+        return {"questions": []}
+
+    prompt = f"""You are a clinical research methodologist helping a researcher refine a
+systematic-review question BEFORE a literature search runs. The researcher typed the
+goal below. Your job is to produce 1-3 short multiple-choice questions that will
+let them disambiguate WITHOUT inventing details the system would otherwise have to
+guess.
+
+RESEARCH GOAL: "{goal}"
+
+Generate clarifying questions ONLY for elements the researcher genuinely left ambiguous.
+Skip questions that are already answered by what they wrote. The most common useful
+questions are:
+  • Population focus (general population vs. older adults vs. specific risk group)
+  • Outcome scope (e.g. all-cause mortality vs. healthspan vs. specific biomarker)
+  • Comparator (active comparator vs. placebo vs. usual care)
+  • Time horizon / study-design preference
+
+Each question must have 3-5 distinct options. Options should be short noun phrases
+(3-12 words). The researcher will also see a free-text "something else" input on each
+question, so make the options cover the COMMON cases — do not try to enumerate every
+possibility.
+
+Output ONLY a JSON object:
+{{
+  "questions": [
+    {{
+      "id": "population" | "intervention" | "comparator" | "outcome" | "design",
+      "title": "Short question text ending in '?'",
+      "options": [
+        {{"id": "adults", "label": "Adults in the general population"}},
+        {{"id": "elderly", "label": "Older adults (65+ years)"}},
+        ...
+      ]
+    }},
+    ...
+  ]
+}}
+
+If the goal is already fully specified across population, intervention, comparator,
+and outcome, return {{"questions": []}}.
+"""
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+        raw_qs = data.get("questions") or []
+        cleaned: List[Dict[str, Any]] = []
+        for q in raw_qs[:3]:
+            if not isinstance(q, dict):
+                continue
+            qid = str(q.get("id") or "").strip().lower() or f"q{len(cleaned)+1}"
+            title = str(q.get("title") or "").strip()
+            if not title:
+                continue
+            opts: List[Dict[str, str]] = []
+            for o in (q.get("options") or [])[:5]:
+                if isinstance(o, dict):
+                    oid = str(o.get("id") or "").strip()
+                    olabel = str(o.get("label") or "").strip()
+                    if oid and olabel:
+                        opts.append({"id": oid, "label": olabel})
+                elif isinstance(o, str):
+                    s = o.strip()
+                    if s:
+                        opts.append({"id": s.lower().replace(" ", "_")[:30], "label": s})
+            if len(opts) >= 2:
+                cleaned.append({"id": qid, "title": title, "options": opts})
+        return {"questions": cleaned}
+    except Exception as e:
+        print(f"[clarify_questions] {e}")
+        return {"questions": []}
 
 
 class FormalQuestionRequest(BaseModel):
@@ -304,10 +403,11 @@ class SummaryRequest(BaseModel):
 
 
 def _plain_summary(goal: str, papers: List[BackendPaper], model_name: str) -> str:
-    """Plain-prose comprehensive summary (no HTML, no markdown fences).
+    """Plain-prose comprehensive evidence synthesis (no HTML, no markdown fences).
 
-    Instructs the model to cite ONLY papers that are directly relevant to the
-    research goal — irrelevant hits from a broad MeSH search are dropped.
+    The model is asked to produce something a researcher could read once and
+    understand the topic well enough to ask follow-up questions, not a thin
+    bullet list. It cites only the relevant subset of the provided literature.
     """
     if not papers:
         return ""
@@ -317,41 +417,88 @@ def _plain_summary(goal: str, papers: List[BackendPaper], model_name: str) -> st
     if not model:
         return ""
 
-    subset = papers[:10]
+    # Use a wider slice — the home rerank already auto-filtered to the relevant
+    # set, so almost everything here should be useful.
+    subset = papers[:25]
     ctx = ""
     for idx, p in enumerate(subset):
-        ctx += f"[{idx + 1}] {p.title}\n    Source: {p.source}\n    Abstract: {(p.abstract or '')[:400]}\n\n"
+        ctx += (
+            f"[{idx + 1}] {p.title}\n"
+            f"    Source: {p.source}\n"
+            f"    Abstract: {(p.abstract or '')[:800]}\n\n"
+        )
 
-    prompt = f"""You are an expert systematic review analyst. Build a COHESIVE evaluation of the
-research question, using only papers that are directly relevant. Ignore papers that are off-topic
-or only tangentially related — do not mention them, do not cite them.
+    prompt = f"""You are an expert evidence synthesist. Produce a COMPREHENSIVE plain-text briefing
+on the research question — the kind of document a researcher could read once and walk away with a
+working understanding of the topic, including what is known, what is contested, what is missing,
+and what to ask next.
 
 RESEARCH GOAL: {goal}
 
 LITERATURE ({len(subset)} papers, numbered [1]-[{len(subset)}]):
 {ctx}
 
-Structure the response with exactly these three plain-text section headers, each followed by a
-blank line, in this order:
+Structure the response with exactly these section headers, each followed by a blank line, in this
+order:
 
 Research landscape overview
 Arguments supporting the research question
 Arguments against or challenging the research question
+Mechanisms, effect sizes, and study characteristics
+Open questions and follow-up considerations
 
-Under each header write 2-5 sentences (or 3-5 bullet points for the supporting/against sections).
-Cite ONLY directly relevant papers inline as [1], [2], etc. — do not invent citations.
+REQUIREMENTS:
+1. "Research landscape overview" — 1–2 paragraphs (≈ 4–8 sentences). Describe what the literature
+   covers, what populations and settings have been studied, what study designs dominate, and where
+   the evidence base is thin or fragmented. Cite the most representative papers inline.
 
-If NONE of the papers are directly relevant, write a single short paragraph under "Research
-landscape overview" stating that the initial search returned no directly relevant evidence and
-recommending how to broaden or narrow the search. Leave the two argument sections empty (just the
-header, no content).
+2. "Arguments supporting the research question" — 4–7 substantive bullet points. Each bullet should
+   make a SPECIFIC claim backed by at least one citation: name the mechanism, the effect size or
+   direction, the population, and the study design where possible. Avoid generic statements.
 
-Do NOT include a reference list. Do NOT use HTML, markdown bold/italics, or code fences. Plain
-text with dashes for bullets is fine.
+3. "Arguments against or challenging the research question" — 3–6 substantive bullet points. Cover
+   contradictory findings, null results, methodological limitations of supporting studies,
+   confounders, or settings where the relationship breaks down. Cite specific evidence.
+
+4. "Mechanisms, effect sizes, and study characteristics" — 1 paragraph (≈ 5–8 sentences) or 4–6
+   bullets. Pull out concrete numbers where the abstracts supply them: sample sizes, follow-up
+   durations, hazard ratios, percentages, p-values. Name the proposed biological / behavioural /
+   methodological mechanisms when discussed.
+
+5. "Open questions and follow-up considerations" — 3–5 specific questions a researcher might ask
+   next based on gaps in the current literature. Phrase them as concrete refinements (e.g. "How
+   does the effect change between Mediterranean diet adherence indices, and which index best
+   predicts mortality?") rather than generic ones.
+
+CITATION RULES:
+  • Cite only papers that are actually relevant to the goal. If a paper is off-topic, ignore it
+    completely — do not mention it, do not cite it.
+  • Use inline citations like [3] or [5, 7]. Never invent a citation number not present in the
+    provided literature.
+  • Cite specific evidence — never write "[3] is relevant" without saying WHAT in [3] is relevant.
+
+FAILURE MODE:
+If FEWER THAN 3 of the provided papers are directly relevant to the goal, do not pad the response.
+Write only the "Research landscape overview" section (1 paragraph) stating that the directly
+relevant evidence base is thin, naming the closest-adjacent findings from the papers you do have,
+and listing 3 ways to broaden or refocus the search. Leave the other sections out entirely.
+
+FORMAT:
+Plain text only. No HTML. No markdown bold/italics. No code fences. Dashes for bullets are fine.
+Do NOT include a final reference list — the UI renders one separately.
 """
     try:
         r = model.invoke([HumanMessage(content=prompt)])
-        return (r.content or "").strip()
+        text = (r.content or "").strip()
+        # Even though the prompt forbids markdown, smaller models still emit
+        # **bold** and *italic*. Strip the asterisks so the UI does not show
+        # literal markup. (Underscore-italics are left alone to avoid breaking
+        # legitimate text like "all-cause_mortality" tokens.)
+        text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)   # **bold** → bold
+        text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)  # *italic* → italic
+        # Collapse any remaining stray double-asterisks that didn't match.
+        text = text.replace("**", "")
+        return text
     except Exception as e:
         print(f"[plain_summary] {e}")
         return ""
@@ -359,61 +506,20 @@ text with dashes for bullets is fine.
 
 _CITE_RE = re.compile(r"\[(\d+)\]")
 
-_RELEVANCE_STOP = {
-    "the", "and", "or", "in", "of", "a", "an", "is", "are", "was", "were", "on", "to", "for",
-    "with", "between", "from", "how", "what", "why", "does", "do", "this", "that", "help", "me",
-    "understand", "relationship", "study", "studies", "paper", "research", "patients", "effect",
-    "effects", "result", "results", "based", "using", "using", "their", "have", "has", "had",
-    "been", "into", "than", "more", "less", "such", "also", "but", "not", "can", "could", "may",
-    "might", "would", "should", "us", "we", "you", "they", "its", "it's", "use", "used", "via",
-}
 
+def _strip_invalid_citations(summary: str, n_refs: int) -> str:
+    """Remove citation markers that point outside the references range.
 
-def _goal_terms(goal: str) -> List[str]:
-    return [t for t in re.findall(r"\w{4,}", (goal or "").lower()) if t not in _RELEVANCE_STOP]
-
-
-def _filter_for_relevance(papers: List[BackendPaper], goal: str, top_n: int = 10) -> List[BackendPaper]:
-    """Keep only papers whose title/abstract share key terms with the goal, ranked by overlap."""
-    if not papers:
-        return []
-    terms = _goal_terms(goal)
-    if not terms:
-        return papers[:top_n]
-
-    scored: List[Tuple[int, BackendPaper]] = []
-    for p in papers:
-        title_lower = (p.title or "").lower()
-        abs_lower = (p.abstract or "").lower()
-        title_hits = sum(1 for t in terms if t in title_lower)
-        abs_hits = sum(1 for t in terms if t in abs_lower)
-        score = title_hits * 3 + abs_hits
-        if score > 0:
-            scored.append((score, p))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [p for _, p in scored[:top_n]]
-
-
-def _filter_and_renumber(summary: str, references: list) -> Tuple[str, list]:
-    """Keep only references actually cited in the summary, renumbered 1..N in order of first use."""
-    seen: List[int] = []
-    for m in _CITE_RE.finditer(summary):
+    The model occasionally hallucinates citation numbers beyond what was
+    actually provided in the prompt. Strip those so the reader never sees a
+    [N] that doesn't exist in the references list. All valid citations and
+    the original numbering are preserved as-is so they line up with the
+    full reference list shown in the UI.
+    """
+    def _repl(m: "re.Match[str]") -> str:
         n = int(m.group(1))
-        if n not in seen:
-            seen.append(n)
-    if not seen:
-        return summary, []
-
-    mapping = {orig: new for new, orig in enumerate(seen, start=1)}
-
-    def _repl(m: re.Match) -> str:
-        n = int(m.group(1))
-        return f"[{mapping[n]}]" if n in mapping else m.group(0)
-
-    renumbered = _CITE_RE.sub(_repl, summary)
-    kept = [references[n - 1] for n in seen if 1 <= n <= len(references)]
-    return renumbered, kept
+        return m.group(0) if 1 <= n <= n_refs else ""
+    return _CITE_RE.sub(_repl, summary)
 
 
 @app.post("/api/pico/summary")
@@ -421,26 +527,36 @@ def pico_summary(req: SummaryRequest):
     bps = [_to_backend_paper(p) for p in req.papers]
     if not bps:
         return {"summary": "", "references": []}
-    # Drop off-topic papers before sending to the LLM — saves tokens and gives
-    # the model only candidates worth reasoning about.
-    relevant = _filter_for_relevance(bps, req.goal, top_n=10)
-    if not relevant:
-        return {
-            "summary": (
-                "Research landscape overview\n\nThe initial search returned papers that do not "
-                "appear directly relevant to this question. Consider broadening the search terms, "
-                "removing restrictive MeSH filters, or using a different combination of population "
-                "and intervention keywords.\n\nArguments supporting the research question\n\n"
-                "Arguments against or challenging the research question\n"
-            ),
-            "references": [],
-        }
-    summary = _plain_summary(req.goal, relevant, resolve_for_thinking(req.model))
+
+    # Papers arriving here have already been LEADS-reranked and auto-cut by the
+    # Home page. We do NOT additionally TF-IDF filter — everything that was
+    # kept goes into the references list, even if the summary ultimately does
+    # not cite every one of them.
+    #
+    # We DO reorder them so that papers from the same source are contiguous,
+    # preserving rerank order (highest LEADS score first) within each source
+    # group. The summary is generated against this grouped order, so the [N]
+    # citation markers it emits line up with the source-grouped references the
+    # UI displays. Source groups are ordered by first appearance in the
+    # rerank-sorted list (so the source with the most relevant paper leads).
+    grouped_papers: List[BackendPaper] = []
+    by_source: Dict[str, List[BackendPaper]] = {}
+    source_order: List[str] = []
+    for p in bps:
+        key = (p.source or "Other").strip() or "Other"
+        if key not in by_source:
+            by_source[key] = []
+            source_order.append(key)
+        by_source[key].append(p)
+    for key in source_order:
+        grouped_papers.extend(by_source[key])
+
+    summary = _plain_summary(req.goal, grouped_papers, resolve_for_thinking(req.model))
     references = [
         {"title": (p.title or "").strip(), "url": p.url, "source": p.source, "id": str(p.id)}
-        for p in relevant
+        for p in grouped_papers
     ]
-    summary, references = _filter_and_renumber(summary, references)
+    summary = _strip_invalid_citations(summary, len(references))
     return {"summary": summary, "references": references}
 
 
@@ -523,23 +639,79 @@ def session_title(req: TitleRequest):
 
 @app.post("/api/pico/refine")
 def pico_refine(req: RefineRequest):
-    """Identify the single PICO element that is most under-specified and suggest a sharper value."""
+    """Surface ONE PICO field that the user should clarify or sharpen.
+
+    Behaviour:
+      • If any PICO field is blank, return a CLARIFYING QUESTION for the most
+        important blank field. The response carries `is_clarification = True` and
+        `suggested` holds a tentative starting value the user can accept / edit /
+        replace via the Home-page popup.
+      • If all PICO fields are filled but one is methodologically weak, fall back
+        to the previous behaviour: propose a sharper replacement with
+        `is_clarification = False`.
+    """
     from langchain_core.messages import HumanMessage
+
+    empty = {"field": None, "current": "", "suggested": "", "reason": "", "is_clarification": False}
     model = AIService.get_model(resolve_for_thinking(req.model))
     if not model:
-        return {"field": None, "current": "", "suggested": "", "reason": "Model unavailable."}
+        return {**empty, "reason": "Model unavailable."}
 
-    prompt = f"""You are a clinical research methodologist reviewing a PICO breakdown for a
+    # Prioritise blanks. Order matters: Population is the most load-bearing for
+    # retrieval relevance, followed by Intervention, Outcome, Comparator.
+    PRIORITY = ["population", "intervention", "outcome", "comparator"]
+    values = {
+        "population": (req.pico.population or "").strip(),
+        "intervention": (req.pico.intervention or "").strip(),
+        "comparator": (req.pico.comparator or "").strip(),
+        "outcome": (req.pico.outcome or "").strip(),
+    }
+    blanks = [f for f in PRIORITY if not values[f]]
+
+    if blanks:
+        target = blanks[0]
+        prompt = f"""You are a clinical research methodologist helping a researcher specify a
+systematic-review PICO. The researcher's stated goal is below. They did NOT specify the
+{target.upper()} element. Your job is to ask ONE concise clarifying question and offer ONE
+plausible starting value the researcher can accept, edit, or reject.
+
+RESEARCH GOAL: {req.goal or "(not provided)"}
+
+CURRENT PICO (the blank field is the one we are asking about):
+  Population: {values['population'] or '(blank)'}
+  Intervention: {values['intervention'] or '(blank)'}
+  Comparator: {values['comparator'] or '(blank)'}
+  Outcome: {values['outcome'] or '(blank)'}
+
+Rules for the clarifying question:
+  • Phrase it as a question to the researcher, ≤ 18 words.
+  • Reference only what the researcher actually wrote. Do NOT invent a different
+    research topic.
+  • The "suggested" starting value must be a reasonable default GIVEN the
+    researcher's stated goal — but make clear it is one option among many.
+  • The "suggested" must be 5–20 words.
+
+Return ONLY a JSON object with these exact keys:
+{{
+  "field": "{target}",
+  "current": "",
+  "suggested": "<tentative starting value the researcher can accept or edit>",
+  "reason": "<the clarifying question, ≤ 18 words, ending with '?'>"
+}}
+"""
+        is_clarification = True
+    else:
+        prompt = f"""You are a clinical research methodologist reviewing a PICO breakdown for a
 systematic review. Identify the ONE element that is most under-specified, ambiguous, or
 methodologically weak, and propose a sharper replacement for that element only.
 
 RESEARCH GOAL: {req.goal}
 
 CURRENT PICO:
-  Population: {req.pico.population}
-  Intervention: {req.pico.intervention}
-  Comparator: {req.pico.comparator}
-  Outcome: {req.pico.outcome}
+  Population: {values['population']}
+  Intervention: {values['intervention']}
+  Comparator: {values['comparator']}
+  Outcome: {values['outcome']}
 
 Pick the single weakest element and propose a concrete improvement. Be specific — name a
 population subgroup, dose/duration, comparator type, or validated outcome measure. Do not
@@ -553,25 +725,28 @@ Return ONLY a JSON object with these exact keys:
   "reason": "<one-sentence rationale for why this change improves clarity or rigor>"
 }}
 """
+        is_clarification = False
+
     try:
         r = model.invoke([HumanMessage(content=prompt)])
         raw = (r.content or "").strip()
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if not m:
-            return {"field": None, "current": "", "suggested": "", "reason": "Could not parse model response."}
+            return {**empty, "reason": "Could not parse model response."}
         data = _json.loads(m.group(0))
         field = str(data.get("field", "")).strip().lower()
         if field not in {"population", "intervention", "comparator", "outcome"}:
-            return {"field": None, "current": "", "suggested": "", "reason": "Model returned an invalid field."}
+            return {**empty, "reason": "Model returned an invalid field."}
         return {
             "field": field,
             "current": str(data.get("current", "")).strip(),
             "suggested": str(data.get("suggested", "")).strip(),
             "reason": str(data.get("reason", "")).strip(),
+            "is_clarification": is_clarification,
         }
     except Exception as e:
         print(f"[pico_refine] {e}")
-        return {"field": None, "current": "", "suggested": "", "reason": f"Refine error: {e}"}
+        return {**empty, "reason": f"Refine error: {e}"}
 
 
 # ---------------------------------------------------------------------------
@@ -734,6 +909,67 @@ def screen_abstract_batch(req: ScreenAbstractBatchRequest):
     return {"results": results}
 
 
+def _auto_relevance_cutoff(scores: List[float]) -> Tuple[float, str]:
+    """Pick a relevance floor from the score distribution itself.
+
+    Returns (effective_floor, human_readable_reason).
+
+    Rules:
+      • Hard floor at +0.0 — LEADS aggregate < 0 means net-negative across PICO.
+        Never include these.
+      • If ≤ MIN_KEPT papers pass the hard floor, keep them all (corpus too
+        small to detect a natural break).
+      • Otherwise, sort the positive scores descending. Look for the largest
+        gap between consecutive scores, but only count gaps that leave at
+        least MIN_KEPT papers above them — this prevents a single high-scoring
+        outlier from collapsing the kept set to one paper.
+      • If a gap ≥ GAP_THRESHOLD exists in the eligible range, cut there.
+      • Otherwise, keep the top half of positive scores with a soft floor of
+        +0.10 (suppresses borderline papers when the distribution is uniformly
+        mediocre).
+
+    No max cap — if many papers clear the natural break, all of them stay.
+    """
+    MIN_KEPT = 5         # minimum number of papers above the cut, if available
+    GAP_THRESHOLD = 0.10  # minimum gap size that counts as a natural break
+
+    if not scores:
+        return 0.0, "empty corpus"
+
+    positive = sorted([s for s in scores if s >= 0.0], reverse=True)
+    if not positive:
+        return 0.0, "no papers scored net-positive across PICO"
+
+    if len(positive) <= MIN_KEPT:
+        return min(positive), f"small positive corpus ({len(positive)} papers) — keep all"
+
+    # Search for the largest gap that leaves at least MIN_KEPT papers above it.
+    # i is the index of the score *below* the gap; the gap separates positive[i-1]
+    # (kept) from positive[i] (dropped). So we need i >= MIN_KEPT.
+    max_search_idx = max(MIN_KEPT, len(positive) // 2) + 1
+    best_gap = 0.0
+    best_idx = -1
+    for i in range(MIN_KEPT, min(max_search_idx, len(positive))):
+        gap = positive[i - 1] - positive[i]
+        if gap > best_gap:
+            best_gap = gap
+            best_idx = i
+
+    if best_idx >= 0 and best_gap >= GAP_THRESHOLD:
+        cut = positive[best_idx - 1]
+        return cut, (
+            f"natural relevance break: gap of {best_gap:+.2f} between scores "
+            f"{positive[best_idx - 1]:+.2f} and {positive[best_idx]:+.2f}, "
+            f"keeping {best_idx} papers"
+        )
+
+    # No significant gap — distribution is roughly uniform. Keep top half, with
+    # a soft floor of +0.10 to drop borderline scores when nothing stands out.
+    median_score = positive[len(positive) // 2]
+    soft = max(0.10, median_score)
+    return soft, f"uniform distribution — keep top half above {soft:+.2f}"
+
+
 class RerankRequest(BaseModel):
     """Score fetched papers for relevance against the PICO using LEADS, so the
     downstream summariser cites papers that pass a real screening pass rather
@@ -743,11 +979,15 @@ class RerankRequest(BaseModel):
     inclusion: List[str] = Field(default_factory=list)
     exclusion: List[str] = Field(default_factory=list)
     model: Optional[str] = None
-    # LEADS aggregate score in [-1, +1]. Keep papers with score >= threshold.
-    # -0.2 keeps "maybe relevant" and better — the right default for a summary
-    # pre-filter (looser than the screening-grade +0.20 sweet spot).
+    # Auto-cutoff mode (default). The endpoint picks the cutoff itself based on
+    # the score distribution — gap detection within the top half, hard floor at
+    # 0.0, no max cap. Threshold / quantile_keep are honoured only when auto is
+    # explicitly disabled (programmatic callers can still pin a specific cutoff).
+    auto: bool = True
+    # Manual overrides. Ignored when auto = True.
     threshold: float = -0.2
-    # Hard cap on output size after sorting. None = keep all that pass threshold.
+    quantile_keep: Optional[float] = None
+    # Hard cap on output size after sorting. None = keep everything relevant.
     top_k: Optional[int] = None
 
 
@@ -786,14 +1026,43 @@ def papers_rerank(req: RerankRequest):
 
     # Sort descending by LEADS score (most relevant first).
     scored.sort(key=lambda r: r["leads_score"], reverse=True)
-    kept = [r for r in scored if r["leads_score"] >= req.threshold]
+
+    # ---- Decide the effective relevance floor -------------------------------
+    cutoff_mode: str = "auto"
+    quantile_cutoff: Optional[float] = None
+    cutoff_reason: str = ""
+
+    if req.auto:
+        effective_floor, cutoff_reason = _auto_relevance_cutoff(
+            [r["leads_score"] for r in scored]
+        )
+    else:
+        cutoff_mode = "manual"
+        effective_floor = float(req.threshold)
+        if req.quantile_keep is not None and scored:
+            q = max(0.0, min(1.0, float(req.quantile_keep)))
+            n = len(scored)
+            cutoff_idx = max(0, min(n - 1, int(round(n * q)) - 1))
+            quantile_cutoff = scored[cutoff_idx]["leads_score"]
+            effective_floor = max(effective_floor, quantile_cutoff)
+        cutoff_reason = (
+            f"manual: threshold={req.threshold:+.2f}"
+            + (f", quantile_keep={req.quantile_keep:.2f}" if req.quantile_keep is not None else "")
+        )
+
+    kept = [r for r in scored if r["leads_score"] >= effective_floor]
     if req.top_k is not None:
         kept = kept[: req.top_k]
 
     return {
-        "ranked": scored,           # All papers, with scores, for transparency
-        "kept": kept,               # Subset above threshold — feed this to summary
+        "ranked": scored,
+        "kept": kept,
+        "cutoff_mode": cutoff_mode,
+        "cutoff_reason": cutoff_reason,
         "threshold": req.threshold,
+        "quantile_keep": req.quantile_keep,
+        "quantile_cutoff": quantile_cutoff,
+        "effective_floor": effective_floor,
         "total_scored": len(scored),
         "total_kept": len(kept),
         "model_used": model_name,
