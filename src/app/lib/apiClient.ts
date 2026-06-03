@@ -9,8 +9,36 @@ export type Analysis = {
   inclusion: string[]; exclusion: string[]; query: string;
 };
 
+export type ClarifyingQuestion = {
+  id: string;             // e.g. "population", "outcome", or a free-form key
+  title: string;          // question text shown at the top of the modal
+  options: { id: string; label: string }[];
+};
+
 export type AgentVote = { vote: "PASS" | "FAIL" | "N/A"; reasoning: string; evidence?: string };
 export type AgentTrace = Record<string, AgentVote>;
+
+// Per-PICO structured appraisal returned by the screen-abstract endpoint.
+// vote semantics:
+//   PASS     — abstract clearly satisfies this PICO element
+//   PARTIAL  — partial / related match
+//   FAIL     — clearly does not match
+//   NA       — abstract lacks enough information to judge
+export type PicoVote = "PASS" | "PARTIAL" | "FAIL" | "NA";
+
+export type PicoFieldAssessment = {
+  vote: PicoVote;
+  evidence: string;     // short verbatim quote from the abstract, may be ""
+  reasoning: string;    // one-sentence explanation
+};
+
+export type PicoAssessment = {
+  population: PicoFieldAssessment;
+  intervention: PicoFieldAssessment;
+  comparator: PicoFieldAssessment;
+  outcome: PicoFieldAssessment;
+  overall_reasoning: string;  // 2-3 sentence synthesis across PICO
+};
 
 export type ScreenResult = {
   paper_id: string;
@@ -18,6 +46,7 @@ export type ScreenResult = {
   Decision: "INCLUDE" | "EXCLUDE";
   Reason: string;
   Agent_Trace: AgentTrace;
+  Pico_Assessment?: PicoAssessment;
 };
 
 export type CriterionEvidence = { decision: "INCLUDE" | "EXCLUDE"; evidence: string; reasoning: string };
@@ -39,11 +68,29 @@ export type FullTextResult = {
   exclusion_violations: number;
 };
 
+// Legacy type kept exported only because mockServices re-exports it.
+// The new QualityReport schema does not use it.
 export type QualityIssue = {
   severity: "high" | "medium" | "low";
   category: string;
   message: string;
   evidence?: string;
+};
+
+export type RoBJudgment =
+  | "Low"
+  | "Some Concerns"
+  | "High"
+  | "No information"
+  | "Not applicable";
+
+export type RoBDomain = {
+  id: string;
+  name: string;
+  judgment: RoBJudgment;
+  rationale: string;
+  supporting_quote: string;
+  section: string;        // "Methods" | "Results" | "Discussion" | "Abstract" | "Other" | ""
 };
 
 export type QualityReport = {
@@ -52,10 +99,24 @@ export type QualityReport = {
   source: string;
   url: string;
   abstract: string;
-  score: number;
-  rating: "Excellent" | "Good" | "Fair" | "Poor";
-  issues: QualityIssue[];
-  highlightedAbstract: { text: string; flagged: boolean; reason?: string }[];
+  study_design: string;        // detected design label
+  rubric: string;              // "RoB 2" | "ROBINS-I" | "JBI cross-sectional" | "JBI qualitative" | "AMSTAR 2"
+  domains: RoBDomain[];
+  overall_judgment: RoBJudgment;
+  overall_rationale: string;
+  used_full_text: boolean;
+};
+
+// Reviewer override on an AI-generated domain judgment. Captured for the
+// audit log so every change has a timestamp, original value, and rationale.
+export type QualityOverride = {
+  paper_id: string;
+  domain_id: string;
+  original_judgment: RoBJudgment;
+  new_judgment: RoBJudgment;
+  reason: string;
+  reviewer: string;       // optional; populated when auth is configured
+  timestamp: string;      // ISO-8601
 };
 
 // ---------------------------------------------------------------------------
@@ -110,6 +171,18 @@ export const AIService = {
     return postJSON<Analysis>("/pico/infer", { input, model: apiConfig.model }, signal);
   },
 
+  // Clarifying questions — called BEFORE the search runs. Returns 1-3 multiple-
+  // choice questions that disambiguate underspecified PICO elements. The Home
+  // page shows them in a Claude-style modal so the user owns the answer.
+  async getClarifyingQuestions(input: string, signal?: AbortSignal): Promise<ClarifyingQuestion[]> {
+    const r = await postJSON<{ questions: ClarifyingQuestion[] }>(
+      "/pico/clarify-questions",
+      { input, model: apiConfig.model },
+      signal,
+    );
+    return r.questions || [];
+  },
+
   async generateFormalQuestion(pico: Pico, signal?: AbortSignal): Promise<string> {
     const r = await postJSON<{ question: string }>("/pico/formal-question", {
       pico, model: apiConfig.model, history: [],
@@ -152,7 +225,7 @@ export const AIService = {
     return r.suggestions || [];
   },
 
-  async refinePico(pico: Pico, goal = ""): Promise<{ field: "population" | "intervention" | "comparator" | "outcome" | null; current: string; suggested: string; reason: string }> {
+  async refinePico(pico: Pico, goal = ""): Promise<{ field: "population" | "intervention" | "comparator" | "outcome" | null; current: string; suggested: string; reason: string; is_clarification?: boolean }> {
     return postJSON("/pico/refine", { pico, goal, model: apiConfig.model });
   },
 
@@ -204,7 +277,29 @@ export const AIService = {
     total_papers_found: number;
     best_relevance: number;
     per_source_queries: Record<string, string>;
-    trace: { iteration: number; sources: Record<string, { count: number; relevance_score: number; quality_rating: string; query: string; titles: string[]; iteration_reasoning: string }> }[];
+    trace: { iteration: number; sources: Record<string, {
+      count: number;
+      relevance_score: number;
+      quality_rating: string;
+      query: string;
+      titles: string[];
+      iteration_reasoning: string;
+      tactic?: string;
+      query_diff?: { added: string[]; removed: string[] };
+      stopped?: boolean;
+      // "new_best" → this iteration improved on the running best and was adopted.
+      // "tied_better_yield" → relevance matched best but more papers; kept query but still counts as non-improvement.
+      // "backtrack" → this iteration scored below the running best; the previous best is preserved.
+      // "stopped" → source has been removed from the loop after consecutive non-improvements.
+      action?: "new_best" | "tied_better_yield" | "backtrack" | "stopped" | "tested";
+      best_so_far?: {
+        iteration: number;
+        tactic: string;
+        query: string;
+        relevance_score: number;
+        count: number;
+      };
+    }> }[];
   }> {
     // Stream via SSE so iterations show up live.
     const res = await fetch(`${apiConfig.baseUrl}/simulation/agentic/stream`, {
@@ -295,8 +390,21 @@ export const AIService = {
 // ---------------------------------------------------------------------------
 
 export const QualityService = {
-  async assessPaper(paper: Paper, signal?: AbortSignal): Promise<QualityReport> {
-    return postJSON<QualityReport>("/quality/assess", { paper }, signal);
+  async assessPaper(
+    paper: Paper,
+    signal?: AbortSignal,
+    opts: { fullText?: string; rubricOverride?: string } = {},
+  ): Promise<QualityReport> {
+    return postJSON<QualityReport>(
+      "/quality/assess",
+      {
+        paper,
+        full_text: opts.fullText,
+        rubric_override: opts.rubricOverride,
+        model: apiConfig.model,
+      },
+      signal,
+    );
   },
 };
 
@@ -315,13 +423,21 @@ export type RerankResult = {
   ranked: RerankItem[];
   kept: RerankItem[];
   threshold: number;
+  quantile_keep?: number | null;
+  quantile_cutoff?: number | null;
+  effective_floor?: number;
   total_scored: number;
   total_kept: number;
   model_used: string;
 };
 
 export const DataAggregator = {
-  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 10, signal?: AbortSignal): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
+  // `maxPerSource` is a download budget, NOT a relevance cap. The downstream
+  // rerank stage auto-detects the relevance break — anything that fetched
+  // matters only insofar as LEADS can score it. Default raised to 50 so the
+  // candidate pool is broad enough to find the natural break without missing
+  // relevant papers from a single source.
+  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 50, signal?: AbortSignal): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
     return postJSON("/papers/fetch", { query, sources, max_per_source: maxPerSource }, signal);
   },
 
@@ -333,6 +449,11 @@ export const DataAggregator = {
   // Score fetched papers for relevance against PICO using LEADS-native.
   // Returns both the full ranked list (with scores) and the subset that passed
   // the relevance threshold. Feed `kept` to the summariser.
+  //
+  // `threshold` is the absolute floor in [-1, +1]. `quantileKeep`, if set,
+  // additionally requires the paper to be in the top `quantileKeep` fraction of
+  // the scored corpus (e.g. 0.30 = top 30 %). The effective acceptance bar is
+  // max(absolute floor, quantile cutoff) — both gates must be cleared.
   async rerankByRelevance(
     papers: Paper[],
     pico: Pico,
@@ -341,12 +462,14 @@ export const DataAggregator = {
     threshold = -0.2,
     topK?: number,
     signal?: AbortSignal,
+    quantileKeep?: number,
   ): Promise<RerankResult> {
     return postJSON<RerankResult>(
       "/papers/rerank",
       {
         papers, pico, inclusion, exclusion,
         threshold,
+        quantile_keep: quantileKeep,
         top_k: topK,
         model: apiConfig.model,
       },

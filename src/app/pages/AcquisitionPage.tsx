@@ -1,5 +1,6 @@
 import { useStore, FullTextRecord } from "../lib/store";
 import { AIService } from "../lib/mockServices";
+import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -15,7 +16,9 @@ export function AcquisitionPage() {
   const running = task?.status === "running";
 
   if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first to unlock full-text acquisition.</AlertDescription></Alert>;
-  const included = s.results.filter(r => r.Decision === "INCLUDE");
+  // Honour reviewer overrides — papers the user marked Keep at abstract
+  // screening get their full text fetched here even if the AI excluded them.
+  const included = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
   if (included.length === 0) return <Alert><AlertDescription>No included papers from screening yet.</AlertDescription></Alert>;
 
   async function runFetch(onlyMissing = false) {

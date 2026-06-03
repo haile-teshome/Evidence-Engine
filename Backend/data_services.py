@@ -348,7 +348,10 @@ class EuropePMCService:
                 "query": epmc_query or query,
                 "format": "json",
                 "pageSize": max_results,
-                "resultType": "lite",
+                # "core" returns the abstract text; "lite" omits it. Without
+                # abstracts the downstream PICO appraisal has nothing to
+                # anchor quotes against and every cell collapses to NA.
+                "resultType": "core",
             }
             resp = throttled_request(url, params=params).json()
             papers: List[Paper] = []
@@ -466,7 +469,9 @@ class MedRxivService:
                 "query": epmc_query,
                 "format": "json",
                 "pageSize": max_results * 2,  # over-fetch; we filter for medrxiv specifically
-                "resultType": "lite",
+                # "core" returns abstractText; "lite" omits it, leaving the
+                # downstream PICO appraisal nothing to anchor quotes against.
+                "resultType": "core",
             }
             resp = throttled_request(url, params=params).json()
             papers: List[Paper] = []

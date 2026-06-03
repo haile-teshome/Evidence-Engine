@@ -1,6 +1,7 @@
 import { Component, ReactNode } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { PrismaFlow } from "./components/PrismaFlow";
+import { bucketAbstractExclusions, bucketFullTextExclusions } from "./lib/exclusionBucketing";
 import { Toaster } from "./components/ui/sonner";
 import { StoreProvider, useStore } from "./lib/store";
 import { AuthProvider } from "./lib/auth";
@@ -60,7 +61,36 @@ function Shell() {
           {s.page === "snowball" && <SnowballPage />}
           {s.page === "extraction" && <ExtractionPage />}
           {s.page === "textextraction" && <TextExtractionPage />}
-          {s.page === "prisma" && <PrismaFlow counts={s.prisma} />}
+          {s.page === "prisma" && (() => {
+            // Re-derive exclusion breakdowns and the final-include count from
+            // the live screening results AND any reviewer overrides, so the
+            // diagram immediately reflects manual "Keep" decisions and never
+            // shows stale long-sentence labels left over from earlier runs.
+            const exclusionBd = s.results
+              ? bucketAbstractExclusions(s.results, s.abstractOverrides)
+              : s.prisma.exclusion_breakdown;
+            const ftExclusionBd = s.fullTextResults
+              ? bucketFullTextExclusions(s.fullTextResults, s.fullTextOverrides)
+              : s.prisma.ft_exclusion_breakdown;
+            // Final-include count honours full-text overrides (if any), else
+            // abstract overrides, else falls back to whatever the screener
+            // saved in prisma.included_final.
+            const finalCount = s.fullTextResults
+              ? s.fullTextResults.filter(r => (s.fullTextOverrides[r.paper_id] ?? r.Decision) === "Include").length
+              : (s.results
+                  ? s.results.filter(r => (s.abstractOverrides[r.paper_id] ?? r.Decision) === "INCLUDE").length
+                  : s.prisma.included_final);
+            return (
+              <PrismaFlow
+                counts={{
+                  ...s.prisma,
+                  exclusion_breakdown: exclusionBd,
+                  ft_exclusion_breakdown: ftExclusionBd,
+                  included_final: finalCount,
+                }}
+              />
+            );
+          })()}
           {s.page === "meta" && <MetaAnalysisPage />}
         </div>
       </main>
