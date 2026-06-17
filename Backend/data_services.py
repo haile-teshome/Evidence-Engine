@@ -538,6 +538,156 @@ class DOAJService:
             return []
 
 
+def _elsevier_headers(oauth_token: str = "") -> dict:
+    """Build Elsevier auth headers.
+
+    Priority:
+      1. Per-user OAuth 2.0 Bearer token (from the one-click institutional SSO flow).
+      2. Static API key + optional institutional token from .env (Mode B fallback).
+      3. Empty dict → service returns [] silently.
+    """
+    if oauth_token:
+        return {"Authorization": f"Bearer {oauth_token}", "Accept": "application/json"}
+    key = Config.ELSEVIER_API_KEY
+    token = Config.ELSEVIER_INST_TOKEN
+    if not key:
+        return {}
+    h = {"X-ELS-APIKey": key, "Accept": "application/json"}
+    if token:
+        h["X-ELS-Insttoken"] = token
+    return h
+
+
+def _clean_for_elsevier(query: str) -> str:
+    """Strip PubMed/MeSH field tags and normalise whitespace for Elsevier queries."""
+    clean = re.sub(r"\[[^\]]+\]", "", query)
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean or query
+
+
+class ScopusService:
+    """Elsevier Scopus API — requires institutional subscription (e.g. UCSF).
+    API key + optional institutional token set via ELSEVIER_API_KEY / ELSEVIER_INST_TOKEN.
+    Docs: https://dev.elsevier.com/documentation/ScopusSearchAPI.wadl
+    """
+
+    BASE_URL = "https://api.elsevier.com/content/search/scopus"
+
+    @staticmethod
+    def fetch(query: str, max_results: int, oauth_token: str = "") -> List[Paper]:
+        headers = _elsevier_headers(oauth_token)
+        if not headers:
+            print("Scopus: no credentials — set ELSEVIER_OAUTH_CLIENT_ID or ELSEVIER_API_KEY")
+            return []
+        clean = _clean_for_elsevier(query)
+        scopus_query = f"TITLE-ABS-KEY({clean})"
+        params = {
+            "query": scopus_query,
+            "count": min(max_results, 200),
+            "field": "dc:title,dc:description,prism:doi,dc:identifier,prism:url,prism:coverDate,dc:creator",
+        }
+        try:
+            resp = throttled_request(ScopusService.BASE_URL, params=params, headers=headers)
+            if resp.status_code == 401:
+                print("Scopus: 401 Unauthorized — token may have expired or lack Scopus entitlement")
+                return []
+            data = resp.json()
+            entries = (data.get("search-results") or {}).get("entry", []) or []
+            papers: List[Paper] = []
+            for e in entries:
+                doi = (e.get("prism:doi") or "").strip()
+                uid = e.get("dc:identifier", "") or doi or ""
+                url = e.get("prism:url") or (f"https://doi.org/{doi}" if doi else "")
+                abstract = (e.get("dc:description") or "").strip()
+                papers.append(Paper(
+                    source=DataSource.SCOPUS.value,
+                    id=uid,
+                    title=(e.get("dc:title") or "").strip(),
+                    abstract=abstract,
+                    url=url,
+                ))
+            return papers[:max_results]
+        except Exception as e:
+            print(f"Scopus fetch error: {e}")
+            return []
+
+    @staticmethod
+    def count(query: str, oauth_token: str = "") -> int:
+        headers = _elsevier_headers(oauth_token)
+        if not headers:
+            return 0
+        clean = _clean_for_elsevier(query)
+        params = {"query": f"TITLE-ABS-KEY({clean})", "count": 1, "field": "dc:identifier"}
+        try:
+            resp = throttled_request(ScopusService.BASE_URL, params=params, headers=headers)
+            total = (resp.json().get("search-results") or {}).get("opensearch:totalResults", "0")
+            return int(total) if str(total).isdigit() else 0
+        except Exception as e:
+            print(f"Scopus count error: {e}")
+            return 0
+
+
+class EmbaseService:
+    """Elsevier Embase API — requires institutional subscription (e.g. UCSF).
+    Same auth mechanism as Scopus: ELSEVIER_API_KEY + ELSEVIER_INST_TOKEN.
+    Docs: https://dev.elsevier.com/documentation/EmbaseSearchAPI.wadl
+    """
+
+    BASE_URL = "https://api.elsevier.com/content/search/embase"
+
+    @staticmethod
+    def fetch(query: str, max_results: int, oauth_token: str = "") -> List[Paper]:
+        headers = _elsevier_headers(oauth_token)
+        if not headers:
+            print("Embase: no credentials — set ELSEVIER_OAUTH_CLIENT_ID or ELSEVIER_API_KEY")
+            return []
+        clean = _clean_for_elsevier(query)
+        params = {
+            "query": clean,
+            "count": min(max_results, 200),
+            "field": "dc:title,dc:description,prism:doi,dc:identifier,prism:url,prism:coverDate,dc:creator",
+        }
+        try:
+            resp = throttled_request(EmbaseService.BASE_URL, params=params, headers=headers)
+            if resp.status_code == 401:
+                print("Embase: 401 Unauthorized — token may have expired or lack Embase entitlement")
+                return []
+            data = resp.json()
+            entries = (data.get("search-results") or {}).get("entry", []) or []
+            papers: List[Paper] = []
+            for e in entries:
+                doi = (e.get("prism:doi") or "").strip()
+                uid = e.get("dc:identifier", "") or doi or ""
+                url = e.get("prism:url") or (f"https://doi.org/{doi}" if doi else "")
+                abstract = (e.get("dc:description") or "").strip()
+                papers.append(Paper(
+                    source=DataSource.EMBASE.value,
+                    id=uid,
+                    title=(e.get("dc:title") or "").strip(),
+                    abstract=abstract,
+                    url=url,
+                ))
+            return papers[:max_results]
+        except Exception as e:
+            print(f"Embase fetch error: {e}")
+            return []
+
+    @staticmethod
+    def count(query: str, oauth_token: str = "") -> int:
+        headers = _elsevier_headers(oauth_token)
+        if not headers:
+            return 0
+        clean = _clean_for_elsevier(query)
+        params = {"query": clean, "count": 1, "field": "dc:identifier"}
+        try:
+            resp = throttled_request(EmbaseService.BASE_URL, params=params, headers=headers)
+            total = (resp.json().get("search-results") or {}).get("opensearch:totalResults", "0")
+            return int(total) if str(total).isdigit() else 0
+        except Exception as e:
+            print(f"Embase count error: {e}")
+            return 0
+
+
 class DataAggregator:
     """Aggregates data from all active sources while respecting rate limits."""
 
@@ -552,56 +702,56 @@ class DataAggregator:
         "CrossRef": CrossRefService.fetch,
         "DOAJ": DOAJService.fetch,
         "CORE": COREService.fetch,
+        DataSource.SCOPUS.value: ScopusService.fetch,
+        DataSource.EMBASE.value: EmbaseService.fetch,
     }
     
     @staticmethod
-    def fetch_all(query: str, active_sources: List[str], max_per_source: int = 10, uploaded_files=None, limit: int = None):
+    def fetch_all(query: str, active_sources: List[str], max_per_source: int = 10, uploaded_files=None, limit: int = None, elsevier_token: str = ""):
         """
-        Aggregates raw data from all active sources. 
+        Aggregates raw data from all active sources.
         Deduplication is removed to ensure PRISMA counts accurately reflect total records.
         """
         all_papers = []
-        source_counts = {} 
-        
+        source_counts = {}
+
         search_count = limit if limit is not None else max_per_source
-        
+
         for source in active_sources:
             papers = []
-            # Status text placeholder - only show errors, not searching messages
             status_text = st.empty()
-            
+
             try:
-                # 1. Handle local files
                 if source == DataSource.LOCAL_PDF.value:
                     if uploaded_files:
-                        from data_services import PDFService
                         papers = PDFService.process_files(uploaded_files)
-                
-                # 2. Handle API-based sources (PubMed, ArXiv, Semantic Scholar, CORE, etc.)
+
+                elif source == DataSource.SCOPUS.value:
+                    papers = ScopusService.fetch(query, search_count, oauth_token=elsevier_token)
+
+                elif source == DataSource.EMBASE.value:
+                    papers = EmbaseService.fetch(query, search_count, oauth_token=elsevier_token)
+
                 elif source in DataAggregator.SERVICE_MAP:
                     fetch_func = DataAggregator.SERVICE_MAP[source]
                     papers = fetch_func(query, search_count)
-                
-                # 3. Track RAW counts per source and update UI
+
                 count = len(papers)
                 all_papers.extend(papers)
                 source_counts[source] = count
-                
-                # Status updates removed - now handled by optimization progress callback
 
             except Exception as e:
-                # Catch failures so one source doesn't break the entire search
                 status_text.write(f"❌ {source}: Error occurred")
                 st.error(f"Error fetching from {source}: {str(e)}")
                 source_counts[source] = 0
 
         if limit is not None:
             return all_papers[:limit], source_counts
-            
+
         return all_papers, source_counts
 
     @staticmethod
-    def simulate_yield(query: str, active_sources: List[str]) -> Dict[str, int]:
+    def simulate_yield(query: str, active_sources: List[str], elsevier_token: str = "") -> Dict[str, int]:
         """
         Returns the absolute total of papers matching the query in each database 
         without downloading full records.
@@ -807,7 +957,23 @@ class DataAggregator:
                     except Exception as e:
                         print(f"Local PDFs error for {source}: {e}")
                         results[source] = 0
-                        
+
+                # 7. Scopus (Elsevier institutional API)
+                elif source == DataSource.SCOPUS.value:
+                    try:
+                        results[source] = ScopusService.count(query, oauth_token=elsevier_token)
+                    except Exception as e:
+                        print(f"Scopus count error: {e}")
+                        results[source] = 0
+
+                # 8. Embase (Elsevier institutional API)
+                elif source == DataSource.EMBASE.value:
+                    try:
+                        results[source] = EmbaseService.count(query, oauth_token=elsevier_token)
+                    except Exception as e:
+                        print(f"Embase count error: {e}")
+                        results[source] = 0
+
                 else:
                     print(f"Unknown source: {source}")
                     results[source] = 0

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useStore } from "../lib/store";
 import {
   DataAggregator, Deduplicator, QualityService,
@@ -9,7 +9,6 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Checkbox } from "../components/ui/checkbox";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
@@ -123,7 +122,7 @@ export function QualityPage() {
     s.updateTask("quality-assess", { detail: "Fetching papers from databases…" });
     const signal = abort.signal;
     try {
-      const { papers: all } = await DataAggregator.fetchAll(s.query, s.sources, s.pico, s.numPerSource, signal);
+      const { papers: all } = await DataAggregator.fetchAll(s.query, s.sources, s.pico, s.numPerSource, signal, s.elsevierToken, s.ezproxyConnected);
       if (signal.aborted) { s.updateTask("quality-assess", { status: "canceled" }); return; }
       s.setRawPapers(all);
 
@@ -297,8 +296,6 @@ export function QualityPage() {
             )}
           </Card>
 
-          <CorpusHeatmap reports={reports} overrides={overrides} excluded={s.excludedByQuality} />
-
           <Card className="p-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-medium">Risk-of-bias appraisal</h3>
@@ -307,113 +304,40 @@ export function QualityPage() {
               </div>
             </div>
             <div className="rounded-md border">
-              <Table>
+              <Table className="table-fixed w-full">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-12">Keep</TableHead>
-                    <TableHead>Paper</TableHead>
-                    <TableHead className="hidden md:table-cell">Design</TableHead>
-                    <TableHead className="hidden md:table-cell">Rubric</TableHead>
-                    <TableHead>Overall RoB</TableHead>
-                    <TableHead>Domains</TableHead>
+                    <TableHead className="w-auto">Paper</TableHead>
+                    <TableHead className="hidden md:table-cell w-[180px]">Design</TableHead>
+                    <TableHead className="hidden md:table-cell w-[110px]">Rubric</TableHead>
+                    <TableHead className="w-[130px]">Overall RoB</TableHead>
+                    <TableHead className="w-[120px]">Domains</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {reports.map(r => {
-                    const excluded = s.excludedByQuality.has(r.paper_id);
-                    const overall = recomputeOverall(r, overrides);
-                    const paperOverrides = overrides.filter(o => o.paper_id === r.paper_id);
-                    return (
-                      <TableRow key={r.paper_id} className={excluded ? "opacity-50" : ""}>
-                        <TableCell>
-                          <Checkbox
-                            checked={!excluded}
-                            onCheckedChange={() => toggleExclude(r.paper_id)}
-                          />
-                        </TableCell>
-                        <TableCell className="max-w-md">
-                          <Collapsible>
-                            <CollapsibleTrigger asChild>
-                              <button className="text-left w-full hover:underline flex items-start gap-1">
-                                <ChevronDown className="size-4 mt-0.5 shrink-0" />
-                                <span>{r.title}</span>
-                              </button>
-                            </CollapsibleTrigger>
-                            <CollapsibleContent className="pt-3 space-y-3">
-                              <div className="flex flex-wrap items-center gap-2 text-xs">
-                                {r.url && (
-                                  <a href={r.url} target="_blank" rel="noreferrer"
-                                     className="text-primary hover:underline">{r.url}</a>
-                                )}
-                                <Badge variant="outline">{r.source}</Badge>
-                                <Badge variant="outline" className="md:hidden">{r.study_design}</Badge>
-                                <Badge variant="outline" className="md:hidden">{r.rubric}</Badge>
-                                {!r.used_full_text && (
-                                  <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
-                                    Abstract only
-                                  </Badge>
-                                )}
-                              </div>
-                              <DomainList
-                                report={r}
-                                overrides={overrides}
-                                onOverride={(o) => {
-                                  s.addQualityOverride(o);
-                                  toast.success(`Override saved for ${o.domain_id}`);
-                                  // Re-apply exclusion rule so the row's
-                                  // include/exclude reflects the new judgment.
-                                  applyExcludeRule(excludeRule);
-                                }}
-                              />
-                              <div className="text-xs text-muted-foreground italic">
-                                Overall: <span className="not-italic font-medium">{overall.judgment}</span>
-                                {" — "}{overall.rationale}
-                              </div>
-                              {paperOverrides.length > 0 && (
-                                <AuditLogPanel
-                                  paperOverrides={paperOverrides}
-                                  report={r}
-                                  onRevert={(domainId) => {
-                                    // Drop only this domain's overrides; keep
-                                    // overrides on other domains intact.
-                                    s.setQualityOverrides(
-                                      overrides.filter(o => !(o.paper_id === r.paper_id && o.domain_id === domainId)),
-                                    );
-                                    toast.info(`Reverted ${domainId} to AI judgment.`);
-                                    applyExcludeRule(excludeRule);
-                                  }}
-                                />
-                              )}
-                            </CollapsibleContent>
-                          </Collapsible>
-                        </TableCell>
-                        <TableCell className="hidden md:table-cell text-xs">
-                          <Badge variant="outline">{r.study_design || "Other"}</Badge>
-                        </TableCell>
-                        <TableCell className="hidden md:table-cell text-xs">
-                          <Badge variant="outline">{r.rubric}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <OverallBadge judgment={overall.judgment} />
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex gap-0.5">
-                            {r.domains.map(d => {
-                              const j = effectiveJudgment(r.paper_id, d, overrides);
-                              const overridden = !!latestOverride(r.paper_id, d.id, overrides);
-                              return (
-                                <span
-                                  key={d.id}
-                                  title={`${d.name}: ${j}${overridden ? " (reviewer-edited)" : ""}`}
-                                  className={`inline-block size-2.5 ${overridden ? "rounded-full ring-1 ring-foreground/40" : "rounded-sm"} ${judgmentDotClass(j)}`}
-                                />
-                              );
-                            })}
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
+                  {reports.map(r => (
+                    <PaperRow
+                      key={r.paper_id}
+                      report={r}
+                      excluded={s.excludedByQuality.has(r.paper_id)}
+                      overrides={overrides}
+                      paperOverrides={overrides.filter(o => o.paper_id === r.paper_id)}
+                      onToggleExclude={() => toggleExclude(r.paper_id)}
+                      onOverride={(o) => {
+                        s.addQualityOverride(o);
+                        toast.success(`Override saved for ${o.domain_id}`);
+                        applyExcludeRule(excludeRule);
+                      }}
+                      onRevertDomain={(domainId) => {
+                        s.setQualityOverrides(
+                          overrides.filter(o => !(o.paper_id === r.paper_id && o.domain_id === domainId)),
+                        );
+                        toast.info(`Reverted ${domainId} to AI judgment.`);
+                        applyExcludeRule(excludeRule);
+                      }}
+                    />
+                  ))}
                 </TableBody>
               </Table>
             </div>
@@ -432,6 +356,114 @@ export function QualityPage() {
 }
 
 // ---- helpers / sub-components --------------------------------------------
+
+function PaperRow({
+  report,
+  excluded,
+  overrides,
+  paperOverrides,
+  onToggleExclude,
+  onOverride,
+  onRevertDomain,
+}: {
+  report: QualityReport;
+  excluded: boolean;
+  overrides: QualityOverride[];
+  paperOverrides: QualityOverride[];
+  onToggleExclude: () => void;
+  onOverride: (o: QualityOverride) => void;
+  onRevertDomain: (domainId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const overall = recomputeOverall(report, overrides);
+  const rowCls = excluded ? "opacity-50" : "";
+
+  return (
+    <Fragment>
+      <TableRow className={`${rowCls} ${open ? "border-b-0" : ""}`}>
+        <TableCell className="align-top py-3">
+          <Checkbox checked={!excluded} onCheckedChange={onToggleExclude} />
+        </TableCell>
+        <TableCell className="align-top py-3">
+          <button
+            onClick={() => setOpen(o => !o)}
+            className="text-left w-full hover:underline flex items-start gap-1"
+          >
+            <ChevronDown
+              className={`size-4 mt-0.5 shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
+            />
+            <span>{report.title}</span>
+          </button>
+        </TableCell>
+        <TableCell className="hidden md:table-cell text-xs align-top py-3">
+          <Badge
+            variant="outline"
+            className="whitespace-normal break-words leading-snug py-0.5 text-[11px] w-full justify-start"
+            title={report.study_design || "Other"}
+          >
+            {report.study_design || "Other"}
+          </Badge>
+        </TableCell>
+        <TableCell className="hidden md:table-cell text-xs align-top py-3">
+          <Badge variant="outline" className="whitespace-nowrap">{report.rubric}</Badge>
+        </TableCell>
+        <TableCell className="align-top py-3">
+          <OverallBadge judgment={overall.judgment} />
+        </TableCell>
+        <TableCell className="align-top py-3">
+          <div className="flex gap-0.5 flex-wrap">
+            {report.domains.map(d => {
+              const j = effectiveJudgment(report.paper_id, d, overrides);
+              const overridden = !!latestOverride(report.paper_id, d.id, overrides);
+              return (
+                <span
+                  key={d.id}
+                  title={`${d.name}: ${j}${overridden ? " (reviewer-edited)" : ""}`}
+                  className={`inline-block size-2.5 ${overridden ? "rounded-full ring-1 ring-foreground/40" : "rounded-sm"} ${judgmentDotClass(j)}`}
+                />
+              );
+            })}
+          </div>
+        </TableCell>
+      </TableRow>
+      {open && (
+        <TableRow className={rowCls}>
+          <TableCell colSpan={6} className="bg-muted/20 align-top py-4 px-4">
+            <div className="space-y-3">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                {report.url && (
+                  <a href={report.url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                    {report.url}
+                  </a>
+                )}
+                <Badge variant="outline">{report.source}</Badge>
+                <Badge variant="outline" className="md:hidden">{report.study_design}</Badge>
+                <Badge variant="outline" className="md:hidden">{report.rubric}</Badge>
+                {!report.used_full_text && (
+                  <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
+                    Abstract only
+                  </Badge>
+                )}
+              </div>
+              <DomainList report={report} overrides={overrides} onOverride={onOverride} />
+              <div className="text-xs text-muted-foreground italic">
+                Overall: <span className="not-italic font-medium">{overall.judgment}</span>
+                {" — "}{overall.rationale}
+              </div>
+              {paperOverrides.length > 0 && (
+                <AuditLogPanel
+                  paperOverrides={paperOverrides}
+                  report={report}
+                  onRevert={onRevertDomain}
+                />
+              )}
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+    </Fragment>
+  );
+}
 
 function Stat({ label, value, variant, icon }: {
   label: string; value: any; variant?: "success" | "warn" | "info"; icon?: React.ReactNode;
@@ -693,102 +725,3 @@ function AuditLogPanel({
   );
 }
 
-function CorpusHeatmap({
-  reports,
-  overrides,
-  excluded,
-}: {
-  reports: QualityReport[];
-  overrides: QualityOverride[];
-  excluded: Set<string>;
-}) {
-  if (reports.length === 0) return null;
-
-  const columns: { id: string; name: string }[] = [];
-  const seen = new Set<string>();
-  for (const r of reports) {
-    for (const d of r.domains) {
-      const key = `${r.rubric}::${d.id}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        columns.push({ id: key, name: d.name });
-      }
-    }
-  }
-  const judgmentFor = (paperId: string, columnKey: string): { j: RoBJudgment; overridden: boolean } => {
-    const r = reports.find(x => x.paper_id === paperId);
-    if (!r) return { j: "Not applicable", overridden: false };
-    const [rubric, did] = columnKey.split("::");
-    if (r.rubric !== rubric) return { j: "Not applicable", overridden: false };
-    const d = r.domains.find(x => x.id === did);
-    if (!d) return { j: "No information", overridden: false };
-    const j = effectiveJudgment(r.paper_id, d, overrides);
-    const overridden = !!latestOverride(r.paper_id, d.id, overrides);
-    return { j, overridden };
-  };
-
-  return (
-    <Card className="p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="font-medium">Domain heatmap</h3>
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <Swatch className={judgmentDotClass("Low")} label="Low" />
-          <Swatch className={judgmentDotClass("Some Concerns")} label="Some Concerns" />
-          <Swatch className={judgmentDotClass("High")} label="High" />
-          <Swatch className={judgmentDotClass("No information")} label="No info" />
-          <span className="inline-flex items-center gap-1">
-            <span className="inline-block size-3 rounded-full ring-1 ring-foreground/40 bg-emerald-500" /> overridden
-          </span>
-        </div>
-      </div>
-      <div className="overflow-x-auto">
-        <table className="min-w-full text-xs">
-          <thead>
-            <tr>
-              <th className="text-left px-2 py-1 sticky left-0 bg-card">Paper</th>
-              {columns.map(c => (
-                <th key={c.id} className="px-1 py-1 align-bottom">
-                  <div
-                    className="inline-block whitespace-nowrap text-left text-muted-foreground"
-                    style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", height: 120 }}
-                    title={c.name}
-                  >
-                    {shortDomainLabel(c.name)}
-                  </div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {reports.map(r => (
-              <tr key={r.paper_id} className={excluded.has(r.paper_id) ? "opacity-40" : ""}>
-                <td className="px-2 py-1 sticky left-0 bg-card max-w-[280px] truncate" title={r.title}>
-                  {r.title}
-                </td>
-                {columns.map(c => {
-                  const { j, overridden } = judgmentFor(r.paper_id, c.id);
-                  return (
-                    <td key={c.id} className="px-1 py-1 text-center">
-                      <span
-                        className={`inline-block size-3 ${overridden ? "rounded-full ring-1 ring-foreground/40" : "rounded-sm"} ${judgmentDotClass(j)}`}
-                        title={`${c.name}: ${j}${overridden ? " (reviewer-edited)" : ""}`}
-                      />
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  );
-}
-
-function Swatch({ className, label }: { className: string; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-1">
-      <span className={`inline-block size-3 rounded-sm ${className}`} /> {label}
-    </span>
-  );
-}

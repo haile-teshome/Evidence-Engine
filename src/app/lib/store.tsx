@@ -2,10 +2,58 @@ import { createContext, useContext, useEffect, useState, ReactNode } from "react
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride } from "./mockServices";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method } from "./apiClient";
 
-export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta";
+export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta" | "projects" | "writing";
 
-export type FullTextRecord = { paper_id: string; title: string; url: string; source: string; status: "found" | "missing" | "pending"; text?: string; reason?: string };
-export type TextExtractionResult = { paper_id: string; title: string; query: string; summary: string; spans: { start: number; end: number; label?: string }[]; values: { field: string; value: string; quote?: string }[] };
+export type SimulationRun = {
+  id: string;
+  timestamp: number;
+  label: string;
+  unifiedQuery: string;
+  perDbQueries: Record<string, string>;
+  counts: Record<string, number>;
+  totalYield: number;
+  source: "manual" | "ai-optimize";
+};
+
+export type FullTextRecord = {
+  paper_id: string;
+  title: string;
+  url: string;
+  source: string;                       // paper's originating database
+  status: "found" | "missing" | "pending";
+  text?: string;
+  reason?: string;
+  /** Where the full text was retrieved from on this fetch: e.g.
+   *  "Europe PMC (XML)", "PMC PDF (PMC1234567)", "Unpaywall PDF (nature.com)",
+   *  "arXiv PDF (2304.12345)", "HTML scrape (publisher.com)". Different from
+   *  `source` (which is the paper's database). */
+  retrieved_via?: string;
+};
+export type TextEvidenceItem = {
+  quote: string;
+  why?: string;
+  section?: string;
+  start: number;
+  end: number;
+};
+export type TextExtractedValue = {
+  field: string;
+  value: string;
+  quote?: string;
+  section?: string;
+  start?: number;
+  end?: number;
+};
+export type TextExtractionResult = {
+  paper_id: string;
+  title: string;
+  query: string;
+  answer?: string;                                        // synthesised natural-language answer
+  summary: string;                                        // back-compat alias for answer
+  evidence?: TextEvidenceItem[];                          // new structured evidence list
+  spans: { start: number; end: number; label?: string }[]; // legacy spans (for back-compat with renderHighlighted)
+  values: TextExtractedValue[];
+};
 
 export type HistoryEntry = {
   goal: string;
@@ -80,6 +128,9 @@ type Ctx = {
   agenticTrace: any[] | null; setAgenticTrace: (v: any[] | null) => void;
   agenticSummary: { iterations_run: number; total_papers_found: number; best_relevance: number } | null;
   setAgenticSummary: (v: { iterations_run: number; total_papers_found: number; best_relevance: number } | null) => void;
+  simulationRuns: SimulationRun[];
+  addSimulationRun: (run: Omit<SimulationRun, "id" | "timestamp" | "label">) => void;
+  clearSimulationRuns: () => void;
 
   // Quality Assessment
   rawPapers: Paper[] | null; setRawPapers: (v: Paper[] | null) => void;
@@ -147,12 +198,34 @@ type Ctx = {
   // PRISMA
   prisma: PrismaCounts; setPrisma: React.Dispatch<React.SetStateAction<PrismaCounts>>;
 
+  // Elsevier institutional access.
+  // EZProxy mode (primary — no registration needed): after the user clicks
+  // "Connect via UCSF" and completes MyAccess, the browser holds a live
+  // proxy.library.ucsf.edu session cookie.  The frontend fetches Embase/
+  // Scopus directly through the proxied URL and merges with backend results.
+  ezproxyConnected: boolean; setEzproxyConnected: (v: boolean) => void;
+  // OAuth mode (optional upgrade): set when ELSEVIER_OAUTH_CLIENT_ID is
+  // configured and the user completes the OAuth popup flow.
+  elsevierToken: string; setElsevierToken: (v: string) => void;
+
   // Session persistence
   currentSessionId: string | null; setCurrentSessionId: (v: string | null) => void;
   currentSessionTitle: string; setCurrentSessionTitle: (v: string) => void;
   snapshot: () => any;
   hydrate: (data: any) => void;
   reset: () => void;
+
+  // Multi-reviewer project context. When `currentProjectId` is set the
+  // platform is in "project mode": screening writes flow through the project
+  // API (multi-reviewer aware), the PRISMA flow honours adjudicated decisions,
+  // and blinding is enforced server-side. When null we are in legacy single-
+  // user mode.
+  currentProjectId: string | null; setCurrentProjectId: (v: string | null) => void;
+  currentProjectName: string; setCurrentProjectName: (v: string) => void;
+  currentProjectRole: "lead" | "reviewer" | "adjudicator" | "viewer" | null;
+  setCurrentProjectRole: (v: "lead" | "reviewer" | "adjudicator" | "viewer" | null) => void;
+  currentProjectMode: "single" | "dual" | "dual_blinded" | null;
+  setCurrentProjectMode: (v: "single" | "dual" | "dual_blinded" | null) => void;
 
   // Long-running tasks (survive page changes)
   tasks: Record<string, TaskRecord>;
@@ -200,6 +273,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [dbTestResults, setDbTestResults] = useState<Record<string, { query: string; total_found: number; papers: { title: string; url: string }[] }> | null>(null);
   const [agenticTrace, setAgenticTrace] = useState<any[] | null>(null);
   const [agenticSummary, setAgenticSummary] = useState<{ iterations_run: number; total_papers_found: number; best_relevance: number } | null>(null);
+  const [simulationRuns, setSimulationRuns] = useState<SimulationRun[]>([]);
+  const addSimulationRun = (run: Omit<SimulationRun, "id" | "timestamp" | "label">) => {
+    setSimulationRuns(prev => {
+      const next = [...prev, {
+        ...run,
+        id: crypto.randomUUID(),
+        timestamp: Date.now(),
+        label: `Run ${prev.length + 1}`,
+      }].slice(-20); // keep last 20
+      return next;
+    });
+  };
+  const clearSimulationRuns = () => setSimulationRuns([]);
 
   const [rawPapers, setRawPapers] = useState<Paper[] | null>(null);
   const [uniquePapers, setUniquePapers] = useState<Paper[] | null>(null);
@@ -275,6 +361,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [currentSessionTitle, setCurrentSessionTitle] = useState<string>("Untitled session");
+
+  const [ezproxyConnected, setEzproxyConnected] = useState(false);
+  const [elsevierToken, setElsevierToken] = useState("");
+
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
+  const [currentProjectName, setCurrentProjectName] = useState<string>("");
+  const [currentProjectRole, setCurrentProjectRole] = useState<"lead" | "reviewer" | "adjudicator" | "viewer" | null>(null);
+  const [currentProjectMode, setCurrentProjectMode] = useState<"single" | "dual" | "dual_blinded" | null>(null);
 
   const [tasks, setTasks] = useState<Record<string, TaskRecord>>({});
 
@@ -391,7 +485,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setSnowballResults(null); setSnowballScreened(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
     setPrisma({ identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0, excluded_total: 0, exclusion_breakdown: {}, included_final: 0 });
-    setCurrentSessionId(null); setCurrentSessionTitle("Untitled session"); setPage("home");
+    setCurrentSessionId(null); setCurrentSessionTitle("Untitled session");
+    setCurrentProjectId(null); setCurrentProjectName(""); setCurrentProjectRole(null); setCurrentProjectMode(null);
+    setPage("home");
   };
 
   const value: Ctx = {
@@ -399,6 +495,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     history, setHistory, pico, setPico, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
     unifiedSearchQuery, setUnifiedSearchQuery, perDbQueries, setPerDbQueries, simulation, setSimulation,
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
+    simulationRuns, addSimulationRun, clearSimulationRuns,
     rawPapers, setRawPapers, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
     qualityReports, setQualityReports, excludedByQuality, setExcludedByQuality,
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
@@ -412,6 +509,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     currentSessionId, setCurrentSessionId, currentSessionTitle, setCurrentSessionTitle,
+    ezproxyConnected, setEzproxyConnected,
+    elsevierToken, setElsevierToken,
+    currentProjectId, setCurrentProjectId,
+    currentProjectName, setCurrentProjectName,
+    currentProjectRole, setCurrentProjectRole,
+    currentProjectMode, setCurrentProjectMode,
     snapshot, hydrate, reset,
     tasks, startTask, updateTask, updateTaskStage, appendTaskLog, cancelTask, clearTask,
   };

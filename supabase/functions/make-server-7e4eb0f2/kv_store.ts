@@ -1,3 +1,7 @@
+// @ts-nocheck — Deno edge function: jsr: specifiers are not resolvable by the
+// project's browser-targeted tsconfig. Supabase compiles this file natively at
+// deploy time.
+
 /* Table schema:
 CREATE TABLE kv_store_7e4eb0f2 (
   key TEXT NOT NULL PRIMARY KEY,
