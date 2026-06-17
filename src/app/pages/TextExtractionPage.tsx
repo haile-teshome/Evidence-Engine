@@ -5,10 +5,10 @@ import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
+import { Input } from "../components/ui/input";
 import { Badge } from "../components/ui/badge";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import {
-  ScanText, Sparkles, ChevronDown, AlertTriangle, Download,
+  ScanText, Sparkles, Search, AlertTriangle, Download,
   MapPin, Quote as QuoteIcon, FileSpreadsheet,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -43,6 +43,8 @@ function sectionBadgeClass(section?: string): string {
 export function TextExtractionPage() {
   const s = useStore();
   const [query, setQuery] = useState(PRESETS[0]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [listQ, setListQ] = useState("");
   const task = s.tasks["text-extract"];
   const running = task?.status === "running";
 
@@ -121,6 +123,11 @@ export function TextExtractionPage() {
     r => (r.evidence?.length ?? r.spans.length) === 0,
   ).length;
 
+  const filtered = listQ.trim()
+    ? s.textExtractions.filter(r => r.title.toLowerCase().includes(listQ.toLowerCase()))
+    : s.textExtractions;
+  const selected = s.textExtractions.find(r => r.paper_id === selectedId) ?? s.textExtractions[0] ?? null;
+
   return (
     <div className="space-y-4">
       {missing.length > 0 && (
@@ -178,10 +185,59 @@ export function TextExtractionPage() {
             <Stat label="No evidence" value={noEvidence} variant={noEvidence > 0 ? "warn" : undefined} />
           </div>
 
-          <div className="space-y-2">
-            {s.textExtractions.map((r) => (
-              <PaperExtractionCard key={r.paper_id} result={r} fullText={s.fullTexts[r.paper_id]?.text || ""} />
-            ))}
+          {/* ── Two-pane: paper list (left) + selected extraction (right) ─── */}
+          <div className="flex gap-4 h-[calc(100vh-26rem)] min-h-[28rem]">
+            {/* LEFT: searchable paper list */}
+            <Card className="w-80 shrink-0 p-0 overflow-hidden flex flex-col">
+              <div className="p-2 border-b">
+                <div className="relative">
+                  <Search className="size-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={listQ}
+                    onChange={e => setListQ(e.target.value)}
+                    placeholder={`Filter ${s.textExtractions.length} papers…`}
+                    className="pl-7 h-8 text-sm"
+                  />
+                </div>
+              </div>
+              <div className="overflow-auto flex-1">
+                {filtered.map((r) => {
+                  const active = r.paper_id === selected?.paper_id;
+                  const evCount = r.evidence?.length ?? r.spans.length;
+                  return (
+                    <button
+                      key={r.paper_id}
+                      onClick={() => setSelectedId(r.paper_id)}
+                      className={`w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <Badge variant={evCount > 0 ? "default" : "secondary"} className="text-[10px]">{evCount} quotes</Badge>
+                        <Badge variant="outline" className="text-[10px]">{r.values.length} values</Badge>
+                      </div>
+                      <div className="text-sm line-clamp-2 leading-snug">{r.title}</div>
+                    </button>
+                  );
+                })}
+                {filtered.length === 0 && (
+                  <div className="p-4 text-sm text-muted-foreground">No papers match “{listQ}”.</div>
+                )}
+              </div>
+            </Card>
+
+            {/* RIGHT: selected paper's extraction */}
+            <Card className="flex-1 min-w-0 p-0 overflow-hidden flex flex-col">
+              {!selected ? (
+                <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+                  Select a paper on the left.
+                </div>
+              ) : (
+                <PaperExtractionDetail
+                  key={selected.paper_id}
+                  result={selected}
+                  fullText={s.fullTexts[selected.paper_id]?.text || ""}
+                />
+              )}
+            </Card>
           </div>
         </>
       )}
@@ -189,7 +245,7 @@ export function TextExtractionPage() {
   );
 }
 
-function PaperExtractionCard({ result, fullText }: { result: TextExtractionResult; fullText: string }) {
+function PaperExtractionDetail({ result, fullText }: { result: TextExtractionResult; fullText: string }) {
   // Evidence may live on the new `evidence[]` field OR fall back to the
   // legacy `spans[]`. Normalise into TextEvidenceItem so the renderer below
   // doesn't have to branch.
@@ -216,23 +272,16 @@ function PaperExtractionCard({ result, fullText }: { result: TextExtractionResul
   }
 
   return (
-    <Collapsible defaultOpen={evidence.length > 0}>
-      <Card>
-        <CollapsibleTrigger asChild>
-          <button className="w-full text-left p-4 flex items-center gap-3 hover:bg-muted/30">
-            <div className="flex-1 min-w-0">
-              <div className="truncate">{result.title}</div>
-              <div className="text-xs text-muted-foreground truncate">
-                {result.answer || result.summary}
-              </div>
-            </div>
-            <Badge variant={evidence.length > 0 ? "default" : "secondary"}>{evidence.length} quotes</Badge>
-            <Badge variant="outline">{result.values.length} values</Badge>
-            <ChevronDown className="size-4 text-muted-foreground shrink-0" />
-          </button>
-        </CollapsibleTrigger>
-        <CollapsibleContent>
-          <div className="px-4 pb-4 space-y-4 border-t pt-4">
+    <>
+      <div className="border-b p-4">
+        <div className="font-medium leading-snug">{result.title}</div>
+        <div className="flex items-center gap-2 mt-2">
+          <Badge variant={evidence.length > 0 ? "default" : "secondary"}>{evidence.length} quotes</Badge>
+          <Badge variant="outline">{result.values.length} values</Badge>
+        </div>
+      </div>
+      <div className="flex-1 overflow-auto">
+        <div className="p-4 space-y-4">
             {/* ANSWER ------------------------------------------------------ */}
             {(result.answer || result.summary) && (
               <div className="bg-primary/5 border border-primary/30 rounded-md p-3">
@@ -342,10 +391,9 @@ function PaperExtractionCard({ result, fullText }: { result: TextExtractionResul
                 </div>
               </>
             )}
-          </div>
-        </CollapsibleContent>
-      </Card>
-    </Collapsible>
+        </div>
+      </div>
+    </>
   );
 }
 
