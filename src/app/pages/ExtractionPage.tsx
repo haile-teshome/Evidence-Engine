@@ -11,7 +11,7 @@ import { Input } from "../components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
-import { Search, Download, Table2, ExternalLink, Maximize2 } from "lucide-react";
+import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import ExcelJS from "exceljs";
@@ -109,12 +109,15 @@ export function ExtractionPage() {
       {/* ── Single compact header: counts + format + run + export ───────────── */}
       <Card className="p-3">
         <div className="flex items-end gap-3 flex-wrap">
-          <div className="mr-auto">
+          <div className="mr-auto min-w-0">
             <h3 className="font-medium leading-tight">Table Extraction</h3>
-            <p className="text-xs text-muted-foreground">
-              {passed.length} included paper{passed.length === 1 ? "" : "s"}
-              {ep && withoutTables > 0 && ` · ${withoutTables} had no extractable tables`}
-            </p>
+            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+              <Pill icon={FileText} title="Included papers available for extraction">{passed.length} included</Pill>
+              {ep && <Pill icon={Table2} tone="green" title="Papers with extractable tables">{withTables} with tables</Pill>}
+              {ep && withoutTables > 0 && (
+                <Pill icon={AlertTriangle} tone="amber" title="No extractable tables — paywalled, no tabular content, or PDF-only">{withoutTables} no tables</Pill>
+              )}
+            </div>
           </div>
           <div>
             <label className="text-xs text-muted-foreground">Output format</label>
@@ -301,6 +304,25 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
 
 function Stat({ label, value }: { label: string; value: any }) {
   return <div className="bg-muted/30 rounded p-2"><div className="font-bold">{value}</div><div className="text-xs text-muted-foreground">{label}</div></div>;
+}
+
+// Compact count pill used in the header summary line.
+function Pill({
+  icon: Icon, children, tone = "default", title,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  children: React.ReactNode;
+  tone?: "default" | "green" | "amber";
+  title?: string;
+}) {
+  const cls = tone === "green" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+    : tone === "amber" ? "bg-amber-50 text-amber-700 border-amber-200"
+    : "bg-muted text-muted-foreground border-transparent";
+  return (
+    <span title={title} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
+      <Icon className="size-3" />{children}
+    </span>
+  );
 }
 function exportTableCsv(paper: { Paper_Title: string }, t: { data: string[][] }, i: number) {
   const csv = t.data.map(row => row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");

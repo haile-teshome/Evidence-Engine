@@ -10,7 +10,8 @@ import { Badge } from "../components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import {
   ScanText, Sparkles, Search, AlertTriangle, Download,
-  MapPin, Quote as QuoteIcon, FileSpreadsheet, Maximize2,
+  MapPin, Quote as QuoteIcon, FileSpreadsheet, Maximize2, ChevronDown,
+  FileText, ListChecks,
 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -41,11 +42,33 @@ function sectionBadgeClass(section?: string): string {
   return SECTION_STYLE[section] || "bg-slate-100 text-slate-700 border-slate-200";
 }
 
+// Compact count pill used in the header summary line.
+function Pill({
+  icon: Icon, children, tone = "default", title,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  children: React.ReactNode;
+  tone?: "default" | "green" | "amber";
+  title?: string;
+}) {
+  const cls = tone === "green" ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+    : tone === "amber" ? "bg-amber-50 text-amber-700 border-amber-200"
+    : "bg-muted text-muted-foreground border-transparent";
+  return (
+    <span title={title} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
+      <Icon className="size-3" />{children}
+    </span>
+  );
+}
+
 export function TextExtractionPage() {
   const s = useStore();
   const [query, setQuery] = useState(PRESETS[0]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [listQ, setListQ] = useState("");
+  // The "Ask in natural language" panel collapses once results exist, so the
+  // two-pane gets the screen. Starts open only when nothing's been run yet.
+  const [askOpen, setAskOpen] = useState(s.textExtractions.length === 0);
   const task = s.tasks["text-extract"];
   const running = task?.status === "running";
 
@@ -104,6 +127,7 @@ export function TextExtractionPage() {
       } else {
         s.updateTask("text-extract", { status: "done" });
         toast.success(`Extracted from ${out.length} papers`);
+        setAskOpen(false);   // collapse the question panel to free up the screen
       }
     } catch (e: any) {
       s.updateTask("text-extract", { status: "error", detail: e?.message });
@@ -134,8 +158,20 @@ export function TextExtractionPage() {
       {/* ── Compact header: question + run + export, with inline counts ─────── */}
       <Card className="p-3 space-y-2">
         <div className="flex items-start justify-between gap-2">
-          <h3 className="font-medium flex items-center gap-2 text-sm shrink-0"><ScanText className="size-4 text-primary" />Ask in natural language</h3>
-          <div className="flex items-center gap-2 flex-wrap justify-end">
+          {s.textExtractions.length > 0 ? (
+            <button
+              onClick={() => setAskOpen(o => !o)}
+              className="flex items-center gap-2 text-sm font-medium min-w-0 hover:text-primary"
+              title={askOpen ? "Collapse question" : "Edit question"}
+            >
+              <ChevronDown className={`size-4 shrink-0 transition-transform ${askOpen ? "" : "-rotate-90"}`} />
+              <ScanText className="size-4 text-primary shrink-0" />
+              {askOpen ? "Ask in natural language" : <span className="truncate text-muted-foreground font-normal">{query}</span>}
+            </button>
+          ) : (
+            <h3 className="font-medium flex items-center gap-2 text-sm shrink-0"><ScanText className="size-4 text-primary" />Ask in natural language</h3>
+          )}
+          <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
             <Button onClick={run} disabled={running} size="sm">
               <Sparkles className="size-4 mr-2" />{running ? "Extracting..." : `Extract from ${acquired.length} papers`}
             </Button>
@@ -151,26 +187,34 @@ export function TextExtractionPage() {
             )}
           </div>
         </div>
-        <Textarea value={query} onChange={e => setQuery(e.target.value)} rows={2}
-          placeholder="e.g. What was the primary outcome and effect size?" />
-        <div className="flex flex-wrap gap-1.5">
-          {PRESETS.map((p, i) => (
-            <Button key={i} size="sm" variant="outline" className="h-7 text-xs" onClick={() => setQuery(p)}>{p}</Button>
-          ))}
-        </div>
-        <div className="text-xs text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
-          {missing.length > 0 && (
-            <span className="text-amber-700">
-              <AlertTriangle className="size-3 inline mr-1" />{missing.length} skipped (no full text)
-            </span>
-          )}
-          {s.textExtractions.length > 0 && (
-            <span>
-              {s.textExtractions.length} papers · {totalEvidence} evidence quotes · {totalValues} values
-              {noEvidence > 0 && <span className="text-amber-700"> · {noEvidence} with no evidence</span>}
-            </span>
-          )}
-        </div>
+        {askOpen && (
+          <>
+            <Textarea value={query} onChange={e => setQuery(e.target.value)} rows={2}
+              placeholder="e.g. What was the primary outcome and effect size?" />
+            <div className="flex flex-wrap gap-1.5">
+              {PRESETS.map((p, i) => (
+                <Button key={i} size="sm" variant="outline" className="h-7 text-xs" onClick={() => setQuery(p)}>{p}</Button>
+              ))}
+            </div>
+          </>
+        )}
+        {(s.textExtractions.length > 0 || missing.length > 0) && (
+          <div className="flex flex-wrap items-center gap-1.5">
+            {s.textExtractions.length > 0 && (
+              <>
+                <Pill icon={FileText} title="Papers processed">{s.textExtractions.length} papers</Pill>
+                <Pill icon={QuoteIcon} tone="green" title="Evidence quotes found">{totalEvidence} quotes</Pill>
+                <Pill icon={ListChecks} tone="green" title="Values extracted">{totalValues} values</Pill>
+                {noEvidence > 0 && (
+                  <Pill icon={AlertTriangle} tone="amber" title="Papers with no matching evidence">{noEvidence} no evidence</Pill>
+                )}
+              </>
+            )}
+            {missing.length > 0 && (
+              <Pill icon={AlertTriangle} tone="amber" title="Skipped — no full text acquired">{missing.length} skipped</Pill>
+            )}
+          </div>
+        )}
       </Card>
 
       {task && task.status === "running" && (
@@ -304,6 +348,7 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
               </div>
             ) : (
               <>
+                <div className={result.values.length > 0 ? "grid lg:grid-cols-2 gap-4 items-start" : ""}>
                 {/* EVIDENCE CARDS -------------------------------------------- */}
                 <div>
                   <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
@@ -350,7 +395,7 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
                     <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
                       Extracted values ({result.values.length})
                     </div>
-                    <div className="grid md:grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 gap-2">
                       {result.values.map((v, i) => (
                         <div
                           key={i}
@@ -381,6 +426,7 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
                     </div>
                   </div>
                 )}
+                </div>
 
                 {/* FULL-TEXT VIEWER WITH LINE NUMBERS ------------------------ */}
                 <div>
