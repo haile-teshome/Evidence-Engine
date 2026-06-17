@@ -50,8 +50,12 @@ benchmark/
 # --- setup.sh runtime state (PIDs + logs of background services) ---
 .runtime/
 
+# --- Supabase CLI local state (regenerated; never committed) ---
+supabase/.temp/
+
 # --- Publication / paper artefacts (kept outside the repo) ---
 paper/
+slides/
 manuscript*.md
 manuscript*.docx
 manuscript*.pdf

@@ -1,13 +1,15 @@
+import { useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
 import { categoriseAbstractExclusion, effectiveAbstractDecision } from "../lib/exclusionBucketing";
+import { ProjectScreeningBar, recordProjectDecision } from "../components/ProjectScreeningBar";
 import { Checkbox } from "../components/ui/checkbox";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { Search, Download } from "lucide-react";
+import { Search, Download, Minus } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -89,7 +91,7 @@ export function AbstractPage() {
             { id: "screen", label: "Screening papers", status: "pending" },
           ],
         });
-        const { papers: all } = await DataAggregator.fetchAll(s.query, s.sources, s.pico, s.numPerSource, signal);
+        const { papers: all } = await DataAggregator.fetchAll(s.query, s.sources, s.pico, s.numPerSource, signal, s.elsevierToken, s.ezproxyConnected);
         if (signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
         const { unique, duplicates } = Deduplicator.run(all);
         // Persist so a later QA run can reuse this set, and so the PRISMA flow
@@ -130,7 +132,7 @@ export function AbstractPage() {
           const r = await AIService.screenPaperMultiAgent(queue[i], s.pico, s.inclusion, s.exclusion, signal);
           screened.push(r);
           if (r.Decision === "EXCLUDE") {
-            const bucket = categoriseAbstractExclusion(r);
+            const bucket = categoriseAbstractExclusion(r, s.inclusion, s.exclusion);
             reasons[bucket] = (reasons[bucket] || 0) + 1;
           }
         } catch (e: any) {
@@ -178,8 +180,17 @@ export function AbstractPage() {
   const excluded = r ? r.filter(x => effectiveAbstractDecision(x, s.abstractOverrides) === "EXCLUDE") : [];
   const overrideCount = r ? r.filter(x => x.Decision !== effectiveAbstractDecision(x, s.abstractOverrides)).length : 0;
 
+  const [projectRefresh, setProjectRefresh] = useState(0);
+
   return (
     <div className="space-y-4">
+      {s.currentProjectId && r && (
+        <ProjectScreeningBar
+          stage="abstract"
+          papers={r.map(x => ({ id: x.paper_id }))}
+          refreshSignal={projectRefresh}
+        />
+      )}
       {!r && !s.uniquePapers && !s.query && (
         <Alert><AlertDescription>Define a research goal on the Home page first.</AlertDescription></Alert>
       )}
@@ -254,12 +265,29 @@ export function AbstractPage() {
                             checked={keep}
                             onCheckedChange={(v) => {
                               const wantKeep = v === true;
-                              // If the new state matches the AI's call, clear
-                              // the override; otherwise record one.
+                              // Local override (always — keeps in-memory state in sync).
                               if ((row.Decision === "INCLUDE") === wantKeep) {
                                 s.clearAbstractOverride(row.paper_id);
                               } else {
                                 s.setAbstractOverride(row.paper_id, wantKeep ? "INCLUDE" : "EXCLUDE");
+                              }
+                              // Project mode: persist as a per-reviewer decision.
+                              // We record an explicit user decision (which doubles
+                              // as an override if it differs from the AI call) so
+                              // the multi-reviewer audit trail captures every
+                              // human action.
+                              if (s.currentProjectId) {
+                                const aiDec = row.Decision === "INCLUDE" ? "include" : "exclude";
+                                recordProjectDecision(s.currentProjectId, {
+                                  paper_id: row.paper_id,
+                                  stage: "abstract",
+                                  decision: wantKeep ? "include" : "exclude",
+                                  reason: row.Reason || "",
+                                  per_pico_verdict: row.Pico_Assessment || null,
+                                  ai_decision: aiDec,
+                                  is_override: aiDec !== (wantKeep ? "include" : "exclude"),
+                                }).then(() => setProjectRefresh(n => n + 1))
+                                  .catch((e: any) => console.error("Project decision write failed:", e?.message));
                               }
                             }}
                             aria-label="Keep this paper"
@@ -275,16 +303,16 @@ export function AbstractPage() {
                         </td>
                         <td className="px-3 py-2"><Badge variant="outline">{row.Source}</Badge></td>
                         <td className="px-3 py-2 text-center">
-                          <PicoCell label="Population" field={pa?.population} />
+                          <PicoCell label="Population" field={pa?.population} criterion={s.pico.population} />
                         </td>
                         <td className="px-3 py-2 text-center">
-                          <PicoCell label="Intervention" field={pa?.intervention} />
+                          <PicoCell label="Intervention" field={pa?.intervention} criterion={s.pico.intervention} />
                         </td>
                         <td className="px-3 py-2 text-center">
-                          <PicoCell label="Comparator" field={pa?.comparator} />
+                          <PicoCell label="Comparator" field={pa?.comparator} criterion={s.pico.comparator} />
                         </td>
                         <td className="px-3 py-2 text-center">
-                          <PicoCell label="Outcome" field={pa?.outcome} />
+                          <PicoCell label="Outcome" field={pa?.outcome} criterion={s.pico.outcome} />
                         </td>
                         <td className="px-3 py-2 text-foreground/90 min-w-[380px] group-hover/row:bg-muted">
                           {row.Reason}
@@ -321,15 +349,18 @@ export function AbstractPage() {
 
 // ---- per-PICO chip with evidence popover ----------------------------------
 //
-// NA cells render as an empty placeholder rather than a chip — NA only occurs
-// when the abstract is genuinely missing for that element, so a faded dash is
-// clearer than the old "?" symbol.
+// NA ("not assessed") renders as a neutral slate chip with a minus glyph and a
+// popover that explains *why* — either the PICO element was left blank in the
+// frame, or the abstract lacked the information needed to judge it. This reads
+// as an intentional state rather than a missing/incomplete value.
 
-function PicoCell({ label, field }: { label: string; field?: PicoFieldAssessment }) {
-  const vote: PicoVote | undefined = field?.vote;
-  if (!field || vote === "NA" || !vote) {
-    return <span className="inline-block text-muted-foreground/40 select-none">—</span>;
-  }
+function PicoCell({ label, field, criterion }: { label: string; field?: PicoFieldAssessment; criterion?: string }) {
+  const vote: PicoVote = field?.vote ?? "NA";
+  const isNA = vote === "NA";
+  const naReason = (field?.reasoning || "").trim()
+    || ((criterion || "").trim()
+      ? `The abstract did not give enough information to judge the ${label.toLowerCase()}.`
+      : `No ${label.toLowerCase()} was specified in your PICO frame, so there is nothing to assess this paper against. Add one on the Home page to enable this check.`);
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -337,7 +368,7 @@ function PicoCell({ label, field }: { label: string; field?: PicoFieldAssessment
           className={`inline-flex items-center justify-center size-6 rounded text-xs font-semibold border ${picoVoteClass(vote)} hover:ring-1 hover:ring-foreground/30`}
           title={`${label}: ${picoVoteFullLabel(vote)}`}
         >
-          {picoVoteShort(vote)}
+          {isNA ? <Minus className="size-3.5" /> : picoVoteShort(vote)}
         </button>
       </PopoverTrigger>
       <PopoverContent className="w-96 text-xs space-y-2" align="end">
@@ -347,13 +378,17 @@ function PicoCell({ label, field }: { label: string; field?: PicoFieldAssessment
             {picoVoteFullLabel(vote)}
           </span>
         </div>
-        {field.reasoning && (
-          <div className="text-foreground/90">{field.reasoning}</div>
-        )}
-        {field.evidence && (
-          <blockquote className="border-l-2 border-primary/30 pl-2 italic text-muted-foreground break-words">
-            "{field.evidence}"
-          </blockquote>
+        {isNA ? (
+          <div className="text-foreground/90">{naReason}</div>
+        ) : (
+          <>
+            {field?.reasoning && <div className="text-foreground/90">{field.reasoning}</div>}
+            {field?.evidence && (
+              <blockquote className="border-l-2 border-primary/30 pl-2 italic text-muted-foreground break-words">
+                "{field.evidence}"
+              </blockquote>
+            )}
+          </>
         )}
       </PopoverContent>
     </Popover>

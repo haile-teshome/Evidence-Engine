@@ -52,7 +52,7 @@ export function FullTextPage() {
           );
           out.push(r);
           if (r.Decision === "Exclude") {
-            const bucket = categoriseFullTextExclusion(r);
+            const bucket = categoriseFullTextExclusion(r, s.inclusion, s.exclusion);
             ftReasons[bucket] = (ftReasons[bucket] || 0) + 1;
           }
         } catch (e: any) {
@@ -192,7 +192,28 @@ export function FullTextPage() {
                       const pe = row.picoEvidence?.[k];
                       const cls = idx === 0 ? "border-l" : idx === 3 ? "border-r" : "";
                       if (!pe || !pe.value) {
-                        return <td key={k} className={`px-3 py-2 ${cls}`}><span className="text-xs text-muted-foreground">—</span></td>;
+                        const naReason = (s.pico[k] || "").trim()
+                          ? `The full text did not provide enough information to judge the ${k}.`
+                          : `No ${k} was specified in your PICO frame, so there is nothing to assess this paper against. Add one on the Home page to enable this check.`;
+                        return (
+                          <td key={k} className={`px-3 py-2 ${cls}`}>
+                            <Popover>
+                              <PopoverTrigger asChild>
+                                <button>
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">
+                                    <Minus className="size-3" />n/a
+                                  </span>
+                                </button>
+                              </PopoverTrigger>
+                              <PopoverContent className="w-80 text-xs space-y-2">
+                                <div>
+                                  <div className="font-medium mb-1 capitalize">{k}</div>
+                                  <div className="text-muted-foreground"><span className="font-medium text-foreground/80">Not assessed.</span> {naReason}</div>
+                                </div>
+                              </PopoverContent>
+                            </Popover>
+                          </td>
+                        );
                       }
                       return (
                         <td key={k} className={`px-3 py-2 ${cls}`}>

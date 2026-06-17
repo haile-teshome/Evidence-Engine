@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { Badge } from "./ui/badge";
-import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2 } from "lucide-react";
+import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, Link, Link2Off, PenLine } from "lucide-react";
 import { ALL_SOURCES } from "../lib/mockServices";
 import { useStore, PageId } from "../lib/store";
 import { SessionsPanel } from "./SessionsPanel";
@@ -41,6 +41,7 @@ function formatModelName(m: string): string {
 const NAV: { id: PageId; label: string; icon: any }[] = [
   { id: "home", label: "Home", icon: Home },
   { id: "simulation", label: "Simulation", icon: BarChart3 },
+  { id: "projects", label: "Projects", icon: Users },
   { id: "quality", label: "Quality Assessment", icon: ShieldCheck },
   { id: "abstract", label: "Abstract Screening", icon: FileSearch },
   { id: "acquisition", label: "Full-Text Acquisition", icon: FileDown },
@@ -48,8 +49,9 @@ const NAV: { id: PageId; label: string; icon: any }[] = [
   { id: "snowball", label: "Citation Snowball", icon: Network },
   { id: "extraction", label: "Table Extraction", icon: Table2 },
   { id: "textextraction", label: "Text Extraction", icon: ScanText },
-  { id: "prisma", label: "PRISMA Flow", icon: GitBranch },
+  { id: "prisma", label: "Diagramming", icon: GitBranch },
   { id: "meta", label: "Meta-analysis", icon: Sigma },
+  { id: "writing", label: "Writing Assistant", icon: PenLine },
 ];
 
 export function Sidebar() {
@@ -95,7 +97,7 @@ export function Sidebar() {
       <div className="p-4">
         <div className="flex items-center gap-2 mb-4">
           <Microscope className="size-5 text-primary" />
-          <span className="font-semibold">Evidence Synthesis</span>
+          <span className="font-semibold">Evidence Engine</span>
         </div>
 
         {/* Active tasks (persists across page navigation) */}
@@ -195,6 +197,53 @@ export function Sidebar() {
               default, and the rerank endpoint auto-detects the natural
               relevance break from the score distribution itself. See
               `_auto_relevance_cutoff` in Backend/api.py. */}
+          {(s.sources.includes("Scopus") || s.sources.includes("Embase")) && (
+            <div className="mt-3 pt-3 border-t">
+              {(s.ezproxyConnected || s.elsevierToken) ? (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-emerald-600 flex items-center gap-1">
+                    <Link className="size-3" />
+                    {s.elsevierToken ? "Elsevier connected" : "UCSF Library connected"}
+                  </span>
+                  <button
+                    className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                    onClick={() => { s.setEzproxyConnected(false); s.setElsevierToken(""); }}
+                    title="Disconnect"
+                  >
+                    <Link2Off className="size-3" />Disconnect
+                  </button>
+                </div>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full text-xs"
+                  onClick={() => {
+                    const backendOrigin = `${window.location.protocol}//${window.location.hostname}:8000`;
+                    const popup = window.open(
+                      `${backendOrigin}/api/auth/ezproxy/start`,
+                      "ucsf_auth",
+                      "width=560,height=680,left=200,top=100",
+                    );
+                    const handler = (e: MessageEvent) => {
+                      if (e.data?.type === "ezproxy_connected") {
+                        window.removeEventListener("message", handler);
+                        s.setEzproxyConnected(true);
+                        popup?.close();
+                      } else if (e.data?.type === "elsevier_oauth") {
+                        window.removeEventListener("message", handler);
+                        if (e.data.token) s.setElsevierToken(e.data.token);
+                        popup?.close();
+                      }
+                    };
+                    window.addEventListener("message", handler);
+                  }}
+                >
+                  <Link className="size-3 mr-1.5" />Connect via UCSF Library
+                </Button>
+              )}
+            </div>
+          )}
         </Card>
 
         <Card className="p-3">

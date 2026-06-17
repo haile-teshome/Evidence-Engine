@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService, DataAggregator } from "../lib/mockServices";
 import type { ClarifyingQuestion } from "../lib/mockServices";
@@ -213,82 +213,113 @@ function scoreBadgeClass(score: number, threshold: number): string {
   return "bg-rose-50 text-rose-700";
 }
 
-// Claude-style multi-question popup, anchored directly above the chat bar
-// (not a centered Dialog). Walks the user through 1-3 clarifying questions one
-// at a time with numbered option chips, a "something else" free-text row, and
-// Back / Skip controls. Returns a flat answers map.
+const PICO_FIELDS = ["population", "intervention", "comparator", "outcome"] as const;
+const PICO_LABEL: Record<string, string> = { population: "P", intervention: "I", comparator: "C", outcome: "O" };
+
+// Conversational PICO clarifier modal. Fetches one question at a time from the
+// backend until all PICO elements are SR-ready, then calls onDone. Each question
+// has exactly 3 specific suggestions + 1 blank fill-in.
 function ClarifyingQuestionsModal({
   open,
-  questions,
-  onCommit,
+  goal,
+  onDone,
   onSkipAll,
 }: {
   open: boolean;
-  questions: ClarifyingQuestion[];
-  onCommit: (answers: Record<string, string>) => void;
+  goal: string;
+  onDone: (answers: Record<string, string>) => void;
   onSkipAll: () => void;
 }) {
-  const [idx, setIdx] = useState(0);
+  const [question, setQuestion] = useState<ClarifyingQuestion | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
+  const [round, setRound] = useState(0);
+  const [loading, setLoading] = useState(false);
   const [freeText, setFreeText] = useState("");
+  const freeRef = useRef<HTMLInputElement>(null);
+
+  const fetchNext = useCallback(async (current: Record<string, string>, r: number) => {
+    setLoading(true);
+    setFreeText("");
+    try {
+      const result = await AIService.getClarifyNext(goal, current, r);
+      if (result.done || !result.question) {
+        onDone(current);
+      } else {
+        setQuestion(result.question);
+      }
+    } catch {
+      onDone(current);
+    } finally {
+      setLoading(false);
+    }
+  }, [goal, onDone]);
 
   useEffect(() => {
-    if (open) {
-      setIdx(0);
+    if (open && goal) {
       setAnswers({});
+      setQuestion(null);
+      setRound(0);
       setFreeText("");
+      fetchNext({}, 0);
     }
-  }, [open]);
-
-  if (!open || questions.length === 0) return null;
-  const q = questions[idx];
-  const isLast = idx >= questions.length - 1;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, goal]);
 
   function pick(value: string) {
-    const next = { ...answers, [q.id]: value };
+    if (!question || loading) return;
+    const next = { ...answers, [question.id]: value };
+    const nextRound = round + 1;
     setAnswers(next);
-    setFreeText("");
-    if (isLast) {
-      onCommit(next);
-    } else {
-      setIdx(idx + 1);
-    }
+    setRound(nextRound);
+    fetchNext(next, nextRound);
   }
 
   function submitFreeText() {
     const v = freeText.trim();
-    if (!v) return;
-    pick(v);
+    if (v) pick(v);
   }
 
-  function skipQ() {
-    if (isLast) {
-      onCommit(answers);
-    } else {
-      setIdx(idx + 1);
-      setFreeText("");
-    }
-  }
+  if (!open) return null;
+
+  const showSpinner = loading || !question;
 
   return (
     <div className="fixed bottom-20 left-72 right-0 z-40 px-6 pointer-events-none">
       <div className="max-w-4xl mx-auto pointer-events-auto">
         <Card className="border-primary/40 shadow-xl bg-card/98 backdrop-blur overflow-hidden">
+
           {/* Header */}
           <div className="flex items-center justify-between gap-3 px-4 pt-3 pb-2">
             <div className="flex items-center gap-2 min-w-0">
               <Lightbulb className="size-4 text-primary shrink-0" />
-              <div className="text-sm font-medium break-words">{q.title}</div>
+              <div className="text-sm font-medium break-words">
+                {showSpinner ? "Checking your PICO elements…" : question!.title}
+              </div>
             </div>
-            <div className="flex items-center gap-3 shrink-0">
-              {questions.length > 1 && (
-                <div className="text-xs text-muted-foreground tabular-nums">
-                  {idx + 1} of {questions.length}
-                </div>
-              )}
+            {/* PICO field progress pills */}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {PICO_FIELDS.map(f => {
+                const done = !!answers[f];
+                const active = !done && question?.id === f;
+                return (
+                  <span
+                    key={f}
+                    className={`text-[10px] font-bold px-1.5 py-0.5 rounded-sm border transition-colors ${
+                      done
+                        ? "bg-emerald-100 text-emerald-700 border-emerald-300"
+                        : active
+                        ? "bg-primary text-primary-foreground border-primary"
+                        : "bg-muted text-muted-foreground border-border"
+                    }`}
+                    title={f}
+                  >
+                    {PICO_LABEL[f]}
+                  </span>
+                );
+              })}
               <button
                 onClick={onSkipAll}
-                className="text-muted-foreground hover:text-foreground"
+                className="ml-1 text-muted-foreground hover:text-foreground"
                 aria-label="Skip all"
               >
                 <X className="size-4" />
@@ -296,58 +327,61 @@ function ClarifyingQuestionsModal({
             </div>
           </div>
 
-          {/* Options */}
-          <div className="px-4 pb-2 space-y-1.5">
-            {q.options.map((opt, i) => (
-              <button
-                key={opt.id}
-                onClick={() => pick(opt.label)}
-                className="w-full text-left px-3 py-2 rounded-md border bg-card hover:bg-accent hover:border-primary/30 transition-colors flex items-center gap-3"
-              >
-                <span className="shrink-0 size-5 rounded-sm border bg-muted text-muted-foreground text-[11px] flex items-center justify-center tabular-nums">
-                  {i + 1}
-                </span>
-                <span className="text-sm flex-1">{opt.label}</span>
-              </button>
-            ))}
-
-            {/* Free-text "Something else" row */}
-            <div className="flex items-center gap-2 mt-1 px-3 py-1.5 rounded-md border border-dashed">
-              <Wand2 className="size-3.5 text-muted-foreground shrink-0" />
-              <Input
-                value={freeText}
-                onChange={(e) => setFreeText(e.target.value)}
-                placeholder="Something else…"
-                className="border-0 bg-transparent shadow-none focus-visible:ring-0 px-0 h-7 text-sm"
-                onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submitFreeText(); } }}
-              />
-              {freeText.trim() && (
-                <Button size="sm" onClick={submitFreeText} className="rounded-full h-7 px-3">
-                  {isLast ? "Done" : "Next"}
-                </Button>
-              )}
+          {/* Body */}
+          {showSpinner ? (
+            <div className="px-4 pb-4 flex items-center gap-2 text-sm text-muted-foreground">
+              <span className="inline-block size-3.5 rounded-full border-2 border-primary border-t-transparent animate-spin shrink-0" />
+              Analysing…
             </div>
-          </div>
+          ) : (
+            <div className="px-4 pb-2 space-y-1.5">
+              {question!.options.slice(0, 3).map((opt, i) => (
+                <button
+                  key={opt.id}
+                  onClick={() => pick(opt.label)}
+                  className="w-full text-left px-3 py-2.5 rounded-md border bg-card hover:bg-accent hover:border-primary/40 transition-colors flex items-center gap-3"
+                >
+                  <span className="shrink-0 size-5 rounded-sm border bg-muted text-muted-foreground text-[11px] flex items-center justify-center tabular-nums font-mono">
+                    {i + 1}
+                  </span>
+                  <span className="text-sm flex-1 leading-snug">{opt.label}</span>
+                </button>
+              ))}
 
-          {/* Footer controls */}
-          <div className="flex items-center justify-between px-4 py-2 border-t bg-muted/30">
+              {/* Blank fill-in */}
+              <div className="flex items-center gap-2 mt-1 px-3 py-1.5 rounded-md border border-dashed bg-muted/20">
+                <Wand2 className="size-3.5 text-muted-foreground shrink-0" />
+                <Input
+                  ref={freeRef}
+                  value={freeText}
+                  onChange={e => setFreeText(e.target.value)}
+                  placeholder="Other: describe your own…"
+                  className="border-0 bg-transparent shadow-none focus-visible:ring-0 px-0 h-7 text-sm"
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); submitFreeText(); } }}
+                />
+                {freeText.trim() && (
+                  <Button size="sm" onClick={submitFreeText} className="rounded-full h-7 px-3 shrink-0">
+                    Use this
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Footer */}
+          <div className="flex items-center justify-end px-4 py-2 border-t bg-muted/30 gap-1">
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setIdx(Math.max(0, idx - 1))}
-              disabled={idx === 0}
-              className="h-7"
+              onClick={() => question && pick("")}
+              disabled={showSpinner}
+              className="h-7 text-muted-foreground"
             >
-              Back
+              Skip this
             </Button>
-            <div className="flex gap-1">
-              <Button variant="ghost" size="sm" onClick={skipQ} className="h-7">
-                Skip
-              </Button>
-              <Button variant="ghost" size="sm" onClick={onSkipAll} className="h-7">
-                Skip all
-              </Button>
-            </div>
+            <Button variant="ghost" size="sm" onClick={onSkipAll} className="h-7 text-muted-foreground">
+              Skip all
+            </Button>
           </div>
         </Card>
       </div>
@@ -469,7 +503,7 @@ export function HomePage() {
   // PICO elements. The resolver ref is wired up inside handleSubmit so the
   // async flow there can await the user's answers.
   const [clarifyOpen, setClarifyOpen] = useState(false);
-  const [clarifyQuestions, setClarifyQuestions] = useState<ClarifyingQuestion[]>([]);
+  const [clarifyGoal, setClarifyGoal] = useState("");
   const clarifyResolverRef = useRef<((answers: Record<string, string>) => void) | null>(null);
 
   function markStage(id: StageId, patch: Partial<Stage>) {
@@ -514,20 +548,17 @@ export function HomePage() {
     let clarifyAnswers: Record<string, string> = {};
     if (!opts.skipClarify) {
       try {
-        const qs = await AIService.getClarifyingQuestions(t);
-        if (qs.length > 0) {
-          clarifyAnswers = await new Promise<Record<string, string>>((resolve) => {
-            setClarifyQuestions(qs);
-            setClarifyOpen(true);
-            clarifyResolverRef.current = (answers) => {
-              setClarifyOpen(false);
-              clarifyResolverRef.current = null;
-              resolve(answers);
-            };
-          });
-        }
+        clarifyAnswers = await new Promise<Record<string, string>>((resolve) => {
+          setClarifyGoal(t);
+          setClarifyOpen(true);
+          clarifyResolverRef.current = (answers) => {
+            setClarifyOpen(false);
+            clarifyResolverRef.current = null;
+            resolve(answers);
+          };
+        });
       } catch (e) {
-        console.warn("[clarify] questions endpoint failed; proceeding without:", e);
+        console.warn("[clarify] failed; proceeding without:", e);
       }
     }
 
@@ -557,7 +588,7 @@ export function HomePage() {
 
       // 2. Fetch a wider sample of papers so the relevance filter has room to pick from.
       const fetched = await runStage("papers", signal, sig =>
-        DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig)
+        DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig, s.elsevierToken, s.ezproxyConnected)
       );
       const papers = fetched?.papers || [];
       if (fetched) {
@@ -822,8 +853,8 @@ export function HomePage() {
           effective goal text. */}
       <ClarifyingQuestionsModal
         open={clarifyOpen}
-        questions={clarifyQuestions}
-        onCommit={(answers) => clarifyResolverRef.current?.(answers)}
+        goal={clarifyGoal}
+        onDone={(answers) => clarifyResolverRef.current?.(answers)}
         onSkipAll={() => clarifyResolverRef.current?.({})}
       />
 

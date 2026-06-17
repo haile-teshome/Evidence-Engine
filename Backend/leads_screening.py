@@ -29,10 +29,12 @@ LEADS_MODEL_NAME = os.getenv(
     "hf.co/mradermacher/leads-mistral-7b-v1-GGUF:latest",
 )
 
-# Sweet-spot threshold from the benchmark (LEADS aggregate score >= +0.20 →
-# INCLUDE). recall=1.000, specificity=0.676, MCC=+0.260, WSS@95=0.61 on
-# van_Dis_2020 (288 stratified papers).
-LEADS_SCORE_THRESHOLD: float = float(os.getenv("LEADS_SCORE_THRESHOLD", "0.20"))
+# Threshold for abstract screening inclusion. +0.20 was the benchmark sweet-spot
+# (recall=1.000, WSS@95=0.61 on van_Dis_2020) but is too strict for general use —
+# abstract screening should be inclusive (err on the side of inclusion; full-text
+# review is the precision gate). 0.0 = include anything net-positive across PICO.
+# Override via LEADS_SCORE_THRESHOLD env var.
+LEADS_SCORE_THRESHOLD: float = float(os.getenv("LEADS_SCORE_THRESHOLD", "0.0"))
 
 
 def is_leads_model(name: str | None) -> bool:

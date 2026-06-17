@@ -38,6 +38,19 @@ export function TaskProgressCard({
       ? Math.round((task.progress.done / task.progress.total) * 100)
       : null;
 
+  // Live ETA from throughput so far: elapsed / items done → time per item,
+  // projected over the remaining items. Recomputes on the 500ms tick above.
+  const done = task.progress?.done ?? 0;
+  const total = task.progress?.total ?? 0;
+  let eta: string | null = null;
+  if (task.status === "running" && total > 0) {
+    if (done > 0 && done < total) {
+      eta = `~${fmt(((Date.now() - task.startedAt) / done) * (total - done))} left`;
+    } else if (done === 0) {
+      eta = "estimating…";
+    }
+  }
+
   return (
     <Card className="overflow-hidden border-primary/20">
       <div className="px-5 py-4 bg-gradient-to-br from-primary/5 via-card to-card border-b border-border/60">
@@ -65,9 +78,8 @@ export function TaskProgressCard({
         {task.progress && task.progress.total > 0 && (
           <div className="mt-3 space-y-1">
             <Progress value={pct ?? 0} />
-            <div className="flex justify-between text-xs text-muted-foreground">
-              <span>{task.progress.done} / {task.progress.total}</span>
-              <span>{pct ?? 0}%</span>
+            <div className="text-xs text-muted-foreground">
+              {task.progress.done} / {task.progress.total}{eta ? ` · ${eta}` : ""}
             </div>
           </div>
         )}

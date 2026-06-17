@@ -27,9 +27,14 @@ from streamlit_shim import install as _install_shim, session_state as _ss
 
 _install_shim()
 
+import hashlib
+import base64
+import secrets
+import urllib.parse as _urlparse
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from config import Config
@@ -384,6 +389,123 @@ and outcome, return {{"questions": []}}.
         return {"questions": []}
 
 
+class ClarifyNextRequest(BaseModel):
+    goal: str
+    pico_so_far: Dict[str, str] = Field(default_factory=dict)
+    round: int = 0   # total questions answered so far — used for the safety cap
+    model: Optional[str] = None
+
+
+@app.post("/api/pico/clarify-next")
+def pico_clarify_next(req: ClarifyNextRequest):
+    """Conversational PICO clarifier. Returns one question at a time with
+    exactly 3 highly specific options, or { done: true } once all PICO
+    elements are specific enough for a systematic review.
+
+    Called repeatedly by the frontend after each answer until done."""
+    from langchain_core.messages import HumanMessage
+
+    goal = (req.goal or "").strip()
+    if not goal:
+        return {"done": True}
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if not model:
+        return {"done": True}
+
+    answered = {k: v for k, v in (req.pico_so_far or {}).items() if v and str(v).strip()}
+
+    # Absolute safety cap: 8 exchanges is more than enough for any PICO question.
+    if req.round >= 8:
+        return {"done": True}
+
+    pico_lines = (
+        "\n".join(f"  {k.upper()}: {v}" for k, v in answered.items())
+        or "  (nothing yet)"
+    )
+
+    prompt = f"""You are a systematic-review librarian helping a researcher pin down their PICO
+before a database search.
+
+RESEARCHER'S GOAL: "{goal}"
+
+PICO elements clarified so far:
+{pico_lines}
+
+TASK
+────
+Evaluate the four PICO elements: Population, Intervention, Comparator, Outcome.
+
+For each element decide its status:
+  ABSENT  — not mentioned in the goal and cannot be inferred at all
+  VAGUE   — mentioned or answered, but still too imprecise for a MeSH query
+             (e.g. "adults", "exercise", "treatment", "health outcomes")
+  DEFINED — specific enough to write a MeSH/PubMed query without guessing
+             (e.g. "adults ≥65 with type 2 diabetes", "HIIT ≥3×/week",
+              "HbA1c at 6 months", "metformin monotherapy")
+
+Rules:
+• If ALL four are DEFINED → return {{"done": true}}.
+• Otherwise, pick the ONE most important element that is ABSENT or VAGUE
+  (priority: Population > Intervention > Outcome > Comparator) and ask a
+  focused follow-up question with EXACTLY 3 specific options.
+• If a follow-up was already answered (it appears in the pico_so_far above)
+  but the value is still VAGUE, you MAY ask again with more targeted options.
+• Options must be concrete, measurable, and relevant to "{goal}".
+  BAD: "adults", "standard care", "health outcomes"
+  GOOD: "adults 18–65 with major depressive disorder (DSM-5)", "CBT ≥12 sessions",
+        "remission at 8 weeks (PHQ-9 < 5)"
+
+Return ONLY one of:
+
+{{"done": true}}
+
+{{
+  "done": false,
+  "question": {{
+    "id": "population" | "intervention" | "comparator" | "outcome",
+    "title": "<focused question ≤12 words ending in '?'>",
+    "options": [
+      {{"id": "a", "label": "<specific option 1>"}},
+      {{"id": "b", "label": "<specific option 2>"}},
+      {{"id": "c", "label": "<specific option 3>"}}
+    ]
+  }}
+}}"""
+
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+        if data.get("done"):
+            return {"done": True}
+        q = data.get("question")
+        if not isinstance(q, dict) or not q.get("title") or not q.get("options"):
+            return {"done": True}
+        opts: List[Dict[str, str]] = []
+        for o in (q.get("options") or [])[:3]:
+            if isinstance(o, dict):
+                oid = str(o.get("id") or "").strip() or f"opt{len(opts)+1}"
+                olabel = str(o.get("label") or "").strip()
+                if olabel:
+                    opts.append({"id": oid, "label": olabel})
+            elif isinstance(o, str) and o.strip():
+                s = o.strip()
+                opts.append({"id": s.lower().replace(" ", "_")[:30], "label": s})
+        if len(opts) < 2:
+            return {"done": True}
+        return {
+            "done": False,
+            "question": {
+                "id": str(q.get("id", "pico")).strip(),
+                "title": str(q.get("title", "")).strip(),
+                "options": opts[:3],
+            },
+        }
+    except Exception as e:
+        print(f"[clarify_next] {e}")
+        return {"done": True}
+
+
 class FormalQuestionRequest(BaseModel):
     pico: PicoIn
     model: Optional[str] = None
@@ -417,9 +539,9 @@ def _plain_summary(goal: str, papers: List[BackendPaper], model_name: str) -> st
     if not model:
         return ""
 
-    # Use a wider slice — the home rerank already auto-filtered to the relevant
-    # set, so almost everything here should be useful.
-    subset = papers[:25]
+    # All papers have already been LEADS-reranked, so every entry is relevant.
+    # Cap at 50 to stay within context limits.
+    subset = papers[:50]
     ctx = ""
     for idx, p in enumerate(subset):
         ctx += (
@@ -508,18 +630,46 @@ _CITE_RE = re.compile(r"\[(\d+)\]")
 
 
 def _strip_invalid_citations(summary: str, n_refs: int) -> str:
-    """Remove citation markers that point outside the references range.
-
-    The model occasionally hallucinates citation numbers beyond what was
-    actually provided in the prompt. Strip those so the reader never sees a
-    [N] that doesn't exist in the references list. All valid citations and
-    the original numbering are preserved as-is so they line up with the
-    full reference list shown in the UI.
-    """
+    """Remove citation markers that point outside the references range."""
     def _repl(m: "re.Match[str]") -> str:
         n = int(m.group(1))
         return m.group(0) if 1 <= n <= n_refs else ""
     return _CITE_RE.sub(_repl, summary)
+
+
+def _filter_to_cited(summary: str, papers: list) -> Tuple[str, list]:
+    """Keep only papers that are actually cited in the summary text.
+
+    Finds every [N] in the summary, discards papers that are never cited,
+    and renumbers the remaining citations consecutively so the text stays
+    consistent with the returned reference list.
+    """
+    # Collect 1-based indices that appear in the text (clamped to valid range).
+    cited_indices: set = set()
+    for m in _CITE_RE.finditer(summary):
+        n = int(m.group(1))
+        if 1 <= n <= len(papers):
+            cited_indices.add(n)
+
+    if not cited_indices:
+        # LLM produced no valid citations — fall back to returning all papers.
+        return summary, papers
+
+    # Build old-index → new-index mapping (1-based, keeping cited order).
+    old_to_new: dict = {}
+    new_papers = []
+    for old_idx in sorted(cited_indices):
+        new_idx = len(new_papers) + 1
+        old_to_new[old_idx] = new_idx
+        new_papers.append(papers[old_idx - 1])
+
+    # Rewrite citation numbers in the text.
+    def _repl(m: "re.Match[str]") -> str:
+        n = int(m.group(1))
+        return f"[{old_to_new[n]}]" if n in old_to_new else ""
+
+    new_summary = _CITE_RE.sub(_repl, summary)
+    return new_summary, new_papers
 
 
 @app.post("/api/pico/summary")
@@ -552,11 +702,13 @@ def pico_summary(req: SummaryRequest):
         grouped_papers.extend(by_source[key])
 
     summary = _plain_summary(req.goal, grouped_papers, resolve_for_thinking(req.model))
+    # Strip any hallucinated out-of-range citation numbers.
+    summary = _strip_invalid_citations(summary, len(grouped_papers))
+    # All grouped_papers passed the LEADS rerank — show them all as references.
     references = [
         {"title": (p.title or "").strip(), "url": p.url, "source": p.source, "id": str(p.id)}
         for p in grouped_papers
     ]
-    summary = _strip_invalid_citations(summary, len(references))
     return {"summary": summary, "references": references}
 
 
@@ -750,6 +902,133 @@ Return ONLY a JSON object with these exact keys:
 
 
 # ---------------------------------------------------------------------------
+# Elsevier institutional access — EZProxy + optional OAuth upgrade
+# ---------------------------------------------------------------------------
+# PRIMARY (no registration needed): EZProxy SSO
+#   The user clicks "Connect via UCSF", a popup opens the library proxy login
+#   page, they authenticate via MyAccess, and EZProxy redirects back here.
+#   After that the browser holds a live EZProxy session cookie for
+#   proxy.library.ucsf.edu, so all subsequent browser-side fetches to
+#   *.proxy.library.ucsf.edu carry institutional access automatically.
+#   The frontend makes Elsevier API calls directly from the browser through
+#   the proxied URL and merges them with the backend results.
+#
+# OPTIONAL UPGRADE: Elsevier OAuth 2.0
+#   If ELSEVIER_OAUTH_CLIENT_ID is set, the authorize/callback endpoints
+#   below also handle PKCE-based OAuth so a Bearer token can be used on
+#   backend-side requests instead.  Leave blank to use EZProxy only.
+
+_UCSF_EZPROXY_LOGIN = "https://proxy.library.ucsf.edu/login"
+
+_oauth_states: Dict[str, str] = {}  # state → code_verifier (for OAuth upgrade path)
+
+
+@app.get("/api/auth/ezproxy/start")
+def ezproxy_start():
+    """Redirect the browser to the UCSF EZProxy login, targeting our callback."""
+    callback = _urlparse.quote(f"{Config.APP_BASE_URL}/api/auth/ezproxy/callback", safe="")
+    return RedirectResponse(url=f"{_UCSF_EZPROXY_LOGIN}?url={callback}")
+
+
+@app.get("/api/auth/ezproxy/callback")
+def ezproxy_callback():
+    """EZProxy redirects here after MyAccess SSO.
+    The browser now holds a live proxy.library.ucsf.edu session cookie.
+    We just close the popup and tell the parent window we're connected.
+    """
+    return HTMLResponse("""<!DOCTYPE html>
+<html><head><title>UCSF Library — Connected</title></head>
+<body style="font-family:sans-serif;padding:2rem;background:#f8fafc">
+  <h3 style="color:#16a34a">&#10003; Connected to UCSF Library</h3>
+  <p style="color:#475569">You can close this window. Embase and Scopus are now accessible.</p>
+  <script>
+    window.opener?.postMessage({type: 'ezproxy_connected'}, '*');
+    setTimeout(() => window.close(), 800);
+  </script>
+</body></html>""")
+
+
+# Optional OAuth upgrade — only active when ELSEVIER_OAUTH_CLIENT_ID is set.
+
+_ELSEVIER_AUTH_URL = "https://id.elsevier.com/as/authorization.oauth2"
+_ELSEVIER_TOKEN_URL = "https://id.elsevier.com/as/token.oauth2"
+
+
+@app.get("/api/auth/elsevier/status")
+def elsevier_status():
+    return {"oauth_configured": bool(Config.ELSEVIER_OAUTH_CLIENT_ID)}
+
+
+@app.get("/api/auth/elsevier/authorize")
+def elsevier_authorize():
+    if not Config.ELSEVIER_OAUTH_CLIENT_ID:
+        return HTMLResponse(
+            "<p style='font-family:sans-serif;padding:2rem'>"
+            "ELSEVIER_OAUTH_CLIENT_ID is not set — using EZProxy mode instead. "
+            "This endpoint is only needed if you want backend-side Bearer-token access.</p>",
+            status_code=503,
+        )
+    state = secrets.token_urlsafe(16)
+    code_verifier = secrets.token_urlsafe(48)
+    digest = hashlib.sha256(code_verifier.encode()).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    _oauth_states[state] = code_verifier
+    redirect_uri = f"{Config.APP_BASE_URL}/api/auth/elsevier/callback"
+    params = {
+        "client_id": Config.ELSEVIER_OAUTH_CLIENT_ID,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "openid",
+        "state": state,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+    }
+    return RedirectResponse(url=_ELSEVIER_AUTH_URL + "?" + _urlparse.urlencode(params))
+
+
+@app.get("/api/auth/elsevier/callback")
+def elsevier_callback(code: str = "", state: str = "", error: str = ""):
+    if error:
+        return HTMLResponse(
+            f"<script>window.opener?.postMessage({{type:'elsevier_oauth',error:{_json.dumps(error)}}}, '*');window.close();</script>"
+        )
+    code_verifier = _oauth_states.pop(state, None)
+    if not code_verifier:
+        return HTMLResponse(
+            "<script>window.opener?.postMessage({type:'elsevier_oauth',error:'invalid_state'}, '*');window.close();</script>",
+            status_code=400,
+        )
+    redirect_uri = f"{Config.APP_BASE_URL}/api/auth/elsevier/callback"
+    try:
+        resp = requests.post(_ELSEVIER_TOKEN_URL, data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "client_id": Config.ELSEVIER_OAUTH_CLIENT_ID,
+            "client_secret": Config.ELSEVIER_OAUTH_CLIENT_SECRET,
+            "code_verifier": code_verifier,
+        }, timeout=15)
+        access_token = resp.json().get("access_token", "")
+    except Exception as e:
+        return HTMLResponse(
+            f"<script>window.opener?.postMessage({{type:'elsevier_oauth',error:'token_exchange_failed'}}, '*');window.close();</script>",
+            status_code=500,
+        )
+    if not access_token:
+        return HTMLResponse(
+            "<script>window.opener?.postMessage({type:'elsevier_oauth',error:'no_token'}, '*');window.close();</script>",
+            status_code=400,
+        )
+    return HTMLResponse(f"""<!DOCTYPE html>
+<html><head><title>Connected</title></head><body>
+<p style="font-family:sans-serif;padding:2rem;color:#16a34a">&#10003; Connected to Elsevier</p>
+<script>
+  window.opener?.postMessage({{type: 'elsevier_oauth', token: {_json.dumps(access_token)}}}, '*');
+  setTimeout(() => window.close(), 800);
+</script></body></html>""")
+
+
+# ---------------------------------------------------------------------------
 # Search / data aggregation
 # ---------------------------------------------------------------------------
 
@@ -759,12 +1038,14 @@ class FetchAllRequest(BaseModel):
     sources: List[str]
     max_per_source: int = 10
     limit: Optional[int] = None
+    elsevier_token: str = ""
 
 
 @app.post("/api/papers/fetch")
 def papers_fetch(req: FetchAllRequest):
     papers, counts = DataAggregator.fetch_all(
-        req.query, req.sources, max_per_source=req.max_per_source, uploaded_files=None, limit=req.limit
+        req.query, req.sources, max_per_source=req.max_per_source,
+        uploaded_files=None, limit=req.limit, elsevier_token=req.elsevier_token,
     )
     return {
         "papers": [_paper_to_dict(p) for p in papers],
@@ -775,11 +1056,12 @@ def papers_fetch(req: FetchAllRequest):
 class SimulateYieldRequest(BaseModel):
     query: str
     sources: List[str]
+    elsevier_token: str = ""
 
 
 @app.post("/api/simulation/yield")
 def simulation_yield(req: SimulateYieldRequest):
-    counts = DataAggregator.simulate_yield(req.query, req.sources)
+    counts = DataAggregator.simulate_yield(req.query, req.sources, elsevier_token=req.elsevier_token)
     return {"counts": counts}
 
 
@@ -863,10 +1145,15 @@ For every vote also return:
   • evidence: a SHORT verbatim phrase or sentence copied directly from the
     abstract (≤ 200 characters) that best supports your vote. Pick the closest
     matching span even when the match is loose.
-  • reasoning: one sentence explaining the vote.
+  • reasoning: one sentence, SPECIFIC to this abstract (name what the paper
+    actually studied — its real population/intervention/outcome), explaining the
+    vote. Do not write a generic statement.
 
-Also write a 2-3 sentence "overall_reasoning" synthesising across the four
-PICO elements that explains WHY the paper should be included or excluded.
+Also write a 2-3 sentence "overall_reasoning" that (a) names in one clause what
+THIS paper is actually about, then (b) states the specific PICO element(s) it
+matches or fails and why, referencing concrete terms from the abstract. Do NOT
+write a generic sentence such as "the paper does not address any of the PICO
+elements explicitly or implicitly" — be concrete and specific to this study.
 
 PICO:
   Population:   {pico.population or '(unspecified — judge as "NA" unless clearly mismatched)'}
@@ -1079,7 +1366,19 @@ def _normalize_abstract_decision(
         (isinstance(f, dict) and f.get("vote") == "NA") for f in pico_fields
     )
     if all_pico_na:
-        overall_reasoning = ""
+        # No PICO element could be judged. Give an accurate, non-fabricated
+        # reason instead of a blank cell: either there was no abstract to
+        # screen, or the abstract never touches the PICO frame.
+        if not abstract.strip():
+            overall_reasoning = (
+                "No abstract was available, so this record could not be screened against "
+                "the PICO criteria. Retrieve the abstract or assess this study at full text."
+            )
+        else:
+            overall_reasoning = (
+                "The abstract does not mention the population, intervention, comparison, or "
+                "outcome defined in your PICO frame, so none of the elements could be assessed."
+            )
     else:
         overall_reasoning = pico_assessment.get("overall_reasoning") or reason or (
             "Meets inclusion criteria" if decision_upper == "INCLUDE" else "Excluded"
@@ -1179,44 +1478,46 @@ def _auto_relevance_cutoff(scores: List[float]) -> Tuple[float, str]:
 
     No max cap — if many papers clear the natural break, all of them stay.
     """
-    MIN_KEPT = 5         # minimum number of papers above the cut, if available
-    GAP_THRESHOLD = 0.10  # minimum gap size that counts as a natural break
+    MIN_KEPT = 20        # always keep at least this many papers
+    GAP_THRESHOLD = 0.20  # gap must be this large to count as a natural break
+    HARD_FLOOR = 0.0     # net-negative LEADS score → exclude
 
     if not scores:
-        return 0.0, "empty corpus"
+        return HARD_FLOOR, "empty corpus"
 
-    positive = sorted([s for s in scores if s >= 0.0], reverse=True)
-    if not positive:
-        return 0.0, "no papers scored net-positive across PICO"
+    # Work from all papers above the hard floor, sorted best-first.
+    eligible = sorted([s for s in scores if s >= HARD_FLOOR], reverse=True)
+    if not eligible:
+        return HARD_FLOOR, "no papers scored net-positive across PICO"
 
-    if len(positive) <= MIN_KEPT:
-        return min(positive), f"small positive corpus ({len(positive)} papers) — keep all"
+    # If fewer eligible papers than minimum, keep them all.
+    if len(eligible) <= MIN_KEPT:
+        return min(eligible), f"small eligible corpus ({len(eligible)} papers) — keep all"
 
-    # Search for the largest gap that leaves at least MIN_KEPT papers above it.
-    # i is the index of the score *below* the gap; the gap separates positive[i-1]
-    # (kept) from positive[i] (dropped). So we need i >= MIN_KEPT.
-    max_search_idx = max(MIN_KEPT, len(positive) // 2) + 1
+    # Search for the largest gap that still leaves at least MIN_KEPT papers.
     best_gap = 0.0
     best_idx = -1
-    for i in range(MIN_KEPT, min(max_search_idx, len(positive))):
-        gap = positive[i - 1] - positive[i]
+    for i in range(MIN_KEPT, len(eligible)):
+        gap = eligible[i - 1] - eligible[i]
         if gap > best_gap:
             best_gap = gap
             best_idx = i
 
     if best_idx >= 0 and best_gap >= GAP_THRESHOLD:
-        cut = positive[best_idx - 1]
+        cut = eligible[best_idx - 1]
         return cut, (
             f"natural relevance break: gap of {best_gap:+.2f} between scores "
-            f"{positive[best_idx - 1]:+.2f} and {positive[best_idx]:+.2f}, "
+            f"{eligible[best_idx - 1]:+.2f} and {eligible[best_idx]:+.2f}, "
             f"keeping {best_idx} papers"
         )
 
-    # No significant gap — distribution is roughly uniform. Keep top half, with
-    # a soft floor of +0.10 to drop borderline scores when nothing stands out.
-    median_score = positive[len(positive) // 2]
-    soft = max(0.10, median_score)
-    return soft, f"uniform distribution — keep top half above {soft:+.2f}"
+    # No clear break — keep top MIN_KEPT papers as a guaranteed minimum, or all
+    # eligible papers if they don't exceed 2× the minimum (corpus is small enough
+    # that the LLM can handle all of them).
+    if len(eligible) <= MIN_KEPT * 2:
+        return min(eligible), f"uniform distribution — keeping all {len(eligible)} eligible papers"
+    cut = eligible[MIN_KEPT - 1]
+    return cut, f"uniform distribution — keeping top {MIN_KEPT} papers (score ≥ {cut:+.2f})"
 
 
 class RerankRequest(BaseModel):
@@ -1778,50 +2079,273 @@ class FullTextRequest(BaseModel):
     URL: str
     Source: str
     paper_id: Optional[str] = None
+    # Optional DOI for Unpaywall lookups. If the caller has it on hand we
+    # use it directly; otherwise we try to mine one from the URL.
+    doi: Optional[str] = None
 
 
-def _fetch_epmc_fulltext(paper_id: str) -> Optional[str]:
-    if not paper_id:
+# ---- helpers ---------------------------------------------------------------
+
+def _extract_text_from_pdf(pdf_bytes: bytes) -> Optional[str]:
+    """Parse a PDF byte string into plain text via pypdf. Returns None if the
+    extraction is empty or too short to be useful."""
+    if not pdf_bytes:
         return None
-    url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{paper_id}/fullTextXML"
     try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "EvidenceEngine/1.0"})
-        if r.status_code == 200 and r.text and "<" in r.text:
-            soup = BeautifulSoup(r.content, "lxml-xml")
-            body = soup.find("body") or soup
-            text = body.get_text(separator="\n", strip=True)
-            return text if text and len(text) > 200 else None
+        from pypdf import PdfReader
+        from io import BytesIO
+        reader = PdfReader(BytesIO(pdf_bytes))
+        parts: List[str] = []
+        for page in reader.pages:
+            try:
+                parts.append(page.extract_text() or "")
+            except Exception:
+                # Some pages (scanned / encrypted) can fail individually; skip them.
+                continue
+        text = "\n".join(parts).strip()
+        return text if text and len(text) > 200 else None
     except Exception as e:
-        print(f"[epmc_fulltext] {e}")
+        print(f"[pdf_extract] {e}")
+        return None
+
+
+_DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\"<>]+)", re.I)
+
+def _extract_doi(url: str, title: str = "") -> Optional[str]:
+    """Pull a DOI out of a URL or other free text. Returns the canonical
+    DOI string (`10.xxxx/yyy`) or None."""
+    for candidate in (url or "", title or ""):
+        m = _DOI_RE.search(candidate)
+        if m:
+            # Strip trailing punctuation that often follows a DOI in URLs.
+            return re.sub(r"[).,;]+$", "", m.group(1))
     return None
 
 
+_ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/([\w./-]+?)(?:v\d+)?(?:\.pdf)?(?:[/?#]|$)", re.I)
+
+def _extract_arxiv_id(url: str) -> Optional[str]:
+    m = _ARXIV_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def _fetch_pmc_pdf(pmcid: str) -> Optional[bytes]:
+    """Download the PMC-hosted PDF for a given PMC ID. Tries the EuPMC
+    rendered PDF URL first, then falls back to the NCBI PMC URL."""
+    if not pmcid:
+        return None
+    if not pmcid.upper().startswith("PMC"):
+        pmcid = f"PMC{pmcid}"
+    pmcid = pmcid.upper()
+    candidates = [
+        f"https://europepmc.org/articles/{pmcid}/pdf",
+        f"https://www.ncbi.nlm.nih.gov/pmc/articles/{pmcid}/pdf/",
+    ]
+    for url in candidates:
+        try:
+            r = requests.get(
+                url, timeout=30, allow_redirects=True,
+                headers={"User-Agent": "EvidenceEngine/1.0 (research@example.com)"},
+            )
+            ct = (r.headers.get("content-type") or "").lower()
+            if r.status_code == 200 and (
+                "pdf" in ct or r.content[:4] == b"%PDF"
+            ):
+                return r.content
+        except Exception as e:
+            print(f"[pmc_pdf] {url}: {e}")
+            continue
+    return None
+
+
+def _fetch_unpaywall_pdf(doi: str) -> Optional[Tuple[bytes, str]]:
+    """Resolve a DOI to an open-access PDF via the Unpaywall API and download
+    the bytes. Returns (pdf_bytes, source_url) on success."""
+    if not doi:
+        return None
+    try:
+        email = getattr(Config, "ENTREZ_EMAIL", None) or "research@example.com"
+        api = f"https://api.unpaywall.org/v2/{doi}?email={email}"
+        r = requests.get(api, timeout=15, headers={"User-Agent": "EvidenceEngine/1.0"})
+        if r.status_code != 200:
+            return None
+        data = r.json() or {}
+        if not data.get("is_oa"):
+            return None
+        # Try best_oa_location first; if it doesn't carry a PDF link, walk
+        # the rest of oa_locations.
+        candidates: List[str] = []
+        best = data.get("best_oa_location") or {}
+        if isinstance(best, dict):
+            for k in ("url_for_pdf", "url"):
+                if best.get(k):
+                    candidates.append(best[k])
+        for loc in (data.get("oa_locations") or []):
+            if not isinstance(loc, dict):
+                continue
+            for k in ("url_for_pdf", "url"):
+                if loc.get(k) and loc[k] not in candidates:
+                    candidates.append(loc[k])
+
+        for pdf_url in candidates:
+            try:
+                rr = requests.get(
+                    pdf_url, timeout=30, allow_redirects=True,
+                    headers={"User-Agent": "EvidenceEngine/1.0"},
+                )
+                ct = (rr.headers.get("content-type") or "").lower()
+                if rr.status_code == 200 and (
+                    "pdf" in ct or rr.content[:4] == b"%PDF"
+                ):
+                    return rr.content, pdf_url
+            except Exception as e:
+                print(f"[unpaywall_pdf {doi}] {pdf_url}: {e}")
+                continue
+    except Exception as e:
+        print(f"[unpaywall {doi}] {e}")
+    return None
+
+
+def _fetch_arxiv_pdf(arxiv_id: str) -> Optional[bytes]:
+    if not arxiv_id:
+        return None
+    try:
+        url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+        r = requests.get(
+            url, timeout=30, allow_redirects=True,
+            headers={"User-Agent": "EvidenceEngine/1.0"},
+        )
+        ct = (r.headers.get("content-type") or "").lower()
+        if r.status_code == 200 and ("pdf" in ct or r.content[:4] == b"%PDF"):
+            return r.content
+    except Exception as e:
+        print(f"[arxiv_pdf] {e}")
+    return None
+
+
+def _fetch_epmc_fulltext_text(paper_id: str) -> Optional[str]:
+    """JATS-XML route via _fetch_epmc_full_text_xml (which already handles the
+    PMID -> PMCID lookup). Returns plain text or None."""
+    if not paper_id:
+        return None
+    xml = _fetch_epmc_full_text_xml(paper_id)
+    if not xml:
+        return None
+    try:
+        soup = BeautifulSoup(xml, "lxml-xml")
+        body = soup.find("body") or soup
+        text = body.get_text(separator="\n", strip=True)
+        return text if text and len(text) > 200 else None
+    except Exception as e:
+        print(f"[epmc_fulltext parse] {e}")
+        return None
+
+
+# ---- endpoint --------------------------------------------------------------
+
 @app.post("/api/fulltext/fetch")
 def fulltext_fetch(req: FullTextRequest):
-    pid = req.paper_id or ""
+    """Strategy ladder, in order of decreasing reliability:
+      1. Europe PMC JATS fullTextXML  (best — structured text)
+      2. PMC PDF                       (parsed with pypdf)
+      3. Unpaywall OA PDF              (any source, parsed with pypdf)
+      4. arXiv PDF                     (for arXiv papers, parsed with pypdf)
+      5. HTML scrape                   (last resort; skips useless landing pages)
+    Returns `source` describing which tier supplied the text so the UI can
+    show e.g. "PMC PDF (PMC1234567)" instead of just "Europe PMC".
+    """
+    pid = (req.paper_id or "").strip()
     if not pid and req.URL:
-        m = re.search(r"/(\d+)/?$", req.URL)
+        m = re.search(r"/(PMC\d+|\d+)/?$", req.URL, re.IGNORECASE)
         if m:
             pid = m.group(1)
-    text = _fetch_epmc_fulltext(pid) if pid else None
-    if text:
-        return {"status": "found", "text": text, "source": req.Source or "Europe PMC"}
 
-    # Try HTML scrape fallback for any URL
+    debug_label = pid or (req.URL[:60] if req.URL else "(no id)")
+
+    # One-shot lookup against EuPMC search: gives us BOTH the PMC ID (for the
+    # XML / PMC-PDF tiers) and the DOI (for the Unpaywall tier). Saves a
+    # second round-trip when both are needed.
+    pmcid: Optional[str] = None
+    lookup_doi: Optional[str] = None
+    if pid:
+        if pid.upper().startswith("PMC"):
+            pmcid = pid.upper()
+        elif pid.isdigit():
+            meta = _lookup_pmc_metadata(pid)
+            pmcid = meta.get("pmcid")
+            lookup_doi = meta.get("doi")
+
+    # Tier 1 — EuPMC structured XML.
+    if pid:
+        text = _fetch_epmc_fulltext_text(pid)
+        if text:
+            print(f"[fulltext_fetch] {debug_label} tier1 EuPMC XML -> {len(text)} chars")
+            return {"status": "found", "text": text, "source": "Europe PMC (XML)"}
+
+    # Tier 2 — PMC PDF (works for any PubMed paper with a PMC mirror).
+    if pmcid:
+        pdf = _fetch_pmc_pdf(pmcid)
+        if pdf:
+            text = _extract_text_from_pdf(pdf)
+            if text:
+                print(f"[fulltext_fetch] {debug_label} tier2 PMC PDF ({pmcid}) -> {len(text)} chars")
+                return {"status": "found", "text": text, "source": f"PMC PDF ({pmcid})"}
+
+    # Tier 3 — Unpaywall via DOI. Prefer the caller-supplied DOI, then the
+    # one mined from URL, then the one returned by the EuPMC metadata lookup.
+    doi = (req.doi or "").strip() or _extract_doi(req.URL, req.Title) or (lookup_doi or "")
+    if doi:
+        unpaywall = _fetch_unpaywall_pdf(doi)
+        if unpaywall:
+            pdf, src_url = unpaywall
+            text = _extract_text_from_pdf(pdf)
+            if text:
+                host = src_url.split("/", 3)[2] if "://" in src_url else src_url
+                print(f"[fulltext_fetch] {debug_label} tier3 Unpaywall PDF ({host}) -> {len(text)} chars")
+                return {"status": "found", "text": text, "source": f"Unpaywall PDF ({host})"}
+
+    # Tier 4 — arXiv PDF.
+    if (req.Source or "").lower() == "arxiv" or "arxiv.org" in (req.URL or "").lower():
+        arxiv_id = _extract_arxiv_id(req.URL or "") or (pid if pid and not pid.isdigit() else None)
+        if arxiv_id:
+            pdf = _fetch_arxiv_pdf(arxiv_id)
+            if pdf:
+                text = _extract_text_from_pdf(pdf)
+                if text:
+                    print(f"[fulltext_fetch] {debug_label} tier4 arXiv PDF ({arxiv_id}) -> {len(text)} chars")
+                    return {"status": "found", "text": text, "source": f"arXiv PDF ({arxiv_id})"}
+
+    # Tier 5 — HTML scrape, but only on hosts that might actually carry
+    # real article content. Abstract landing pages are skipped because they
+    # don't include the body text we'd need.
     if req.URL and req.URL.startswith("http"):
-        try:
-            r = requests.get(req.URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-            if r.status_code == 200:
-                soup = BeautifulSoup(r.content, "html.parser")
-                for s in soup(["script", "style", "nav", "footer", "header"]):
-                    s.decompose()
-                text = soup.get_text(separator="\n", strip=True)
-                if text and len(text) > 500:
-                    return {"status": "found", "text": text[:50000], "source": req.Source or "HTML"}
-        except Exception as e:
-            print(f"[fulltext_fetch html] {e}")
+        host = req.URL.split("/", 3)[2].lower() if "://" in req.URL else ""
+        skip_hosts = {"pubmed.ncbi.nlm.nih.gov", "europepmc.org", "www.ncbi.nlm.nih.gov"}
+        if host and host not in skip_hosts:
+            try:
+                r = requests.get(req.URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+                ct = (r.headers.get("content-type") or "").lower()
+                if r.status_code == 200 and "pdf" in ct:
+                    # Some publisher landing pages redirect to a PDF directly.
+                    text = _extract_text_from_pdf(r.content)
+                    if text:
+                        print(f"[fulltext_fetch] {debug_label} tier5 publisher PDF ({host}) -> {len(text)} chars")
+                        return {"status": "found", "text": text, "source": f"Publisher PDF ({host})"}
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.content, "html.parser")
+                    for s in soup(["script", "style", "nav", "footer", "header"]):
+                        s.decompose()
+                    text = soup.get_text(separator="\n", strip=True)
+                    if text and len(text) > 500:
+                        print(f"[fulltext_fetch] {debug_label} tier5 HTML scrape ({host}) -> {len(text)} chars")
+                        return {"status": "found", "text": text[:50000], "source": f"HTML scrape ({host})"}
+            except Exception as e:
+                print(f"[fulltext_fetch html] {e}")
 
-    return {"status": "missing", "reason": "Full text not retrievable from available sources."}
+    print(f"[fulltext_fetch] {debug_label} -> no full text "
+          f"(pid={pid or '-'}, doi={doi or '-'}, source={req.Source}, url_host="
+          f"{req.URL.split('/', 3)[2] if req.URL and '://' in req.URL else '-'})")
+    return {"status": "missing", "reason": "Full text not retrievable from open-access sources."}
 
 
 # ---------------------------------------------------------------------------
@@ -1832,49 +2356,366 @@ def fulltext_fetch(req: FullTextRequest):
 class ExtractTextRequest(BaseModel):
     text: str
     query: str
+    model: Optional[str] = None
+
+
+# Regex that catches the typical section headings in a scientific paper.
+# We use it to (a) label evidence by section ("Methods", "Results", ...) and
+# (b) detect candidate section breakpoints for the section-aware preview.
+_SECTION_HEADING_RE = re.compile(
+    r"(?im)^\s*("
+    r"abstract|background|introduction|methods?|materials?\s+and\s+methods?|"
+    r"results?|findings?|discussion|conclusions?|limitations|"
+    r"acknowledg(?:e)?ments|references|appendix|"
+    r"supplementary|supporting\s+information|"
+    r"funding|conflict[s]?\s+of\s+interest"
+    r")\s*[:.\-]?\s*$"
+)
+
+
+def _section_at_offset(text: str, offset: int) -> str:
+    """Return the most recent section heading at or before `offset`.
+
+    Defaults to "Abstract" when no heading has been crossed yet. Returns
+    "Other" when we can't tell.
+    """
+    if not text or offset < 0:
+        return "Other"
+    last_heading = ""
+    for m in _SECTION_HEADING_RE.finditer(text[:max(0, offset)]):
+        last_heading = m.group(1)
+    if not last_heading:
+        return "Abstract"
+    h = last_heading.strip().lower()
+    # Normalise to canonical labels.
+    canon = {
+        "abstract":           "Abstract",
+        "background":         "Background",
+        "introduction":       "Introduction",
+        "method":             "Methods",
+        "methods":            "Methods",
+        "material and method":   "Methods",
+        "materials and method":  "Methods",
+        "material and methods":  "Methods",
+        "materials and methods": "Methods",
+        "result":             "Results",
+        "results":            "Results",
+        "findings":           "Results",
+        "finding":            "Results",
+        "discussion":         "Discussion",
+        "conclusion":         "Conclusion",
+        "conclusions":        "Conclusion",
+        "limitations":        "Limitations",
+        "references":         "References",
+        "appendix":           "Appendix",
+    }
+    return canon.get(h, h.title())
+
+
+def _anchor_quote_in_text(quote: str, text: str) -> Optional[Tuple[int, int]]:
+    """Locate the model's quote in the source text. Returns (start, end) on
+    success or None when no reasonable anchor exists.
+
+    Tier 1 — direct substring match (case-insensitive).
+    Tier 2 — whitespace-normalised substring (handles minor formatting drift).
+    Tier 3 — best contiguous span matching ≥60 % of the quote's tokens.
+    """
+    if not quote or not text:
+        return None
+    q = quote.strip().strip('"').strip("'")
+    if not q:
+        return None
+
+    lower_text = text.lower()
+    lower_q = q.lower()
+    idx = lower_text.find(lower_q)
+    if idx >= 0:
+        return (idx, idx + len(q))
+
+    # Whitespace-collapsed search.
+    def _norm(s: str) -> str:
+        return re.sub(r"\s+", " ", s).strip()
+    norm_text = _norm(lower_text)
+    norm_q = _norm(lower_q)
+    if norm_q and norm_q in norm_text:
+        # Map the normalised offset back to the original text by counting
+        # non-whitespace characters.
+        target = norm_text.find(norm_q)
+        consumed_norm = 0
+        for i, ch in enumerate(text):
+            if consumed_norm == target:
+                # Walk forward in `text` until we've covered the quote length
+                # ignoring excess whitespace.
+                remaining = len(norm_q)
+                j = i
+                last_non_ws = i
+                while j < len(text) and remaining > 0:
+                    if not text[j].isspace():
+                        remaining -= 1
+                        last_non_ws = j
+                    j += 1
+                return (i, last_non_ws + 1)
+            if not ch.isspace():
+                consumed_norm += 1
+        return None
+
+    # Token-overlap fallback: find the window of `text` that contains the
+    # highest number of ≥ 4-character tokens from the quote.
+    tokens = [t for t in re.findall(r"\w{4,}", q.lower())]
+    if not tokens:
+        return None
+    sentences = list(re.finditer(r"[^.!?\n]+[.!?\n]?", text))
+    best_score = 0
+    best_span: Optional[Tuple[int, int]] = None
+    for m in sentences:
+        s = m.group(0).lower()
+        score = sum(1 for t in tokens if t in s)
+        if score > best_score:
+            best_score = score
+            best_span = (m.start(), m.end())
+    if best_score >= max(1, math.ceil(len(tokens) * 0.6)):
+        return best_span
+    return None
+
+
+def _retrieve_relevant_chunks(text: str, query: str, top_k: int = 6, chunk_chars: int = 600) -> str:
+    """Return the most query-relevant paragraphs from *text*, capped at
+    top_k chunks (~3-5 k chars total).  Always prepends the opening ~800
+    chars (abstract / intro) so the model has structural context.
+
+    Scoring is a simple bag-of-words overlap — zero dependencies, fast."""
+    import re as _re
+
+    stop = {
+        "the","a","an","is","are","was","were","what","which","how","why",
+        "when","where","who","and","or","in","on","at","to","for","of",
+        "with","by","from","that","this","be","has","have","had","do",
+        "does","did","not","but","if","as","it","its","their","they",
+    }
+    query_words = {
+        w.lower() for w in _re.findall(r"\w+", query)
+        if w.lower() not in stop and len(w) > 2
+    }
+
+    # Split on blank lines; fall back to sentence grouping for dense PDFs.
+    paragraphs = [p.strip() for p in _re.split(r"\n\s*\n", text) if p.strip()]
+    if len(paragraphs) <= 3:
+        sentences = _re.split(r"(?<=[.!?])\s+", text)
+        chunks, buf = [], ""
+        for s in sentences:
+            if len(buf) + len(s) > chunk_chars and buf:
+                chunks.append(buf)
+                buf = s
+            else:
+                buf += (" " if buf else "") + s
+        if buf:
+            chunks.append(buf)
+        paragraphs = chunks or [text]
+
+    # Group tiny paragraphs into ~chunk_chars blocks.
+    merged, buf = [], ""
+    for p in paragraphs:
+        if len(buf) + len(p) > chunk_chars and buf:
+            merged.append(buf)
+            buf = p
+        else:
+            buf += ("\n\n" if buf else "") + p
+    if buf:
+        merged.append(buf)
+    paragraphs = merged
+
+    def score(chunk: str) -> float:
+        words = {w.lower() for w in _re.findall(r"\w+", chunk)}
+        overlap = len(query_words & words)
+        # Bonus for statistical markers common in results sections
+        stat_hit = bool(_re.search(
+            r"\d+\.?\d*\s*(%|p\s*[<=]|mg|kg|n\s*=|ci|hr|or\b|rr\b|sd\b|sem\b)",
+            chunk, _re.I,
+        ))
+        return overlap / (len(query_words) + 1) + (0.15 if stat_hit else 0.0)
+
+    scored = sorted(enumerate(paragraphs), key=lambda x: -score(x[1]))
+    top_indices = {i for i, _ in scored[:top_k]}
+
+    # Always include the opening block for structural context.
+    top_indices.add(0)
+
+    selected = [paragraphs[i] for i in sorted(top_indices) if i < len(paragraphs)]
+    return "\n\n---\n\n".join(selected)
 
 
 @app.post("/api/extract/text")
 def extract_text(req: ExtractTextRequest):
+    """LLM-driven extraction that answers `query` against the supplied full
+    text and returns:
+      - `answer`: a 2-4 sentence natural-language answer to the question.
+      - `evidence`: list of { quote, section, why, start, end } where the
+        quote is a verbatim span from the text, `section` is the canonical
+        section label inferred from headings, and start/end are character
+        offsets in `text` so the UI can highlight precisely.
+      - `values`: list of { field, value, quote, section, start, end } for
+        structured key/value pairs the model extracted alongside the answer.
+
+    Falls back to the legacy regex-based behaviour only when the model
+    completely fails (no JSON, exception, etc.).
+    """
+    from langchain_core.messages import HumanMessage
+
     text = req.text or ""
-    query = req.query or ""
+    query = (req.query or "").strip()
     if not text:
-        return {"summary": "No full text available.", "spans": [], "values": []}
+        return {
+            "answer": "No full text available for this paper.",
+            "summary": "No full text available for this paper.",
+            "evidence": [],
+            "spans": [],
+            "values": [],
+        }
+    if not query:
+        return {
+            "answer": "",
+            "summary": "Enter a question to extract from the text.",
+            "evidence": [],
+            "spans": [],
+            "values": [],
+        }
 
-    tokens = [t for t in re.split(r"\s+", query.lower()) if t]
-    spans: List[Dict[str, int]] = []
-    for m in re.finditer(r"[^.!?\n]+[.!?]", text):
-        sent = m.group(0)
-        lo = sent.lower()
-        score = sum(1 for t in tokens if t in lo)
-        if score >= max(1, math.ceil(len(tokens) / 3)):
-            spans.append({"start": m.start(), "end": m.end()})
+    model_name = resolve_for_thinking(req.model)
+    model = AIService.get_model(model_name)
 
-    values: List[Dict[str, str]] = []
-    patterns = [
-        ("measurement", re.compile(r"([0-9]+\.?[0-9]*\s?(%|years|weeks|participants))", re.I)),
-        ("p-value", re.compile(r"p\s*=\s*[0-9.]+", re.I)),
-        ("confidence interval", re.compile(r"95%\s*CI\s*[0-9.\-,\s]+", re.I)),
-        ("effect estimate", re.compile(r"(HR|RR|OR)\s*[0-9.]+", re.I)),
-    ]
-    for label, pat in patterns:
-        for m in pat.finditer(text):
-            if len(values) >= 12:
-                break
-            if spans and not any(s["start"] <= m.start() <= s["end"] for s in spans):
-                continue
-            values.append({
-                "field": label,
-                "value": m.group(0),
-                "quote": text[max(0, m.start() - 30): m.end() + 30],
-            })
+    # Retrieve only the query-relevant chunks instead of the first 30 k chars.
+    # Quotes are anchored against the FULL text afterwards, so this is safe.
+    try:
+        text_for_llm = _retrieve_relevant_chunks(text, query, top_k=6, chunk_chars=600)
+        if not text_for_llm.strip():
+            text_for_llm = text[:30000]
+    except Exception:
+        text_for_llm = text[:30000]
 
-    summary = (
-        f"No matching evidence for \"{query}\" was found in this paper."
-        if not spans
-        else f"Found {len(spans)} relevant passage{'s' if len(spans) > 1 else ''} addressing \"{query}\"."
-    )
-    return {"summary": summary, "spans": spans, "values": values}
+    prompt = f"""You are extracting evidence from a scientific paper to answer a researcher's
+question. Use ONLY the paper text below. Do not bring in outside knowledge.
+
+QUESTION: {query}
+
+PAPER TEXT:
+{text_for_llm}
+
+Return ONLY a JSON object with this exact shape:
+{{
+  "answer": "<2-4 sentence natural-language answer; if the text does not contain enough information, say so explicitly>",
+  "evidence": [
+    {{
+      "quote": "<VERBATIM excerpt copied from the paper, 10-300 characters>",
+      "why":   "<one short sentence saying how this excerpt addresses the question>"
+    }}
+  ],
+  "values": [
+    {{
+      "field": "<short label, e.g. 'Sample size', 'Primary outcome', 'HR (95% CI)', 'p-value'>",
+      "value": "<the value as it appears in the text>",
+      "quote": "<short verbatim sentence fragment containing the value>"
+    }}
+  ]
+}}
+
+RULES:
+- Every "quote" must be a real verbatim string from the paper text — do not
+  paraphrase. If you cannot find one, omit that evidence item.
+- Return 1-5 evidence items, ordered by how directly they answer the question.
+- Return 0-8 values; only include values that are actually present in the text.
+- If the paper does not answer the question, set "evidence": [] and "values": []
+  and explain in "answer" that the information is not in the paper.
+"""
+
+    answer = ""
+    evidence_raw: List[Dict[str, Any]] = []
+    values_raw: List[Dict[str, Any]] = []
+    if model:
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            data = AIService._extract_json(r.content) or {}
+            answer = str(data.get("answer") or "").strip()
+            ev = data.get("evidence") or []
+            if isinstance(ev, list):
+                evidence_raw = [e for e in ev if isinstance(e, dict)]
+            vv = data.get("values") or []
+            if isinstance(vv, list):
+                values_raw = [v for v in vv if isinstance(v, dict)]
+        except Exception as e:
+            print(f"[extract_text] LLM call failed: {e}")
+
+    # ---- Anchor evidence + values to the full text -------------------------
+    evidence: List[Dict[str, Any]] = []
+    seen_spans: set[Tuple[int, int]] = set()
+    for e in evidence_raw:
+        quote = str(e.get("quote") or "").strip().strip('"').strip("'")
+        if not quote:
+            continue
+        anchored = _anchor_quote_in_text(quote, text)
+        if not anchored:
+            continue
+        if anchored in seen_spans:
+            continue
+        seen_spans.add(anchored)
+        evidence.append({
+            "quote": text[anchored[0]:anchored[1]],
+            "why":   str(e.get("why") or "").strip()[:300],
+            "section": _section_at_offset(text, anchored[0]),
+            "start": anchored[0],
+            "end":   anchored[1],
+        })
+
+    values: List[Dict[str, Any]] = []
+    for v in values_raw[:8]:
+        field = str(v.get("field") or "").strip()
+        value = str(v.get("value") or "").strip()
+        if not field or not value:
+            continue
+        quote = str(v.get("quote") or "").strip().strip('"').strip("'") or value
+        anchored = _anchor_quote_in_text(quote, text)
+        item: Dict[str, Any] = {
+            "field": field[:60],
+            "value": value[:200],
+            "quote": quote[:240],
+        }
+        if anchored:
+            item["start"]   = anchored[0]
+            item["end"]     = anchored[1]
+            item["section"] = _section_at_offset(text, anchored[0])
+        values.append(item)
+
+    # ---- Regex fallback only when the LLM produced absolutely nothing ------
+    if not answer and not evidence and not values:
+        tokens = [t for t in re.split(r"\s+", query.lower()) if t]
+        for m in re.finditer(r"[^.!?\n]+[.!?]", text):
+            sent = m.group(0)
+            lo = sent.lower()
+            score = sum(1 for t in tokens if t in lo)
+            if score >= max(1, math.ceil(len(tokens) / 3)):
+                evidence.append({
+                    "quote":  sent.strip(),
+                    "why":    "Matched key terms from the question (regex fallback).",
+                    "section": _section_at_offset(text, m.start()),
+                    "start":   m.start(),
+                    "end":     m.end(),
+                })
+                if len(evidence) >= 5:
+                    break
+        if evidence:
+            answer = f"Found {len(evidence)} passage{'s' if len(evidence) > 1 else ''} matching key terms (LLM extraction unavailable)."
+        else:
+            answer = f"No relevant passages found for \"{query}\" in this paper."
+
+    # Legacy fields kept so existing UI components (and the JSON export)
+    # continue to work without breaking.
+    spans = [{"start": e["start"], "end": e["end"], "label": e.get("section")} for e in evidence]
+    return {
+        "answer": answer,
+        "summary": answer,    # alias for back-compat with the prior summary field
+        "evidence": evidence,
+        "spans": spans,
+        "values": values,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1889,6 +2730,11 @@ class ExtractTablesRequest(BaseModel):
     paper_id: Optional[str] = None
     extraction_type: Optional[str] = "All"
     model: Optional[str] = None
+    # Caller-supplied text used as input for the LLM fallback when neither the
+    # JATS XML nor the HTML scrape produces tables. Without these the fallback
+    # only sees the title and inevitably returns nothing.
+    abstract: Optional[str] = None
+    full_text: Optional[str] = None
 
 
 def _classify_table(rows: List[List[str]], hint: str) -> str:
@@ -1930,15 +2776,89 @@ def _extract_html_tables(url: str, extraction_type: str) -> List[Dict[str, Any]]
         return []
 
 
+def _lookup_pmc_metadata(pmid: str) -> Dict[str, Optional[str]]:
+    """Resolve a PubMed PMID to PMC ID + DOI via the EuPMC search endpoint.
+
+    Returns `{"pmcid": "PMC1234567" | None, "doi": "10.x/y" | None}`. Used by
+    multiple downstream tiers (PMC PDF, Unpaywall DOI lookup).
+    """
+    out: Dict[str, Optional[str]] = {"pmcid": None, "doi": None}
+    if not pmid or not str(pmid).strip().isdigit():
+        return out
+    try:
+        r = requests.get(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params={
+                "query": f"EXT_ID:{pmid} AND SRC:MED",
+                "format": "json",
+                "resultType": "lite",
+                "pageSize": 1,
+            },
+            timeout=15,
+            headers={"User-Agent": "EvidenceEngine/1.0"},
+        )
+        if r.status_code != 200:
+            return out
+        items = (r.json().get("resultList") or {}).get("result") or []
+        if not items:
+            return out
+        item = items[0] or {}
+        out["pmcid"] = item.get("pmcid") or None
+        out["doi"] = item.get("doi") or None
+        return out
+    except Exception as e:
+        print(f"[lookup_pmc_metadata] {pmid}: {e}")
+        return out
+
+
+def _lookup_pmcid_from_pmid(pmid: str) -> Optional[str]:
+    """Back-compat wrapper around _lookup_pmc_metadata for the table-extraction
+    code path that only needs the PMC ID."""
+    return _lookup_pmc_metadata(pmid).get("pmcid")
+
+
+def _fetch_epmc_full_text_xml(paper_id: str) -> Optional[bytes]:
+    """Try several Europe PMC fullTextXML URL formats for the given ID.
+
+    The fullTextXML endpoint accepts a PMC ID directly (`PMC1234567`), or a
+    source-prefixed form (`MED/123/fullTextXML`). Plain PMIDs without source
+    prefix do NOT work, so for those we look up the PMCID first.
+    """
+    if not paper_id:
+        return None
+    candidates: List[str] = []
+    pid = str(paper_id).strip()
+    if pid.upper().startswith("PMC"):
+        candidates.append(pid.upper())
+    elif pid.isdigit():
+        # Probably a PMID — resolve to a PMC ID, otherwise we'll just 404.
+        pmcid = _lookup_pmcid_from_pmid(pid)
+        if pmcid:
+            candidates.append(pmcid)
+        candidates.append(f"MED/{pid}")
+    else:
+        candidates.append(pid)
+
+    for cid in candidates:
+        try:
+            url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{cid}/fullTextXML"
+            r = requests.get(url, timeout=20, headers={"User-Agent": "EvidenceEngine/1.0"})
+            if r.status_code == 200 and r.content:
+                return r.content
+        except Exception as e:
+            print(f"[fetch_epmc_full_text_xml] {cid}: {e}")
+            continue
+    return None
+
+
 def _extract_epmc_tables(paper_id: str, extraction_type: str) -> List[Dict[str, Any]]:
     if not paper_id:
         return []
+    xml = _fetch_epmc_full_text_xml(paper_id)
+    if not xml:
+        return []
     try:
-        url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{paper_id}/fullTextXML"
-        r = requests.get(url, timeout=20, headers={"User-Agent": "EvidenceEngine/1.0"})
-        if r.status_code != 200:
-            return []
-        soup = BeautifulSoup(r.content, "lxml-xml")
+        soup = BeautifulSoup(xml, "lxml-xml")
         out = []
         for i, tw in enumerate(soup.find_all("table-wrap")):
             label = tw.find("label")
@@ -1957,40 +2877,79 @@ def _extract_epmc_tables(paper_id: str, extraction_type: str) -> List[Dict[str, 
                 })
         return out
     except Exception as e:
-        print(f"[extract_epmc_tables] {e}")
+        print(f"[extract_epmc_tables] parse error for {paper_id}: {e}")
         return []
 
 
 @app.post("/api/extract/tables")
 def extract_tables(req: ExtractTablesRequest):
+    """Three-tier table extraction:
+      1. Europe PMC JATS fullTextXML — open-access full-text, structured tables.
+      2. HTML scrape of the supplied URL — works for journal landing pages
+         that include rendered tables. Skipped for PubMed/EuPMC abstract URLs
+         since those pages don't contain the article's tables.
+      3. LLM extraction over title + abstract + (optional) caller-supplied
+         full text. The caller's abstract/full_text fields are the difference
+         between this tier finding anything and finding nothing.
+    """
     pid = req.paper_id or ""
     if not pid and req.URL:
-        m = re.search(r"/(\d+)/?$", req.URL)
+        m = re.search(r"/(PMC\d+|\d+)/?$", req.URL, re.IGNORECASE)
         if m:
             pid = m.group(1)
 
     tables: List[Dict[str, Any]] = []
-    if pid and req.Source in {"PubMed", "Europe PMC"}:
-        tables.extend(_extract_epmc_tables(pid, req.extraction_type or ""))
-    if not tables and req.URL and req.URL.startswith("http"):
-        tables.extend(_extract_html_tables(req.URL, req.extraction_type or ""))
 
-    # LLM fallback over abstract / full-text if still empty
+    # Tier 1: Europe PMC JATS fullTextXML. Works for PMC and PubMed papers
+    # that have a PMC mirror — _extract_epmc_tables handles the PMID -> PMCID
+    # lookup transparently.
+    if pid and req.Source in {"PubMed", "Europe PMC"}:
+        tier1 = _extract_epmc_tables(pid, req.extraction_type or "")
+        if tier1:
+            tables.extend(tier1)
+            print(f"[extract_tables] {pid} tier1 (EuPMC XML) -> {len(tier1)} tables")
+
+    # Tier 2: HTML scrape — but only for URLs that are likely to render real
+    # tables, not search/abstract landing pages. Skip pubmed.ncbi.nlm.nih.gov
+    # and europepmc.org pages because those don't include the article's tables.
+    if not tables and req.URL and req.URL.startswith("http"):
+        host = req.URL.split("/", 3)[2].lower() if "://" in req.URL else ""
+        skip_hosts = {"pubmed.ncbi.nlm.nih.gov", "europepmc.org", "www.ncbi.nlm.nih.gov"}
+        if host not in skip_hosts:
+            tier2 = _extract_html_tables(req.URL, req.extraction_type or "")
+            if tier2:
+                tables.extend(tier2)
+                print(f"[extract_tables] {pid or req.URL[:60]} tier2 (HTML) -> {len(tier2)} tables")
+
+    # Tier 3: LLM fallback over title + abstract + caller-supplied full text.
+    # The caller-supplied content is what makes this tier useful — passing
+    # only the title here was the original bug.
     if not tables:
         try:
+            seed_parts: List[str] = [req.Title.strip()]
+            if req.full_text:
+                seed_parts.append(req.full_text[:14000].strip())
+            elif req.abstract:
+                seed_parts.append(req.abstract.strip())
+            seed = "\n\n".join(p for p in seed_parts if p)
             ai_tables = AITableExtractor.extract_from_text(
-                req.Title + "\n",  # minimal seed; caller can resend with fulltext
+                seed,
                 resolve_for_thinking(req.model),
             )
             for i, t in enumerate(ai_tables or []):
+                rows = [t.get("headers", [])] + t.get("rows", [])
                 tables.append({
                     "title": t.get("label", f"Table {i + 1}"),
-                    "type": _classify_table([t.get("headers", [])] + t.get("rows", []), req.extraction_type or ""),
-                    "data": [t.get("headers", [])] + t.get("rows", []),
+                    "type": _classify_table(rows, req.extraction_type or ""),
+                    "data": rows,
                     "caption": t.get("caption", ""),
                 })
+            print(f"[extract_tables] {pid or 'no-id'} tier3 (LLM) -> {len(ai_tables or [])} tables (seed {len(seed)} chars)")
         except Exception as e:
             print(f"[extract_tables ai fallback] {e}")
+
+    if not tables:
+        print(f"[extract_tables] {pid or req.URL[:60]} -> no tables found (source={req.Source}, has_abstract={bool(req.abstract)}, has_fulltext={bool(req.full_text)})")
 
     return {"tables": tables}
 
@@ -2648,3 +3607,113 @@ def meta_run(req: MetaAnalysisRunRequest):
         "trim_fill": _ma_trim_fill(studies, tau2_method=req.tau2_method),
         "meta_regression": _ma_metareg(studies, tau2_method=req.tau2_method),
     }
+
+
+# ── Writing assistant ──────────────────────────────────────────────────────────
+
+class WritingSummaryRequest(BaseModel):
+    # Search configuration
+    databases: List[str] = []
+    unified_query: str = ""
+    per_db_queries: Dict[str, str] = {}
+    search_date: str = ""
+    # Result funnel
+    db_counts: Dict[str, int] = {}
+    total_identified: Optional[int] = None
+    duplicates_removed: Optional[int] = None
+    after_dedup: Optional[int] = None
+    screened_abstracts: Optional[int] = None
+    included_abstracts: Optional[int] = None
+    fulltext_assessed: Optional[int] = None
+    included_final: Optional[int] = None
+    # Review context
+    pico: Dict[str, str] = {}
+    inclusion_criteria: List[str] = []
+    exclusion_criteria: List[str] = []
+    goal: str = ""
+    model: str = ""
+
+
+@app.post("/api/writing/summary")
+def writing_summary(req: WritingSummaryRequest):
+    """Generate a PRISMA-compliant search strategy methods paragraph."""
+    from langchain_core.messages import HumanMessage
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if not model:
+        raise HTTPException(status_code=503, detail="No model available")
+
+    # Build database + query block
+    db_lines = []
+    for db in req.databases:
+        q = req.per_db_queries.get(db) or req.unified_query
+        count = req.db_counts.get(db)
+        count_str = f" ({count:,} records)" if count else ""
+        db_lines.append(f"  • {db}{count_str}: {q[:200] if q else '(same as unified query)'}")
+    db_block = "\n".join(db_lines) if db_lines else "  (no databases specified)"
+
+    pico_block = ""
+    if req.pico:
+        pico_block = (
+            f"PICO:\n"
+            f"  P: {req.pico.get('population','')}\n"
+            f"  I: {req.pico.get('intervention','')}\n"
+            f"  C: {req.pico.get('comparator','')}\n"
+            f"  O: {req.pico.get('outcome','')}"
+        )
+
+    ic_block = ""
+    if req.inclusion_criteria:
+        ic_block = "Inclusion criteria:\n" + "\n".join(f"  - {c}" for c in req.inclusion_criteria)
+    ec_block = ""
+    if req.exclusion_criteria:
+        ec_block = "Exclusion criteria:\n" + "\n".join(f"  - {c}" for c in req.exclusion_criteria)
+
+    # PRISMA funnel numbers
+    funnel_parts = []
+    if req.total_identified is not None:
+        funnel_parts.append(f"Records identified: {req.total_identified:,}")
+    if req.duplicates_removed:
+        funnel_parts.append(f"Duplicates removed: {req.duplicates_removed:,}")
+    if req.after_dedup is not None:
+        funnel_parts.append(f"Records after deduplication: {req.after_dedup:,}")
+    if req.screened_abstracts is not None:
+        funnel_parts.append(f"Abstracts screened: {req.screened_abstracts:,}")
+    if req.included_abstracts is not None:
+        funnel_parts.append(f"Included after abstract screening: {req.included_abstracts:,}")
+    if req.fulltext_assessed is not None:
+        funnel_parts.append(f"Full texts assessed: {req.fulltext_assessed:,}")
+    if req.included_final is not None:
+        funnel_parts.append(f"Final included studies: {req.included_final:,}")
+    funnel_block = " → ".join(funnel_parts) if funnel_parts else ""
+
+    prompt = f"""You are writing the Information Sources and Search Strategy section of a systematic review methods section (PRISMA 2020 compliant).
+
+Review question: {req.goal or '(not specified)'}
+
+{pico_block}
+
+{ic_block}
+
+{ec_block}
+
+Databases searched (with record counts and query strings):
+{db_block}
+
+Search date: {req.search_date or 'not recorded'}
+
+PRISMA screening funnel:
+{funnel_block or '(screening counts not yet available)'}
+
+Write a single, well-structured paragraph (150–250 words) for the Methods section of a manuscript. It must:
+1. Name every database searched and the date the search was conducted
+2. Describe the search strategy (keywords, Boolean operators, MeSH/controlled vocabulary terms if identifiable from the query strings)
+3. State any date or language restrictions if apparent from the queries
+4. Briefly describe the screening process (title/abstract screening, full-text review) and the PRISMA record counts
+5. Mention the inclusion and exclusion criteria applied
+
+Write in past tense, third person, passive voice where appropriate. Do not invent details.
+Output only the paragraph — no headings, no bullet points, no preamble."""
+
+    resp = model.invoke([HumanMessage(content=prompt)])
+    return {"summary": resp.content.strip()}
