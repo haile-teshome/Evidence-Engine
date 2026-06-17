@@ -40,7 +40,7 @@ function formatModelName(m: string): string {
 
 const NAV: { id: PageId; label: string; icon: any }[] = [
   { id: "home", label: "Home", icon: Home },
-  { id: "simulation", label: "Simulation", icon: BarChart3 },
+  { id: "simulation", label: "Planning", icon: BarChart3 },
   { id: "projects", label: "Projects", icon: Users },
   { id: "quality", label: "Quality Assessment", icon: ShieldCheck },
   { id: "abstract", label: "Abstract Screening", icon: FileSearch },

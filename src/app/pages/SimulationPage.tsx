@@ -380,7 +380,7 @@ export function SimulationPage() {
             <Bot className="size-4 mr-2" />AI Optimize Per Source
           </Button>
           <Button onClick={runSimulation} disabled={optRunning}>
-            <Play className="size-4 mr-2" />Run Simulation
+            <Play className="size-4 mr-2" />Run Planning
           </Button>
           <Button variant="ghost" onClick={() => { s.setSimulation(null); s.setDbTestResults(null); s.setAgenticTrace(null); s.setAgenticSummary(null); }}>
             <X className="size-4 mr-2" />Clear Results
@@ -405,7 +405,7 @@ export function SimulationPage() {
       {s.simulation && (
         <Card className="p-4 space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="font-medium">Simulation Results</h3>
+            <h3 className="font-medium">Planning Results</h3>
             <div className="text-sm">
               Total: <span className="font-bold text-primary">{totalYield.toLocaleString()}</span> papers
               <span className="text-xs text-muted-foreground ml-2">(abstract screening downloads up to {s.numPerSource}/source then deduplicates)</span>
