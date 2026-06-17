@@ -1968,6 +1968,73 @@ def _reconstruct_oa_abstract(idx: Optional[dict]) -> str:
     return " ".join(w for _, w in positions)
 
 
+def _abstract_via_epmc(title: str, ext_id: str) -> str:
+    """Fetch an abstract from Europe PMC's full-text search. EPMC has far wider
+    abstract coverage than OpenAlex (which omits abstracts for publishers that
+    forbid redistribution), and can be queried directly by PMID or DOI."""
+    try:
+        if ext_id and ext_id.isdigit():
+            q = f"EXT_ID:{ext_id}"
+        elif ext_id and "/" in ext_id:
+            q = f'DOI:"{ext_id}"'
+        elif title:
+            q = f'TITLE:"{title}"'
+        else:
+            return ""
+        r = requests.get(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+            params={"query": q, "resultType": "core", "format": "json", "pageSize": 1},
+            timeout=10,
+        ).json()
+        results = (r.get("resultList") or {}).get("result", []) or []
+        if results:
+            raw = (results[0].get("abstractText") or "").strip()
+            # EPMC abstracts may carry light HTML/JATS markup — strip it.
+            return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
+    except Exception as e:
+        print(f"[abstract_epmc] {e}")
+    return ""
+
+
+def _enrich_missing_abstracts(items: List[Dict[str, Any]], cap: int = 80) -> int:
+    """Backfill empty abstracts for snowballed citations.
+
+    Europe PMC reference/citation lists return title-only entries, which starves
+    the downstream PICO screening. For each missing abstract we try Europe PMC
+    search first (best coverage, direct PMID/DOI lookup), then fall back to
+    OpenAlex. Lookups are deduplicated by title and bounded by `cap`.
+    Returns the number of papers resolved.
+    """
+    seen: Dict[str, str] = {}
+    resolved = 0
+    looked = 0
+    for it in items:
+        if len((it.get("abstract") or "").strip()) >= 40:
+            continue  # already has a usable abstract
+        title = (it.get("title") or "").strip()
+        ext_id = str(it.get("id") or "")
+        if not title and not ext_id:
+            continue
+        key = title.lower() or ext_id
+        if key in seen:                       # reuse a resolved duplicate
+            if seen[key]:
+                it["abstract"] = seen[key]
+            continue
+        if looked >= cap:
+            continue
+        looked += 1
+        abstract = _abstract_via_epmc(title, ext_id)
+        if not abstract:                      # EPMC miss → try OpenAlex
+            work = _openalex_resolve_work(title, ext_id)
+            abstract = _reconstruct_oa_abstract(work.get("abstract_inverted_index")) if work else ""
+        seen[key] = abstract
+        if abstract:
+            it["abstract"] = abstract
+            resolved += 1
+    print(f"[enrich_abstracts] resolved {resolved}/{looked} lookups ({len(items)} citations)")
+    return resolved
+
+
 def _openalex_links(work: Dict[str, Any], direction: str, max_per: int) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     try:
@@ -2065,6 +2132,10 @@ def citations(req: CitationsRequest):
                 out.extend(_ss_links(ss_id, "backward", req.max_per))
             if want_fwd:
                 out.extend(_ss_links(ss_id, "forward", req.max_per))
+
+    # Reference/citation lists often omit abstracts — backfill them so the
+    # downstream screening has something to work with.
+    _enrich_missing_abstracts(out)
 
     return {"citations": out}
 

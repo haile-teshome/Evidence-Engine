@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride } from "./mockServices";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method } from "./apiClient";
 
@@ -250,8 +250,29 @@ export type PrismaCounts = {
 
 const StoreCtx = createContext<Ctx | null>(null);
 
+const PAGE_STORAGE_KEY = "ee:page";
+export const SESSION_STORAGE_KEY = "ee:sessionId";
+// Local autosave of the working snapshot, so a browser refresh restores the
+// review even in demo / logged-out mode (where backend sessions don't save).
+const LOCAL_SNAPSHOT_KEY = "ee:snapshot";
+const VALID_PAGES: PageId[] = [
+  "home", "simulation", "quality", "abstract", "acquisition", "fulltext",
+  "snowball", "extraction", "textextraction", "prisma", "meta", "projects", "writing",
+];
+function loadPage(): PageId {
+  try {
+    const v = localStorage.getItem(PAGE_STORAGE_KEY) as PageId | null;
+    if (v && VALID_PAGES.includes(v)) return v;
+  } catch { /* localStorage unavailable (private mode, etc.) */ }
+  return "home";
+}
+
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [page, setPage] = useState<PageId>("home");
+  // Restore the last-viewed tab so a browser refresh keeps you in place.
+  const [page, setPage] = useState<PageId>(loadPage);
+  useEffect(() => {
+    try { localStorage.setItem(PAGE_STORAGE_KEY, page); } catch { /* ignore */ }
+  }, [page]);
   // Default to LEADS — the benchmark's highest-performing screening model
   // (LEADS-mistral-7b × LEADS-native @ score ≥ +0.20: recall=1.000,
   // specificity=0.676, MCC=+0.260 on van_Dis_2020). The Backend resolves
@@ -361,6 +382,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [currentSessionTitle, setCurrentSessionTitle] = useState<string>("Untitled session");
+  // Remember the active session so a refresh can silently restore it (see
+  // SessionsPanel's auto-restore effect).
+  useEffect(() => {
+    try {
+      if (currentSessionId) localStorage.setItem(SESSION_STORAGE_KEY, currentSessionId);
+      else localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch { /* ignore */ }
+  }, [currentSessionId]);
 
   const [ezproxyConnected, setEzproxyConnected] = useState(false);
   const [elsevierToken, setElsevierToken] = useState("");
@@ -469,6 +498,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setExtractedPapers(d.extractedPapers ?? null);
     if (d.prisma) setPrisma(d.prisma);
   };
+
+  // ── Local persistence ─────────────────────────────────────────────────────
+  // Restore the locally-saved snapshot once on mount, then keep it in sync
+  // (debounced) so a refresh lands the user back in their review. Guarded so
+  // the first empty render never wipes the saved snapshot before it's read.
+  const localRestored = useRef(false);
+  useEffect(() => {
+    if (!localRestored.current) return;          // wait until restore has run
+    const t = setTimeout(() => {
+      try {
+        if (history.length === 0) { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); return; }
+        localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify(snapshot()));
+      } catch { /* quota exceeded or unserialisable — skip this cycle */ }
+    }, 600);
+    return () => clearTimeout(t);
+  }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
+      sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
+      qualityReports, excludedByQuality, qualityOverrides, abstractOverrides,
+      fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
+      snowballResults, snowballScreened, extractedPapers, prisma]);
+
+  useEffect(() => {
+    if (localRestored.current) return;
+    localRestored.current = true;
+    try {
+      const raw = localStorage.getItem(LOCAL_SNAPSHOT_KEY);
+      if (raw) hydrate(JSON.parse(raw));
+    } catch { /* corrupt snapshot — ignore */ }
+  }, []);
 
   const reset = () => {
     setHistory([]); setPico({ population: "", intervention: "", comparator: "", outcome: "" });

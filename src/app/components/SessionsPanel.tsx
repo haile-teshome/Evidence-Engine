@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useStore } from "../lib/store";
+import { useStore, SESSION_STORAGE_KEY } from "../lib/store";
 import { useAuth } from "../lib/auth";
 import { listSessions, loadSession, saveSession, deleteSession, SessionMeta } from "../lib/sessions";
 import { AIService } from "../lib/mockServices";
@@ -57,6 +57,33 @@ export function SessionsPanel() {
     }
   }
   useEffect(() => { refresh(); }, [user?.id]);
+
+  // On a fresh page load, silently restore the last active session so a browser
+  // refresh keeps the user's work (and tab) in place. Runs once when auth is
+  // ready, and only if nothing is already loaded — never clobbers active work.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (!user || restoredRef.current) return;
+    if (s.currentSessionId || s.history.length > 0) { restoredRef.current = true; return; }
+    let savedId: string | null = null;
+    try { savedId = localStorage.getItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
+    restoredRef.current = true;
+    if (!savedId) return;
+    (async () => {
+      try {
+        const sess = await loadSession(savedId!);
+        s.hydrate(sess.data);
+        s.setCurrentSessionId(sess.id);
+        s.setCurrentSessionTitle(sess.title);
+        // Intentionally do NOT change the page — keep the tab restored from
+        // storage so the refresh lands exactly where the user was.
+      } catch (e: any) {
+        // Stale/inaccessible session id — clear it so we don't retry forever.
+        console.error("Auto-restore session failed:", e?.message);
+        try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
+      }
+    })();
+  }, [user?.id]);
 
   async function onLoad(id: string) {
     setBusy(true);
