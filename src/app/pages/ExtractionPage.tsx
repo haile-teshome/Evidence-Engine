@@ -7,10 +7,11 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { Input } from "../components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
-import { ChevronDown, Download, Table2, ExternalLink } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { Search, Download, Table2, ExternalLink, Maximize2 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import ExcelJS from "exceljs";
@@ -20,6 +21,8 @@ type Format = "DataFrame" | "CSV Export" | "JSON Export" | "Excel Export";
 export function ExtractionPage() {
   const s = useStore();
   const [format, setFormat] = useState<Format>("Excel Export");
+  const [selectedIdx, setSelectedIdx] = useState(0);
+  const [q, setQ] = useState("");
   const task = s.tasks["table-extract"];
   const running = task?.status === "running";
 
@@ -92,17 +95,31 @@ export function ExtractionPage() {
   const withTables = ep?.filter(p => p.Extracted_Tables.length > 0).length || 0;
   const withoutTables = totalPapers - withTables;
 
-  return (
-    <div className="space-y-4">
-      <Alert><AlertDescription>{passed.length} included papers available for table extraction.</AlertDescription></Alert>
+  // Keep original indices so the left list can filter without losing the
+  // mapping back into s.extractedPapers.
+  const filtered = ep
+    ? ep.map((p, idx) => ({ p, idx })).filter(
+        ({ p }) => !q.trim() || p.Paper_Title.toLowerCase().includes(q.toLowerCase()),
+      )
+    : [];
+  const selected = ep ? (ep[selectedIdx] ?? ep[0]) : null;
 
-      <Card className="p-4 space-y-3">
-        <h3 className="font-medium">Extraction Settings</h3>
-        <div className="grid grid-cols-[1fr_auto] gap-3 items-end">
+  return (
+    <div className="space-y-3">
+      {/* ── Single compact header: counts + format + run + export ───────────── */}
+      <Card className="p-3">
+        <div className="flex items-end gap-3 flex-wrap">
+          <div className="mr-auto">
+            <h3 className="font-medium leading-tight">Table Extraction</h3>
+            <p className="text-xs text-muted-foreground">
+              {passed.length} included paper{passed.length === 1 ? "" : "s"}
+              {ep && withoutTables > 0 && ` · ${withoutTables} had no extractable tables`}
+            </p>
+          </div>
           <div>
-            <label className="text-sm text-muted-foreground">Output Format</label>
+            <label className="text-xs text-muted-foreground">Output format</label>
             <Select value={format} onValueChange={v => setFormat(v as Format)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="DataFrame">DataFrame</SelectItem>
                 <SelectItem value="CSV Export">CSV Export</SelectItem>
@@ -111,7 +128,14 @@ export function ExtractionPage() {
               </SelectContent>
             </Select>
           </div>
-          <Button onClick={extract} disabled={running}><Table2 className="size-4 mr-2" />{running ? "Extracting..." : "Start Table Extraction"}</Button>
+          <Button onClick={extract} disabled={running}>
+            <Table2 className="size-4 mr-2" />{running ? "Extracting..." : "Start Table Extraction"}
+          </Button>
+          {ep && (
+            <Button variant="outline" onClick={exportAll}>
+              <Download className="size-4 mr-2" />Export All ({format.split(" ")[0]})
+            </Button>
+          )}
         </div>
       </Card>
 
@@ -125,69 +149,153 @@ export function ExtractionPage() {
 
       {ep && (
         <>
-          {withoutTables > 0 && (
-            <Alert>
-              <AlertDescription>
-                <strong>⚠️ {withoutTables} of {totalPapers} papers</strong> had no extractable tables — typically paywalled / closed access, no tabular content, or PDF-only.
-              </AlertDescription>
-            </Alert>
-          )}
+          {/* ── Two-pane: paper list (left) + selected tables (right) ──────── */}
+          <div className="flex gap-4 h-[calc(100vh-15rem)] min-h-[28rem]">
+            {/* LEFT: searchable paper list */}
+            <Card className="w-80 shrink-0 p-0 overflow-hidden flex flex-col">
+              <div className="p-2 border-b">
+                <div className="relative">
+                  <Search className="size-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={q}
+                    onChange={e => setQ(e.target.value)}
+                    placeholder={`Filter ${totalPapers} papers…`}
+                    className="pl-7 h-8 text-sm"
+                  />
+                </div>
+              </div>
+              <div className="overflow-auto flex-1">
+                {filtered.map(({ p, idx }) => {
+                  const active = idx === selectedIdx;
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => setSelectedIdx(idx)}
+                      className={`w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
+                    >
+                      <div className="flex items-center gap-2 mb-1">
+                        <Badge variant={p.Extracted_Tables.length ? "default" : "secondary"} className="text-[10px]">
+                          {p.Extracted_Tables.length} table{p.Extracted_Tables.length === 1 ? "" : "s"}
+                        </Badge>
+                        <span className="text-[10px] text-muted-foreground">{p.Source}</span>
+                      </div>
+                      <div className="text-sm line-clamp-2 leading-snug">{p.Paper_Title}</div>
+                    </button>
+                  );
+                })}
+                {filtered.length === 0 && (
+                  <div className="p-4 text-sm text-muted-foreground">No papers match “{q}”.</div>
+                )}
+              </div>
+            </Card>
 
-          {ep.map((paper, idx) => (
-            <Collapsible key={idx}>
-              <CollapsibleTrigger asChild>
-                <Button variant="outline" className="w-full justify-between text-left h-auto py-3">
-                  <span className="truncate flex-1">{paper.Paper_Title}</span>
-                  <Badge variant={paper.Extracted_Tables.length ? "default" : "secondary"}>{paper.Extracted_Tables.length} tables</Badge>
-                  <ChevronDown className="size-4 ml-2" />
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="pt-3">
-                <Card className="p-4 space-y-3">
-                  <div className="grid grid-cols-4 gap-3 text-center">
-                    <Stat label="Source" value={paper.Source} />
-                    <Stat label="Tables" value={paper.Extracted_Tables.length} />
-                    <Stat label="Total Rows" value={paper.Extracted_Tables.reduce((a, t) => a + t.data.length, 0)} />
-                    <Stat label="Max Columns" value={Math.max(0, ...paper.Extracted_Tables.map(t => t.data[0]?.length || 0))} />
-                  </div>
-
-                  {paper.Extracted_Tables.length > 0 ? (
-                    <Tabs defaultValue="0">
-                      <TabsList>
-                        {paper.Extracted_Tables.map((t, i) => (
-                          <TabsTrigger key={i} value={String(i)}>{t.type} {i + 1}</TabsTrigger>
-                        ))}
-                      </TabsList>
-                      {paper.Extracted_Tables.map((t, i) => (
-                        <TabsContent key={i} value={String(i)} className="space-y-3">
-                          <div className="rounded-md border max-h-96 overflow-auto">
-                            <Table>
-                              <TableHeader><TableRow>{t.data[0]?.map((h, j) => <TableHead key={j}>{h}</TableHead>)}</TableRow></TableHeader>
-                              <TableBody>
-                                {t.data.slice(1).map((row, ri) => (
-                                  <TableRow key={ri}>{row.map((c, ci) => <TableCell key={ci}>{c}</TableCell>)}</TableRow>
-                                ))}
-                              </TableBody>
-                            </Table>
-                          </div>
-                          {t.caption && <div className="text-xs italic text-muted-foreground">{t.caption}</div>}
-                          <div className="grid grid-cols-2 gap-2">
-                            <Button size="sm" variant="outline" onClick={() => exportTableCsv(paper, t, i)}><Download className="size-4 mr-2" />Export CSV</Button>
-                            {paper.Paper_URL && <a href={paper.Paper_URL} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 text-sm bg-primary text-primary-foreground rounded-md py-2 hover:opacity-90"><ExternalLink className="size-4" />View Full Paper</a>}
-                          </div>
-                        </TabsContent>
-                      ))}
-                    </Tabs>
-                  ) : <Alert><AlertDescription>No tables found in this paper.</AlertDescription></Alert>}
-                </Card>
-              </CollapsibleContent>
-            </Collapsible>
-          ))}
-
-          <Button onClick={exportAll} className="w-full"><Download className="size-4 mr-2" />Export All Tables ({format.split(" ")[0]})</Button>
+            {/* RIGHT: selected paper's tables */}
+            <Card className="flex-1 min-w-0 p-0 overflow-hidden flex flex-col">
+              {!selected ? (
+                <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+                  Select a paper on the left.
+                </div>
+              ) : (
+                <PaperTablesDetail key={selectedIdx} paper={selected} format={format} />
+              )}
+            </Card>
+          </div>
         </>
       )}
     </div>
+  );
+}
+
+function GridTable({ data }: { data: string[][] }) {
+  return (
+    <Table>
+      <TableHeader><TableRow>{data[0]?.map((h, j) => <TableHead key={j}>{h}</TableHead>)}</TableRow></TableHeader>
+      <TableBody>
+        {data.slice(1).map((row, ri) => (
+          <TableRow key={ri}>{row.map((c, ci) => <TableCell key={ci}>{c}</TableCell>)}</TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: Format }) {
+  // Index of the table currently shown full-screen, or null when none.
+  const [maxIdx, setMaxIdx] = useState<number | null>(null);
+  const maxTable = maxIdx !== null ? paper.Extracted_Tables[maxIdx] : null;
+  const fmtLabel = format.split(" ")[0];
+
+  return (
+    <>
+      <div className="border-b p-4 space-y-3">
+        <div className="font-medium leading-snug">{paper.Paper_Title}</div>
+        <div className="grid grid-cols-4 gap-3 text-center">
+          <Stat label="Source" value={paper.Source} />
+          <Stat label="Tables" value={paper.Extracted_Tables.length} />
+          <Stat label="Total Rows" value={paper.Extracted_Tables.reduce((a, t) => a + t.data.length, 0)} />
+          <Stat label="Max Columns" value={Math.max(0, ...paper.Extracted_Tables.map(t => t.data[0]?.length || 0))} />
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-auto p-4">
+        {paper.Extracted_Tables.length > 0 ? (
+          <Tabs defaultValue="0">
+            <TabsList>
+              {paper.Extracted_Tables.map((t, i) => (
+                <TabsTrigger key={i} value={String(i)}>{t.type} {i + 1}</TabsTrigger>
+              ))}
+            </TabsList>
+            {paper.Extracted_Tables.map((t, i) => (
+              <TabsContent key={i} value={String(i)} className="space-y-3">
+                <div className="flex justify-end">
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => setMaxIdx(i)}
+                    className="size-7 text-muted-foreground hover:text-foreground"
+                    title="Maximize table"
+                  >
+                    <Maximize2 className="size-4" />
+                  </Button>
+                </div>
+                <div className="rounded-md border max-h-[28rem] overflow-auto">
+                  <GridTable data={t.data} />
+                </div>
+                {t.caption && <div className="text-xs italic text-muted-foreground">{t.caption}</div>}
+                <div className="grid grid-cols-2 gap-2">
+                  <Button size="sm" variant="outline" onClick={() => exportTable(paper, t, i, format)}><Download className="size-4 mr-2" />Export {fmtLabel}</Button>
+                  {paper.Paper_URL && <a href={paper.Paper_URL} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 text-sm bg-primary text-primary-foreground rounded-md py-2 hover:opacity-90"><ExternalLink className="size-4" />View Full Paper</a>}
+                </div>
+              </TabsContent>
+            ))}
+          </Tabs>
+        ) : <Alert><AlertDescription>No tables found in this paper.</AlertDescription></Alert>}
+      </div>
+
+      {/* Full-screen view of a single table. */}
+      <Dialog open={maxIdx !== null} onOpenChange={(o) => { if (!o) setMaxIdx(null); }}>
+        <DialogContent className="max-w-[99vw] w-[99vw] h-[97vh] sm:max-w-[99vw] flex flex-col p-3 gap-2">
+          {maxTable && (
+            <>
+              <DialogHeader className="pr-8">
+                <DialogTitle className="text-base leading-snug">
+                  {maxTable.type} {(maxIdx ?? 0) + 1} · <span className="font-normal text-muted-foreground">{paper.Paper_Title}</span>
+                </DialogTitle>
+              </DialogHeader>
+              <div className="flex-1 min-h-0 overflow-auto rounded-md border">
+                <GridTable data={maxTable.data} />
+              </div>
+              {maxTable.caption && <div className="text-xs italic text-muted-foreground shrink-0">{maxTable.caption}</div>}
+              <div className="shrink-0">
+                <Button size="sm" variant="outline" onClick={() => exportTable(paper, maxTable, maxIdx ?? 0, format)}>
+                  <Download className="size-4 mr-2" />Export {fmtLabel}
+                </Button>
+              </div>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -197,6 +305,21 @@ function Stat({ label, value }: { label: string; value: any }) {
 function exportTableCsv(paper: { Paper_Title: string }, t: { data: string[][] }, i: number) {
   const csv = t.data.map(row => row.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
   download(`table_${i + 1}_${paper.Paper_Title.slice(0, 30).replace(/\s/g, "_")}.csv`, csv, "text/csv");
+}
+
+// Export a single table honouring the currently-selected output format, mirroring
+// how exportAll() routes each format: JSON → .json, CSV → .csv, and both Excel and
+// DataFrame → a one-paper, one-table styled workbook (reusing the bulk XLSX path).
+function exportTable(paper: ExtractedPaper, t: ExtractedPaper["Extracted_Tables"][number], i: number, format: Format) {
+  const slug = paper.Paper_Title.slice(0, 30).replace(/\s/g, "_");
+  if (format === "JSON Export") {
+    download(`table_${i + 1}_${slug}.json`, JSON.stringify(t, null, 2), "application/json");
+  } else if (format === "CSV Export") {
+    exportTableCsv(paper, t, i);
+  } else {
+    // "Excel Export" and "DataFrame"
+    void downloadExtractedTablesXlsx([{ ...paper, Extracted_Tables: [t] }]);
+  }
 }
 function download(name: string, content: string, mime: string) {
   const blob = new Blob([content], { type: mime });
