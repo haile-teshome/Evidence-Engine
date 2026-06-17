@@ -7,9 +7,10 @@ import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
 import { Input } from "../components/ui/input";
 import { Badge } from "../components/ui/badge";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import {
   ScanText, Sparkles, Search, AlertTriangle, Download,
-  MapPin, Quote as QuoteIcon, FileSpreadsheet,
+  MapPin, Quote as QuoteIcon, FileSpreadsheet, Maximize2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -129,41 +130,45 @@ export function TextExtractionPage() {
   const selected = s.textExtractions.find(r => r.paper_id === selectedId) ?? s.textExtractions[0] ?? null;
 
   return (
-    <div className="space-y-4">
-      {missing.length > 0 && (
-        <Alert>
-          <AlertDescription>
-            <AlertTriangle className="size-4 inline mr-1 text-amber-600" />
-            <strong>{missing.length}</strong> included paper{missing.length > 1 ? "s have" : " has"} no full text and will be skipped. Acquire or upload them on the Full-Text Acquisition tab.
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <Card className="p-4 space-y-3">
-        <h3 className="font-medium flex items-center gap-2"><ScanText className="size-4 text-primary" />Ask in natural language</h3>
-        <Textarea value={query} onChange={e => setQuery(e.target.value)} rows={3}
+    <div className="space-y-3">
+      {/* ── Compact header: question + run + export, with inline counts ─────── */}
+      <Card className="p-3 space-y-2">
+        <div className="flex items-start justify-between gap-2">
+          <h3 className="font-medium flex items-center gap-2 text-sm shrink-0"><ScanText className="size-4 text-primary" />Ask in natural language</h3>
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <Button onClick={run} disabled={running} size="sm">
+              <Sparkles className="size-4 mr-2" />{running ? "Extracting..." : `Extract from ${acquired.length} papers`}
+            </Button>
+            {s.textExtractions.length > 0 && (
+              <>
+                <Button size="sm" variant="outline" onClick={() => downloadTextExtractionXlsx(s.textExtractions, query)}>
+                  <FileSpreadsheet className="size-4 mr-2" />Export Excel
+                </Button>
+                <Button size="sm" variant="outline" onClick={exportJson}>
+                  <Download className="size-4 mr-2" />Export JSON
+                </Button>
+              </>
+            )}
+          </div>
+        </div>
+        <Textarea value={query} onChange={e => setQuery(e.target.value)} rows={2}
           placeholder="e.g. What was the primary outcome and effect size?" />
         <div className="flex flex-wrap gap-1.5">
           {PRESETS.map((p, i) => (
             <Button key={i} size="sm" variant="outline" className="h-7 text-xs" onClick={() => setQuery(p)}>{p}</Button>
           ))}
         </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={run} disabled={running}>
-            <Sparkles className="size-4 mr-2" />{running ? "Extracting..." : `Extract from ${acquired.length} papers`}
-          </Button>
+        <div className="text-xs text-muted-foreground flex flex-wrap gap-x-3 gap-y-1">
+          {missing.length > 0 && (
+            <span className="text-amber-700">
+              <AlertTriangle className="size-3 inline mr-1" />{missing.length} skipped (no full text)
+            </span>
+          )}
           {s.textExtractions.length > 0 && (
-            <>
-              <Button
-                variant="outline"
-                onClick={() => downloadTextExtractionXlsx(s.textExtractions, query)}
-              >
-                <FileSpreadsheet className="size-4 mr-2" />Export Excel
-              </Button>
-              <Button variant="outline" onClick={exportJson}>
-                <Download className="size-4 mr-2" />Export JSON
-              </Button>
-            </>
+            <span>
+              {s.textExtractions.length} papers · {totalEvidence} evidence quotes · {totalValues} values
+              {noEvidence > 0 && <span className="text-amber-700"> · {noEvidence} with no evidence</span>}
+            </span>
           )}
         </div>
       </Card>
@@ -178,15 +183,8 @@ export function TextExtractionPage() {
 
       {s.textExtractions.length > 0 && (
         <>
-          <div className="grid grid-cols-4 gap-3">
-            <Stat label="Papers" value={s.textExtractions.length} />
-            <Stat label="Evidence quotes" value={totalEvidence} variant="success" />
-            <Stat label="Extracted values" value={totalValues} variant="success" />
-            <Stat label="No evidence" value={noEvidence} variant={noEvidence > 0 ? "warn" : undefined} />
-          </div>
-
           {/* ── Two-pane: paper list (left) + selected extraction (right) ─── */}
-          <div className="flex gap-4 h-[calc(100vh-26rem)] min-h-[28rem]">
+          <div className="flex gap-4 h-[calc(100vh-17rem)] min-h-[28rem]">
             {/* LEFT: searchable paper list */}
             <Card className="w-80 shrink-0 p-0 overflow-hidden flex flex-col">
               <div className="p-2 border-b">
@@ -260,15 +258,22 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
       }));
 
   const fullTextRef = useRef<HTMLDivElement | null>(null);
+  const maxTextRef = useRef<HTMLDivElement | null>(null);
   const [activeSpan, setActiveSpan] = useState<[number, number] | null>(null);
+  const [maxOpen, setMaxOpen] = useState(false);
 
-  function locate(start: number, end: number) {
+  // Scroll to a span inside whichever viewer is currently visible (inline, or
+  // the maximized dialog).
+  function scrollToSpan(ref: React.RefObject<HTMLDivElement | null>, start: number, end: number) {
     setActiveSpan([start, end]);
     // Defer scroll until React renders the highlight class on the new active span.
     requestAnimationFrame(() => {
-      const el = fullTextRef.current?.querySelector<HTMLElement>(`[data-span-start="${start}"]`);
+      const el = ref.current?.querySelector<HTMLElement>(`[data-span-start="${start}"]`);
       if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
     });
+  }
+  function locate(start: number, end: number) {
+    scrollToSpan(maxOpen ? maxTextRef : fullTextRef, start, end);
   }
 
   return (
@@ -379,8 +384,19 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
 
                 {/* FULL-TEXT VIEWER WITH LINE NUMBERS ------------------------ */}
                 <div>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
-                    Full text · click any "Locate" button above to jump
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="text-xs uppercase tracking-wide text-muted-foreground">
+                      Full text · click any "Locate" button above to jump
+                    </div>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => setMaxOpen(true)}
+                      className="size-7 text-muted-foreground hover:text-foreground"
+                      title="Maximize full text"
+                    >
+                      <Maximize2 className="size-4" />
+                    </Button>
                   </div>
                   <div
                     ref={fullTextRef}
@@ -393,6 +409,39 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
             )}
         </div>
       </div>
+
+      {/* Full-screen full-text viewer. */}
+      <Dialog open={maxOpen} onOpenChange={setMaxOpen}>
+        <DialogContent className="max-w-[99vw] w-[99vw] h-[97vh] sm:max-w-[99vw] flex flex-col p-3 gap-2">
+          <DialogHeader className="pr-8">
+            <DialogTitle className="text-base leading-snug">
+              Full text · <span className="font-normal text-muted-foreground">{result.title}</span>
+            </DialogTitle>
+          </DialogHeader>
+          {evidence.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 shrink-0">
+              {evidence.map((e, i) => (
+                <Button
+                  key={i}
+                  size="sm"
+                  variant="outline"
+                  className="h-6 px-2 text-xs"
+                  onClick={() => scrollToSpan(maxTextRef, e.start, e.end)}
+                  title={e.quote}
+                >
+                  <MapPin className="size-3 mr-1" />[{i + 1}]{e.section ? ` ${e.section}` : ""}
+                </Button>
+              ))}
+            </div>
+          )}
+          <div
+            ref={maxTextRef}
+            className="flex-1 min-h-0 overflow-auto rounded-md border bg-muted/20 text-sm font-mono leading-relaxed"
+          >
+            <FullTextViewer text={fullText} evidence={evidence} activeSpan={activeSpan} />
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -498,15 +547,6 @@ function renderLineWithHighlights(
   return parts;
 }
 
-function Stat({ label, value, variant }: { label: string; value: any; variant?: "success" | "warn" }) {
-  const cls = variant === "success" ? "text-green-700" : variant === "warn" ? "text-amber-700" : "text-foreground";
-  return (
-    <Card className="p-3 text-center">
-      <div className={`text-2xl font-bold ${cls}`}>{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-    </Card>
-  );
-}
 
 // ---- XLSX export ----------------------------------------------------------
 //
