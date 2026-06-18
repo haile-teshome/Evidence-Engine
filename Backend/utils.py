@@ -131,7 +131,7 @@ class AIService:
     #         return None
             
     @staticmethod
-    def infer_pico_and_query(goal: str, model_name: str, previous_goal: str = "") -> Dict[str, Any]:
+    def infer_pico_and_query(goal: str, model_name: str, previous_goal: str = "", prior: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Extract PICO and criteria from the research goal.
 
         Core rule: never CONTRADICT what the user actually wrote. Preserve their
@@ -152,8 +152,47 @@ class AIService:
             "clarifying questions, not in the inferred PICO."
         ))
 
+        # When a previous strategy is supplied, this is a REFINEMENT — modify the
+        # existing PICO/criteria per the user's request, preserving all other
+        # operationalised detail instead of rebuilding (and losing) it.
+        _has_prior = isinstance(prior, dict) and any(
+            str(prior.get(k) or "").strip() for k in ("p", "i", "c", "o")
+        )
+        if _has_prior:
+            _inc = "\n".join(f"    - {x}" for x in (prior.get("inclusion") or [])) or "    (none)"
+            _exc = "\n".join(f"    - {x}" for x in (prior.get("exclusion") or [])) or "    (none)"
+            _intro = f"""
+EXISTING STRATEGY from the previous turn — REFINE it, do not rebuild it:
+  Population:   {prior.get('p', '')}
+  Intervention: {prior.get('i', '')}
+  Comparator:   {prior.get('c', '')}
+  Outcome:      {prior.get('o', '')}
+  Inclusion criteria:
+{_inc}
+  Exclusion criteria:
+{_exc}
+
+The researcher now asks to MODIFY this strategy: "{goal}"
+
+Apply ONLY the change the researcher asked for and KEEP EVERYTHING ELSE INTACT:
+  • Preserve every operationalised detail from the existing strategy verbatim
+    (age ranges, durations, validated scales, follow-up windows, comparator type,
+    and the inclusion/exclusion criteria) UNLESS the requested change makes a
+    specific element no longer valid.
+  • Change only the element(s) the user named, plus any element that logically
+    must change as a direct consequence. Leave all others exactly as written.
+  • The refined PICO must be AT LEAST as detailed as the existing one — never
+    drop specificity or regenerate generically.
+  • Example: "cat ownership instead of pet ownership" → change the intervention's
+    pet/companion-animal wording to the cat equivalent while keeping the same
+    duration/operationalisation, and keep population, comparator, outcome, and
+    all criteria unchanged.
+"""
+        else:
+            _intro = f'Current Research Goal: "{goal}"'
+
         prompt = f"""
-Current Research Goal: "{goal}"
+{_intro}
 
 Extract these elements into a JSON object. RULES:
 
@@ -380,42 +419,56 @@ JSON shape:
         population_clean = " | ".join(population_anchors) or _strip_inferred_prefix(pico.population or "")
 
         prompt = f"""
-You are a clinical librarian. For each PICO concept supplied below, list synonyms and MeSH
-controlled-vocabulary terms suitable for PubMed retrieval. DO NOT write any PubMed syntax — no
-square brackets, no quotes, no Boolean operators, no parentheses. Just the term strings.
+You are an expert clinical search librarian building a HIGH-SENSITIVITY PubMed search.
+For each PICO concept below, produce a COMPREHENSIVE set of search terms so the final
+query captures every relevant paper — thorough, not generic, and not missing variants.
+DO NOT write any PubMed syntax — no square brackets, quotes, Boolean operators, or
+parentheses. Just the plain term strings.
 
 PICO concepts to expand:
-  intervention: {intervention_clean or "(none)"}
-  outcome:      {outcome_clean or "(none)"}
-  population:   {population_clean or "(none)"}
+  intervention/exposure: {intervention_clean or "(none)"}
+  outcome:               {outcome_clean or "(none)"}
+  population:            {population_clean or "(none)"}
+
+For each concept, the free-text synonym list should COVER THE WHOLE CONCEPT, including:
+  • the user's exact phrase(s), verbatim
+  • singular/plural and hyphenation variants (e.g. "pet owner", "pet owners", "pet-owner")
+  • British and American spellings (e.g. "behaviour"/"behavior")
+  • common abbreviations / acronyms AND their expansions (e.g. "T2DM", "type 2 diabetes")
+  • lay and technical phrasings authors actually use
+  • closely related wording for the SAME concept (e.g. "cat ownership" → "pet ownership",
+    "companion animal", "feline", "owning a cat")
+Stay on-concept: do NOT drift to a different idea or over-broaden into unrelated topics.
+Also give the relevant PubMed MeSH headings, including closely related / narrower headings.
 
 Return ONLY a JSON object with these exact keys:
 {{
-  "intervention_synonyms": [ "...", "...", ...],   // 3-8 free-text synonyms / common phrasings
-  "intervention_mesh":     [ "...", "...", ...],   // 1-3 PubMed MeSH controlled-vocabulary headings
-  "outcome_synonyms":      [ "...", "...", ...],
-  "outcome_mesh":          [ "...", "...", ...],
-  "population_synonyms":   [ "...", "...", ...],   // empty array if population is broad (adults/humans)
-  "population_mesh":       [ "...", "...", ...]
+  "intervention_synonyms": [ "...", ...],   // 6-15 thorough synonyms / variants
+  "intervention_mesh":     [ "...", ...],   // 1-4 MeSH controlled-vocabulary headings
+  "outcome_synonyms":      [ "...", ...],   // 6-15
+  "outcome_mesh":          [ "...", ...],   // 1-4
+  "population_synonyms":   [ "...", ...],   // [] if the population is broad (all adults / humans)
+  "population_mesh":       [ "...", ...]
 }}
 
 EXAMPLES:
   For intervention = "Mediterranean diet":
     intervention_synonyms: ["Mediterranean diet", "Mediterranean dietary pattern",
-                            "Mediterranean-style diet", "Med diet"]
+                            "Mediterranean-style diet", "Med diet", "MedDiet",
+                            "Mediterranean eating pattern", "Cretan diet"]
     intervention_mesh:     ["Diet, Mediterranean"]
 
   For outcome = "longevity":
-    outcome_synonyms: ["longevity", "lifespan", "life expectancy", "all-cause mortality",
-                       "aging", "healthspan"]
+    outcome_synonyms: ["longevity", "lifespan", "life span", "life expectancy",
+                       "all-cause mortality", "survival", "aging", "ageing", "healthspan"]
     outcome_mesh:     ["Longevity", "Mortality", "Aging"]
 
   For population = "humans" (broad → no narrowing terms):
     population_synonyms: []
     population_mesh:     []
 
-NEVER paraphrase the user's stated terms — if the intervention says "Mediterranean diet", the
-phrase "Mediterranean diet" MUST appear in intervention_synonyms exactly as written.
+NEVER paraphrase the user's stated terms — if the intervention says "Mediterranean diet",
+the phrase "Mediterranean diet" MUST appear in intervention_synonyms exactly as written.
 """
 
         synonyms: Dict[str, Dict[str, List[str]]] = {
