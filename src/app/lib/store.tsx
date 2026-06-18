@@ -467,6 +467,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     fullTextOverrides,
     rerankThreshold, rerankResults,
     results, fullTextResults, snowballResults, snowballScreened, extractedPapers, prisma,
+    // Planning (search-design) outputs + per-tab run results so a session keeps
+    // everything that's been run, including acquired full texts. The local
+    // autosave drops fullTexts only as a fallback if it would exceed the
+    // localStorage quota; backend sessions always keep them.
+    simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary,
+    textExtractions, fullTexts,
   });
 
   const hydrate = (d: any) => {
@@ -497,6 +503,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setSnowballScreened(d.snowballScreened ?? null);
     setExtractedPapers(d.extractedPapers ?? null);
     if (d.prisma) setPrisma(d.prisma);
+    // Planning + per-tab run outputs.
+    setSimulation(d.simulation ?? null);
+    if (Array.isArray(d.simulationRuns)) setSimulationRuns(d.simulationRuns);
+    setDbTestResults(d.dbTestResults ?? null);
+    setAgenticTrace(d.agenticTrace ?? null);
+    setAgenticSummary(d.agenticSummary ?? null);
+    if (Array.isArray(d.textExtractions)) setTextExtractions(d.textExtractions);
+    // Only restore full texts when present — a quota-trimmed local snapshot
+    // omits them, and we don't want to wipe anything already loaded.
+    if (d.fullTexts && typeof d.fullTexts === "object") setFullTexts(d.fullTexts);
   };
 
   // ── Local persistence ─────────────────────────────────────────────────────
@@ -507,16 +523,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!localRestored.current) return;          // wait until restore has run
     const t = setTimeout(() => {
+      if (history.length === 0) { try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } return; }
+      // Envelope keeps the session identity with the data, so a refresh keeps
+      // editing the SAME session instead of spawning a duplicate.
+      const env = { data: snapshot(), sessionId: currentSessionId, sessionTitle: currentSessionTitle };
       try {
-        if (history.length === 0) { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); return; }
-        // Envelope keeps the session identity with the data, so a refresh keeps
-        // editing the SAME session instead of spawning a duplicate.
-        localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({
-          data: snapshot(),
-          sessionId: currentSessionId,
-          sessionTitle: currentSessionTitle,
-        }));
-      } catch { /* quota exceeded or unserialisable — skip this cycle */ }
+        localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify(env));
+      } catch {
+        // Likely the quota — full texts are by far the heaviest field. Save
+        // everything else so the session still restores; the raw full-text
+        // bodies can be re-fetched on the Acquisition tab. (Backend sessions
+        // still keep them.)
+        try {
+          const { fullTexts: _omit, ...lean } = env.data as any;
+          localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ ...env, data: lean }));
+        } catch { /* still too big — skip this cycle */ }
+      }
     }, 600);
     return () => clearTimeout(t);
   }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
@@ -524,6 +546,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       qualityReports, excludedByQuality, qualityOverrides, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
       snowballResults, snowballScreened, extractedPapers, prisma,
+      simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
       currentSessionId, currentSessionTitle]);
 
   useEffect(() => {

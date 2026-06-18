@@ -333,7 +333,7 @@ export function SnowballPage() {
                       onClick={() => setSelectedSeed(seed)}
                       className={`w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
                     >
-                      <div className="text-sm line-clamp-2 leading-snug mb-1">{seed}</div>
+                      <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden mb-1">{seed}</div>
                       <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
                         <Badge variant="outline" className="text-[10px]">{items.length}</Badge>
                         {b > 0 && <span className="flex items-center gap-0.5"><ArrowDownLeft className="size-3" />{b}</span>}

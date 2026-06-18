@@ -238,7 +238,7 @@ export function AcquisitionPage() {
                     <StatusDot status={r.status} />
                     <Badge variant="outline" className="text-[10px]">{r.source}</Badge>
                   </div>
-                  <div className="text-sm line-clamp-2 leading-snug">{r.title}</div>
+                  <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{r.title}</div>
                 </button>
               );
             })}
