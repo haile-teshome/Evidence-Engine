@@ -3,8 +3,39 @@
 # Data models and structures
 # ============================================================================
 
+import html
+import re
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
+
+# Inline formatting tags that sources (Europe PMC, PubMed, CrossRef JATS, …)
+# leave in titles/abstracts, e.g. "<i>T. gondii</i>". We strip ONLY these known
+# tags (not arbitrary <...>) so math like "p < 0.05" is preserved.
+_FMT_TAG_RE = re.compile(
+    r"</?(?:i|b|u|em|strong|sub|sup|inf|sc|span|bold|italic|underline|small|p|br|"
+    r"title|sec|xref|ext-link|jats:[\w-]+)\b[^>]*>",
+    re.IGNORECASE,
+)
+
+
+def clean_markup(s: Optional[str]) -> str:
+    """Decode HTML entities and strip inline markup tags from source text.
+
+    Handles double-encoded entities (e.g. "&amp;lt;i&amp;gt;") and the raw-tag
+    case ("<i>…</i>"), collapsing whitespace afterwards. Returns "" for falsy
+    input.
+    """
+    if not s:
+        return s or ""
+    out = str(s)
+    # Decode entities, twice if the source double-encoded them.
+    for _ in range(2):
+        decoded = html.unescape(out)
+        if decoded == out:
+            break
+        out = decoded
+    out = _FMT_TAG_RE.sub("", out)
+    return re.sub(r"\s+", " ", out).strip()
 
 
 @dataclass
@@ -38,7 +69,14 @@ class Paper:
     abstract: str
     score: Optional[int] = None
     url: str = ""
-    
+
+    def __post_init__(self):
+        # Normalise source markup once, so every downstream consumer (display,
+        # title matching for full-text retrieval, screening, extraction) sees
+        # clean text instead of "<i>…</i>" / "&lt;i&gt;".
+        self.title = clean_markup(self.title)
+        self.abstract = clean_markup(self.abstract)
+
     def to_dict(self) -> Dict[str, Any]:
         result = {
             "Source": self.source,

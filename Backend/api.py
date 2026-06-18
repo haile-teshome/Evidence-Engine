@@ -38,7 +38,7 @@ from fastapi.responses import StreamingResponse, RedirectResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from config import Config
-from models import Paper as BackendPaper, PICOCriteria
+from models import Paper as BackendPaper, PICOCriteria, clean_markup
 from utils import AIService, Deduplicator, AITableExtractor
 from data_services import DataAggregator
 from leads_screening import (
@@ -1125,38 +1125,49 @@ def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any
         "outcome":      {"vote": "NA", "evidence": "", "reasoning": ""},
         "overall_reasoning": "",
     }
-    if not model or not abstract:
+    if not model:
         return empty
+
+    has_abstract = bool(abstract)
+    abstract_block = abstract[:6000] if has_abstract else (
+        "(NO ABSTRACT AVAILABLE — judge ONLY from the paper title above. "
+        "Infer the likely population/intervention/outcome from the title, do NOT "
+        "fabricate quotes, and explain your best-effort judgement.)"
+    )
 
     prompt = f"""You are screening a paper against a PICO frame for a systematic review.
 For EACH of the four PICO elements below, decide a vote of PASS, PARTIAL, or FAIL.
 Never use "NA" or "UNCERTAIN" — pick the closest of the three labels:
 
-  • PASS    — the abstract clearly satisfies this element (explicit match).
-  • PARTIAL — the abstract relates to this element but the match is implicit,
-              broader, narrower, or otherwise "on par but not explicit"
-              (e.g. broader population, surrogate outcome, related setting).
-              USE THIS GENEROUSLY when the abstract touches the concept at all.
-  • FAIL    — the abstract addresses this element AND the match is clearly
-              wrong, OR the abstract makes no mention whatsoever of anything
-              relevant to this element.
+  • PASS    — the title/abstract clearly satisfies this element (explicit match).
+  • PARTIAL — it relates to this element but the match is implicit, broader,
+              narrower, or otherwise "on par but not explicit" (e.g. broader
+              population, surrogate outcome, related setting). USE THIS
+              GENEROUSLY when the text touches the concept at all, and when you
+              are inferring from a title alone.
+  • FAIL    — the text addresses this element AND the match is clearly wrong, OR
+              makes no mention whatsoever of anything relevant to this element.
 
 For every vote also return:
   • evidence: a SHORT verbatim phrase or sentence copied directly from the
-    abstract (≤ 200 characters) that best supports your vote. Pick the closest
-    matching span even when the match is loose.
-  • reasoning: one sentence, SPECIFIC to this abstract (name what the paper
-    actually studied — its real population/intervention/outcome), explaining the
-    vote. Do not write a generic statement.
+    abstract (≤ 200 characters) that best supports your vote. If there is no
+    abstract, return an empty string for evidence — never invent a quote.
+  • reasoning: one sentence, SPECIFIC to THIS paper — name what the paper
+    actually studied (its real population/intervention/outcome as stated in the
+    title or abstract) and why that earns the vote. Never leave it blank and
+    never write a generic template sentence.
 
-Also write a 2-3 sentence "overall_reasoning" that (a) names in one clause what
-THIS paper is actually about, then (b) states the specific PICO element(s) it
-matches or fails and why, referencing concrete terms from the abstract. Do NOT
-write a generic sentence such as "the paper does not address any of the PICO
-elements explicitly or implicitly" — be concrete and specific to this study.
+ALWAYS write a 2-3 sentence "overall_reasoning" that (a) names in one clause what
+THIS paper is actually about (use the title when there's no abstract), then
+(b) states the specific PICO element(s) it matches or fails and why, referencing
+concrete terms from the title/abstract. It must NEVER be blank. Do NOT write a
+generic sentence such as "the paper does not address any of the PICO elements"
+or "it lacks specificity regarding validated outcomes" — always ground it in
+this study's actual topic. When only a title is available, say what the title
+implies and flag what remains uncertain pending full text.
 
 PICO:
-  Population:   {pico.population or '(unspecified — judge as "NA" unless clearly mismatched)'}
+  Population:   {pico.population or '(unspecified)'}
   Intervention: {pico.intervention or '(unspecified)'}
   Comparator:   {pico.comparator or '(unspecified)'}
   Outcome:      {pico.outcome or '(unspecified)'}
@@ -1164,7 +1175,7 @@ PICO:
 PAPER TITLE: {title}
 
 PAPER ABSTRACT:
-{abstract[:6000]}
+{abstract_block}
 
 Return ONLY a JSON object with EXACTLY this shape:
 {{
@@ -1275,12 +1286,19 @@ NEVER fabricate a quote that does not appear in the abstract.
     comparator   = _clean_field(data.get("comparator"),   pico.comparator   or "")
     outcome      = _clean_field(data.get("outcome"),      pico.outcome      or "")
 
-    # Invariant: if every PICO field came back NA (no quote could be anchored
-    # anywhere), overall_reasoning is empty too. There is nothing defensible
-    # to summarise across an empty assessment.
+    # Never leave the reason blank — fall back to a record-specific, best-effort
+    # sentence grounded in the title (the PICO chips may still be NA when no
+    # quote could be anchored, but the reviewer always gets a "why").
     overall_reasoning = str(data.get("overall_reasoning") or "").strip()[:800]
-    if all(f["vote"] == "NA" for f in (population, intervention, comparator, outcome)):
-        overall_reasoning = ""
+    if not overall_reasoning:
+        t = title if title and title != "(untitled)" else "this record"
+        overall_reasoning = (
+            f'Based only on the title ("{title[:140]}"), a confident PICO match could not '
+            f"be confirmed without an abstract — assess {t} at full text."
+            if not has_abstract else
+            f'The abstract for "{title[:140]}" could not be mapped to the PICO frame with '
+            f"confidence — assess at full text."
+        )
 
     return {
         "population":   population,
@@ -1350,39 +1368,14 @@ def _normalize_abstract_decision(
         except Exception as e:
             print(f"[normalize_abstract] pico_assess failed: {e}")
 
-    # Honour the invariant from _pico_assess: if every PICO field came back NA
-    # (i.e. the abstract was missing or no defensible quote could be anchored
-    # anywhere), the cross-cutting Reason must also be empty — we have no
-    # basis for a free-text justification either. Only fall back to the
-    # screener-supplied reason / boilerplate when at least one PICO element
-    # has a real verdict.
-    pico_fields = (
-        pico_assessment.get("population"),
-        pico_assessment.get("intervention"),
-        pico_assessment.get("comparator"),
-        pico_assessment.get("outcome"),
+    # _pico_assess always returns a record-specific, non-blank overall_reasoning
+    # (it judges from the title when no abstract is present), so use it directly.
+    # Only fall back to the screener's own reason, then a minimal default.
+    overall_reasoning = (
+        str(pico_assessment.get("overall_reasoning") or "").strip()
+        or reason.strip()
+        or ("Meets inclusion criteria" if decision_upper == "INCLUDE" else "Excluded")
     )
-    all_pico_na = all(
-        (isinstance(f, dict) and f.get("vote") == "NA") for f in pico_fields
-    )
-    if all_pico_na:
-        # No PICO element could be judged. Give an accurate, non-fabricated
-        # reason instead of a blank cell: either there was no abstract to
-        # screen, or the abstract never touches the PICO frame.
-        if not abstract.strip():
-            overall_reasoning = (
-                "No abstract was available, so this record could not be screened against "
-                "the PICO criteria. Retrieve the abstract or assess this study at full text."
-            )
-        else:
-            overall_reasoning = (
-                "The abstract does not mention the population, intervention, comparison, or "
-                "outcome defined in your PICO frame, so none of the elements could be assessed."
-            )
-    else:
-        overall_reasoning = pico_assessment.get("overall_reasoning") or reason or (
-            "Meets inclusion criteria" if decision_upper == "INCLUDE" else "Excluded"
-        )
 
     return {
         "paper_id": paper.id,
@@ -1669,6 +1662,64 @@ def _pico_evidence_for_text(source_text: str, pico: PICOCriteria) -> Dict[str, D
     return out
 
 
+def _fulltext_reason(
+    title: str, source_text: str, pico: PICOCriteria, decision: str,
+    inclusion: List[str], exclusion: List[str], criteria_eval: Dict[str, str],
+    has_full_text: bool, model_name: str,
+) -> str:
+    """LLM-written, study-specific eligibility justification for the Reason column.
+
+    Explains WHY this paper was included/excluded in plain prose grounded in the
+    actual text — not a generic "Population mismatch" template.
+    """
+    from langchain_core.messages import HumanMessage
+
+    model = AIService.get_model(model_name)
+    if not model:
+        return ""
+    text_block = (source_text or "").strip()[:8000] or "(no full text or abstract available)"
+    inc_lines = "\n".join(f"  - {c}: {criteria_eval.get(c, '?')}" for c in inclusion) or "  (none specified)"
+    exc_lines = "\n".join(f"  - {c}: {criteria_eval.get(c, '?')}" for c in exclusion) or "  (none specified)"
+
+    prompt = f"""You are writing the eligibility justification for a systematic-review
+FULL-TEXT screening decision. The decision already made is: {decision.upper()}.
+
+Write 2-4 plain-prose sentences explaining SPECIFICALLY why this study was {decision}d:
+  • Name what THIS paper actually is — its population, study design, intervention/
+    exposure, and outcomes — using concrete terms from the text.
+  • State which PICO element(s) and which inclusion/exclusion criteria drove the
+    decision and WHY, referencing the paper's real content (e.g. "excluded because
+    the sample was children with diabetes, not the target adult population").
+  • If only an abstract is available (no full text), say the judgement is based on
+    the abstract and flag the main uncertainty.
+  • NEVER output a generic template like "Population mismatch; Intervention
+    mismatch" or "lacks specificity". Be concrete, specific, and readable.
+
+PICO frame:
+  Population:   {pico.population or '(unspecified)'}
+  Intervention: {pico.intervention or '(unspecified)'}
+  Comparator:   {pico.comparator or '(unspecified)'}
+  Outcome:      {pico.outcome or '(unspecified)'}
+
+Inclusion criteria and verdicts:
+{inc_lines}
+Exclusion criteria and verdicts:
+{exc_lines}
+
+PAPER TITLE: {title}
+{'FULL TEXT' if has_full_text else 'ABSTRACT (no full text was retrieved)'}:
+{text_block}
+
+Return ONLY the justification prose — no JSON, no headings, no bullet points."""
+
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        return str(getattr(r, "content", "") or "").strip()[:1200]
+    except Exception as e:
+        print(f"[fulltext_reason] {e}")
+        return ""
+
+
 @app.post("/api/screen/fulltext")
 def screen_fulltext(req: ScreenFullTextRequest):
     _ss["inclusion_list"] = list(req.inclusion or [])
@@ -1732,30 +1783,38 @@ def screen_fulltext(req: ScreenFullTextRequest):
 
     pico_evidence = _pico_evidence_for_text(source_text, pico)
 
-    # Deterministically synthesise a one-paragraph Reason from the PICO match
-    # quality + criteria stats so the UI's Reason column is never empty / N/A.
-    # The LLM's raw reason (if any) is appended verbatim at the end.
-    def _pico_label(elem: str) -> str:
-        m = (pico_evidence.get(elem, {}) or {}).get("match", "no")
-        if m == "yes":     return f"{elem} match"
-        if m == "partial": return f"{elem} partial"
-        return f"{elem} mismatch"
-
-    pico_summary = "; ".join(_pico_label(e) for e in ("Population", "Intervention", "Comparator", "Outcome"))
+    # Primary Reason: a study-specific, LLM-written justification explaining WHY
+    # this paper was included/excluded. Falls back to a deterministic summary
+    # (PICO match labels + criteria stats) if the model is unavailable/errors.
     inc_total = len(req.inclusion or [])
     exc_total = len(req.exclusion or [])
-    parts: List[str] = [f"PICO: {pico_summary}."]
-    if inc_total > 0 or exc_total > 0:
-        parts.append(
-            f"Met {inclusion_score} of {inc_total} inclusion criteria; "
-            f"{exclusion_violations} of {exc_total} exclusion violation"
-            f"{'' if exclusion_violations == 1 else 's'}."
-        )
-    raw_reason = str(raw.get("reason", "")).strip()
-    # Drop trivial / placeholder reasons that don't add information.
-    if raw_reason and raw_reason.lower() not in {"include", "exclude", "n/a", "na", "none", ""}:
-        parts.append(raw_reason)
-    synthesised_reason = " ".join(parts)
+
+    reason_model = resolve_for_thinking(req.model)
+    synthesised_reason = _fulltext_reason(
+        req.paper.title, source_text, pico, decision,
+        list(req.inclusion or []), list(req.exclusion or []), criteria_eval,
+        bool(req.fullText), reason_model,
+    )
+
+    if not synthesised_reason:
+        def _pico_label(elem: str) -> str:
+            m = (pico_evidence.get(elem, {}) or {}).get("match", "no")
+            if m == "yes":     return f"{elem} match"
+            if m == "partial": return f"{elem} partial"
+            return f"{elem} mismatch"
+
+        pico_summary = "; ".join(_pico_label(e) for e in ("Population", "Intervention", "Comparator", "Outcome"))
+        parts: List[str] = [f"PICO: {pico_summary}."]
+        if inc_total > 0 or exc_total > 0:
+            parts.append(
+                f"Met {inclusion_score} of {inc_total} inclusion criteria; "
+                f"{exclusion_violations} of {exc_total} exclusion violation"
+                f"{'' if exclusion_violations == 1 else 's'}."
+            )
+        raw_reason = str(raw.get("reason", "")).strip()
+        if raw_reason and raw_reason.lower() not in {"include", "exclude", "n/a", "na", "none", ""}:
+            parts.append(raw_reason)
+        synthesised_reason = " ".join(parts)
 
     return {
         "paper_id": req.paper.id,
@@ -2136,6 +2195,12 @@ def citations(req: CitationsRequest):
     # Reference/citation lists often omit abstracts — backfill them so the
     # downstream screening has something to work with.
     _enrich_missing_abstracts(out)
+
+    # Strip source markup (e.g. "<i>T. gondii</i>") from titles/abstracts.
+    for it in out:
+        it["title"] = clean_markup(it.get("title"))
+        if it.get("abstract"):
+            it["abstract"] = clean_markup(it["abstract"])
 
     return {"citations": out}
 
