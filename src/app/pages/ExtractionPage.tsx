@@ -16,7 +16,7 @@ import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import ExcelJS from "exceljs";
 
-type Format = "DataFrame" | "CSV Export" | "JSON Export" | "Excel Export";
+type Format = "CSV Export" | "JSON Export" | "Excel Export";
 
 export function ExtractionPage() {
   const s = useStore();
@@ -110,8 +110,7 @@ export function ExtractionPage() {
       <Card className="p-3">
         <div className="flex items-end gap-3 flex-wrap">
           <div className="mr-auto min-w-0">
-            <h3 className="font-medium leading-tight">Table Extraction</h3>
-            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+            <div className="flex flex-wrap items-center gap-1.5">
               <Pill icon={FileText} title="Included papers available for extraction">{passed.length} included</Pill>
               {ep && <Pill icon={Table2} tone="green" title="Papers with extractable tables">{withTables} with tables</Pill>}
               {ep && withoutTables > 0 && (
@@ -124,10 +123,9 @@ export function ExtractionPage() {
             <Select value={format} onValueChange={v => setFormat(v as Format)}>
               <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="DataFrame">DataFrame</SelectItem>
-                <SelectItem value="CSV Export">CSV Export</SelectItem>
-                <SelectItem value="JSON Export">JSON Export</SelectItem>
-                <SelectItem value="Excel Export">Excel Export</SelectItem>
+                <SelectItem value="CSV Export">CSV</SelectItem>
+                <SelectItem value="JSON Export">JSON</SelectItem>
+                <SelectItem value="Excel Export">Excel</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -330,8 +328,8 @@ function exportTableCsv(paper: { Paper_Title: string }, t: { data: string[][] },
 }
 
 // Export a single table honouring the currently-selected output format, mirroring
-// how exportAll() routes each format: JSON → .json, CSV → .csv, and both Excel and
-// DataFrame → a one-paper, one-table styled workbook (reusing the bulk XLSX path).
+// how exportAll() routes each format: JSON → .json, CSV → .csv, Excel → a
+// one-paper, one-table styled workbook (reusing the bulk XLSX path).
 function exportTable(paper: ExtractedPaper, t: ExtractedPaper["Extracted_Tables"][number], i: number, format: Format) {
   const slug = paper.Paper_Title.slice(0, 30).replace(/\s/g, "_");
   if (format === "JSON Export") {
@@ -339,7 +337,6 @@ function exportTable(paper: ExtractedPaper, t: ExtractedPaper["Extracted_Tables"
   } else if (format === "CSV Export") {
     exportTableCsv(paper, t, i);
   } else {
-    // "Excel Export" and "DataFrame"
     void downloadExtractedTablesXlsx([{ ...paper, Extracted_Tables: [t] }]);
   }
 }

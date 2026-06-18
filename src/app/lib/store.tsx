@@ -509,7 +509,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const t = setTimeout(() => {
       try {
         if (history.length === 0) { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); return; }
-        localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify(snapshot()));
+        // Envelope keeps the session identity with the data, so a refresh keeps
+        // editing the SAME session instead of spawning a duplicate.
+        localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({
+          data: snapshot(),
+          sessionId: currentSessionId,
+          sessionTitle: currentSessionTitle,
+        }));
       } catch { /* quota exceeded or unserialisable — skip this cycle */ }
     }, 600);
     return () => clearTimeout(t);
@@ -517,14 +523,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
       qualityReports, excludedByQuality, qualityOverrides, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
-      snowballResults, snowballScreened, extractedPapers, prisma]);
+      snowballResults, snowballScreened, extractedPapers, prisma,
+      currentSessionId, currentSessionTitle]);
 
   useEffect(() => {
     if (localRestored.current) return;
     localRestored.current = true;
     try {
       const raw = localStorage.getItem(LOCAL_SNAPSHOT_KEY);
-      if (raw) hydrate(JSON.parse(raw));
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      // Back-compat: older snapshots stored the bare data object.
+      const data = parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
+      hydrate(data);
+      // Restore the session identity so auto-save updates this session rather
+      // than creating a new one on every refresh.
+      if (parsed && parsed.sessionId) setCurrentSessionId(parsed.sessionId);
+      if (parsed && parsed.sessionTitle) setCurrentSessionTitle(parsed.sessionTitle);
     } catch { /* corrupt snapshot — ignore */ }
   }, []);
 
