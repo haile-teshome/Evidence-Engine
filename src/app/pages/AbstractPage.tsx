@@ -243,7 +243,7 @@ export function AbstractPage() {
                   <tr className="text-left">
                     <th className="px-3 py-2 sticky left-0 bg-muted z-40 border-b border-r min-w-[60px] text-center" title="Reviewer override — check to keep, uncheck to drop">Keep</th>
                     <th className="px-3 py-2 sticky left-[60px] bg-muted z-40 border-b border-r min-w-[120px]">Decision</th>
-                    <th className="px-3 py-2 sticky left-[180px] bg-muted z-40 border-b border-r min-w-[260px] max-w-[260px]">Title</th>
+                    <th className="px-3 py-2 sticky left-[180px] bg-muted z-40 border-b border-r min-w-[260px] max-w-[260px] shadow-[6px_0_8px_-6px_rgba(0,0,0,0.22)]">Title</th>
                     <th className="px-3 py-2 border-b whitespace-nowrap">Source</th>
                     <th className="px-3 py-2 border-b text-center">P</th>
                     <th className="px-3 py-2 border-b text-center">I</th>
@@ -259,8 +259,8 @@ export function AbstractPage() {
                     const isOverridden = eff !== row.Decision;
                     const keep = eff === "INCLUDE";
                     return (
-                      <tr key={row.paper_id} className="border-b last:border-b-0 align-top group/row">
-                        <td className="px-3 py-2 sticky left-0 z-20 border-r bg-card group-hover/row:bg-muted text-center">
+                      <tr key={row.paper_id} className="border-b last:border-b-0 align-top bg-card hover:bg-muted">
+                        <td className="px-3 py-2 sticky left-0 z-20 border-r bg-inherit text-center">
                           <Checkbox
                             checked={keep}
                             onCheckedChange={(v) => {
@@ -293,28 +293,28 @@ export function AbstractPage() {
                             aria-label="Keep this paper"
                           />
                         </td>
-                        <td className="px-3 py-2 sticky left-[60px] z-20 border-r bg-card group-hover/row:bg-muted">
+                        <td className="px-3 py-2 sticky left-[60px] z-20 border-r bg-inherit">
                           <DecisionCell value={eff} overridden={isOverridden} aiValue={row.Decision} />
                         </td>
-                        <td className="px-3 py-2 sticky left-[180px] z-20 border-r min-w-[260px] max-w-[260px] bg-card group-hover/row:bg-muted">
+                        <td className="px-3 py-2 sticky left-[180px] z-20 border-r min-w-[260px] max-w-[260px] bg-inherit shadow-[6px_0_8px_-6px_rgba(0,0,0,0.18)]">
                           <a href={row.URL} target="_blank" rel="noreferrer" className="hover:underline break-words">
                             {row.Title}
                           </a>
                         </td>
-                        <td className="px-3 py-2"><Badge variant="outline">{row.Source}</Badge></td>
-                        <td className="px-3 py-2 text-center">
+                        <td className="px-3 py-2 bg-inherit"><Badge variant="outline">{row.Source}</Badge></td>
+                        <td className="px-3 py-2 text-center bg-inherit">
                           <PicoCell label="Population" field={pa?.population} criterion={s.pico.population} />
                         </td>
-                        <td className="px-3 py-2 text-center">
+                        <td className="px-3 py-2 text-center bg-inherit">
                           <PicoCell label="Intervention" field={pa?.intervention} criterion={s.pico.intervention} />
                         </td>
-                        <td className="px-3 py-2 text-center">
+                        <td className="px-3 py-2 text-center bg-inherit">
                           <PicoCell label="Comparator" field={pa?.comparator} criterion={s.pico.comparator} />
                         </td>
-                        <td className="px-3 py-2 text-center">
+                        <td className="px-3 py-2 text-center bg-inherit">
                           <PicoCell label="Outcome" field={pa?.outcome} criterion={s.pico.outcome} />
                         </td>
-                        <td className="px-3 py-2 text-foreground/90 min-w-[380px] group-hover/row:bg-muted">
+                        <td className="px-3 py-2 text-foreground/90 min-w-[380px] bg-inherit">
                           {row.Reason}
                         </td>
                       </tr>

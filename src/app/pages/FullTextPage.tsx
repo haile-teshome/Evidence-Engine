@@ -28,45 +28,58 @@ export function FullTextPage() {
   const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
   if (passed.length === 0) return <Alert><AlertDescription>No papers passed abstract screening — adjust your criteria and rerun.</AlertDescription></Alert>;
 
-  async function run() {
+  // Screen `targets`. When `append`, keep the existing results and add the new
+  // rows (used to screen papers added after the first run, e.g. via snowball);
+  // otherwise replace the whole table.
+  async function run(targets: typeof passed = passed, append = false) {
+    const list = targets;
+    if (list.length === 0) { toast.info("Nothing to screen."); return; }
     const { abort } = s.startTask("full-text-screen", [{ id: "ft", label: "Full-text screening", status: "running" }]);
-    s.updateTask("full-text-screen", { progress: { done: 0, total: passed.length } });
+    s.updateTask("full-text-screen", { progress: { done: 0, total: list.length } });
     const signal = abort.signal;
     const start = Date.now();
     try {
       const out: FullTextResult[] = [];
-      const ftReasons: Record<string, number> = {};
-      for (let i = 0; i < passed.length; i++) {
+      for (let i = 0; i < list.length; i++) {
         if (signal.aborted) break;
         s.updateTask("full-text-screen", {
-          progress: { done: i, total: passed.length, label: passed[i].Title.slice(0, 80) },
-          detail: passed[i].Title.slice(0, 80),
+          progress: { done: i, total: list.length, label: list[i].Title.slice(0, 80) },
+          detail: list[i].Title.slice(0, 80),
         });
         try {
           const r = await AIService.screenFullTextMultiAgent(
-            { paper_id: passed[i].paper_id, Title: passed[i].Title, URL: passed[i].URL, Source: passed[i].Source, Abstract: passed[i].Abstract },
+            { paper_id: list[i].paper_id, Title: list[i].Title, URL: list[i].URL, Source: list[i].Source, Abstract: list[i].Abstract },
             s.inclusion, s.exclusion,
-            s.fullTexts[passed[i].paper_id]?.text,
+            s.fullTexts[list[i].paper_id]?.text,
             signal,
             s.pico,
           );
           out.push(r);
-          if (r.Decision === "Exclude") {
-            const bucket = categoriseFullTextExclusion(r, s.inclusion, s.exclusion);
-            ftReasons[bucket] = (ftReasons[bucket] || 0) + 1;
-          }
         } catch (e: any) {
           if (signal.aborted) break;
           console.error(`full-text-screen ${i + 1} failed:`, e?.message);
         }
-        s.updateTask("full-text-screen", { progress: { done: i + 1, total: passed.length } });
+        s.updateTask("full-text-screen", { progress: { done: i + 1, total: list.length } });
       }
-      s.setFullTextResults(out);
+      // Merge with existing results when appending; otherwise replace. Dedupe by
+      // paper_id so a re-screen of an existing paper overwrites the old row.
+      const prior = append && s.fullTextResults ? s.fullTextResults : [];
+      const byId = new Map(prior.map(r => [r.paper_id, r]));
+      out.forEach(r => byId.set(r.paper_id, r));
+      const combined = Array.from(byId.values());
+      s.setFullTextResults(combined);
       s.setFtDuration((Date.now() - start) / 1000);
-      s.setPrisma(p => ({ ...p, ft_exclusion_breakdown: ftReasons, included_final: out.filter(x => x.Decision === "Include").length }));
+      const ftReasons: Record<string, number> = {};
+      for (const r of combined) {
+        if (r.Decision === "Exclude") {
+          const bucket = categoriseFullTextExclusion(r, s.inclusion, s.exclusion);
+          ftReasons[bucket] = (ftReasons[bucket] || 0) + 1;
+        }
+      }
+      s.setPrisma(p => ({ ...p, ft_exclusion_breakdown: ftReasons, included_final: combined.filter(x => x.Decision === "Include").length }));
       if (signal.aborted) {
         s.updateTask("full-text-screen", { status: "canceled" });
-        toast.info(`Canceled — ${out.length} of ${passed.length} screened`);
+        toast.info(`Canceled — ${out.length} of ${list.length} screened`);
       } else {
         s.updateTask("full-text-screen", { status: "done" });
         toast.success(`Full-text screening complete in ${formatDuration((Date.now() - start) / 1000)}`);
@@ -78,6 +91,9 @@ export function FullTextPage() {
 
   const ft = s.fullTextResults;
   const allCriteria = [...s.inclusion, ...s.exclusion];
+  // Papers in the queue that haven't been screened at full text yet (e.g. added
+  // later via snowball) — offer to screen just these without redoing the rest.
+  const newPapers = ft ? passed.filter(p => !ft.some(r => r.paper_id === p.paper_id)) : [];
 
   return (
     <div className="space-y-4">
@@ -91,7 +107,7 @@ export function FullTextPage() {
               onCancel={() => s.cancelTask("full-text-screen")}
             />
           )}
-          <Button onClick={run} disabled={running} size="lg" className="w-full">
+          <Button onClick={() => run()} disabled={running} size="lg" className="w-full">
             <FlaskConical className="size-4 mr-2" />{running ? "Analyzing..." : "Begin Full-Text Screening"}
           </Button>
         </>
@@ -105,13 +121,21 @@ export function FullTextPage() {
             const overrideCount = ft.filter(x => effectiveFullTextDecision(x, s.fullTextOverrides) !== x.Decision).length;
             return (
               <>
-                <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
                   <h3 className="font-medium">Full-Text Results</h3>
-                  <div className="flex gap-2 items-center">
+                  <div className="flex gap-2 items-center flex-wrap">
                     <Badge variant="secondary">{ft.length} papers</Badge>
                     <Badge className="bg-green-600">{includedEff} included</Badge>
                     <Badge variant="destructive">{excludedEff} excluded</Badge>
                     <Badge variant="outline">{formatDuration(s.ftDuration)}</Badge>
+                    {newPapers.length > 0 && (
+                      <Button size="sm" onClick={() => run(newPapers, true)} disabled={running}>
+                        <FlaskConical className="size-4 mr-1.5" />Screen {newPapers.length} new
+                      </Button>
+                    )}
+                    <Button size="sm" variant="outline" onClick={() => run(passed, false)} disabled={running}>
+                      <FlaskConical className="size-4 mr-1.5" />{running ? "Screening…" : "Re-run all"}
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -123,6 +147,15 @@ export function FullTextPage() {
                     </Button>
                   </div>
                 </div>
+                {task && task.status === "running" && (
+                  <div className="mb-3">
+                    <TaskProgressCard
+                      task={task}
+                      title="Full-text screening"
+                      onCancel={() => s.cancelTask("full-text-screen")}
+                    />
+                  </div>
+                )}
                 {overrideCount > 0 && (
                   <div className="text-xs text-muted-foreground mb-2">
                     {overrideCount} reviewer override{overrideCount === 1 ? "" : "s"} active — Decision column reflects the reviewer's choice.
@@ -137,7 +170,7 @@ export function FullTextPage() {
                 <tr className="text-left">
                   <th className="px-3 py-2 sticky left-0 bg-muted z-40 border-b border-r min-w-[60px] text-center" title="Reviewer override — check to keep, uncheck to drop">Keep</th>
                   <th className="px-3 py-2 sticky left-[60px] bg-muted z-40 border-b border-r min-w-[120px]">Decision</th>
-                  <th className="px-3 py-2 sticky left-[180px] bg-muted z-40 border-b border-r min-w-[300px] max-w-[300px]">Title</th>
+                  <th className="px-3 py-2 sticky left-[180px] bg-muted z-40 border-b border-r min-w-[300px] max-w-[300px] shadow-[6px_0_8px_-6px_rgba(0,0,0,0.22)]">Title</th>
                   <th className="px-3 py-2 border-b whitespace-nowrap border-l">Population</th>
                   <th className="px-3 py-2 border-b whitespace-nowrap">Intervention</th>
                   <th className="px-3 py-2 border-b whitespace-nowrap">Comparator</th>
@@ -156,8 +189,8 @@ export function FullTextPage() {
                   const isOverridden = eff !== row.Decision;
                   const keep = eff === "Include";
                   return (
-                  <tr key={row.paper_id} className="border-b last:border-b-0 align-top group/row">
-                    <td className="px-3 py-2 sticky left-0 z-20 border-r bg-card group-hover/row:bg-muted text-center">
+                  <tr key={row.paper_id} className="border-b last:border-b-0 align-top bg-card hover:bg-muted">
+                    <td className="px-3 py-2 sticky left-0 z-20 border-r bg-inherit text-center">
                       <Checkbox
                         checked={keep}
                         onCheckedChange={(v) => {
@@ -171,7 +204,7 @@ export function FullTextPage() {
                         aria-label="Keep this paper"
                       />
                     </td>
-                    <td className="px-3 py-2 sticky left-[60px] z-20 border-r whitespace-nowrap bg-card group-hover/row:bg-muted">
+                    <td className="px-3 py-2 sticky left-[60px] z-20 border-r whitespace-nowrap bg-inherit">
                       <div className="space-y-1">
                         <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${eff === "Include" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
                           {eff}
@@ -183,7 +216,7 @@ export function FullTextPage() {
                         )}
                       </div>
                     </td>
-                    <td className="px-3 py-2 sticky left-[180px] z-20 border-r min-w-[300px] max-w-[300px] bg-card group-hover/row:bg-muted">
+                    <td className="px-3 py-2 sticky left-[180px] z-20 border-r min-w-[300px] max-w-[300px] bg-inherit shadow-[6px_0_8px_-6px_rgba(0,0,0,0.18)]">
                       <a href={row.URL} target="_blank" rel="noreferrer" className="hover:underline break-words">
                         {row.Title}
                       </a>
@@ -196,7 +229,7 @@ export function FullTextPage() {
                           ? `The full text did not provide enough information to judge the ${k}.`
                           : `No ${k} was specified in your PICO frame, so there is nothing to assess this paper against. Add one on the Home page to enable this check.`;
                         return (
-                          <td key={k} className={`px-3 py-2 ${cls}`}>
+                          <td key={k} className={`px-3 py-2 bg-inherit ${cls}`}>
                             <Popover>
                               <PopoverTrigger asChild>
                                 <button>
@@ -216,7 +249,7 @@ export function FullTextPage() {
                         );
                       }
                       return (
-                        <td key={k} className={`px-3 py-2 ${cls}`}>
+                        <td key={k} className={`px-3 py-2 bg-inherit ${cls}`}>
                           <Popover>
                             <PopoverTrigger asChild>
                               <button>
@@ -251,7 +284,7 @@ export function FullTextPage() {
                         </span>
                       );
                       return (
-                        <td key={c} className="px-3 py-2">
+                        <td key={c} className="px-3 py-2 bg-inherit">
                           {ev ? (
                             <Popover>
                               <PopoverTrigger asChild>{badge}</PopoverTrigger>
@@ -274,7 +307,7 @@ export function FullTextPage() {
                         </td>
                       );
                     })}
-                    <td className="px-3 py-2 text-foreground/90 min-w-[320px]">{row.Reason}</td>
+                    <td className="px-3 py-2 text-foreground/90 min-w-[320px] bg-inherit">{row.Reason}</td>
                   </tr>
                   );
                 })}
