@@ -169,8 +169,8 @@ async function postJSON<T = any>(path: string, body: any, signal?: AbortSignal):
 // ---------------------------------------------------------------------------
 
 export const AIService = {
-  async inferPicoAndQuery(input: string, signal?: AbortSignal): Promise<Analysis> {
-    return postJSON<Analysis>("/pico/infer", { input, model: apiConfig.model }, signal);
+  async inferPicoAndQuery(input: string, prior?: Partial<Analysis> | null, signal?: AbortSignal): Promise<Analysis> {
+    return postJSON<Analysis>("/pico/infer", { input, prior: prior || undefined, model: apiConfig.model }, signal);
   },
 
   // Clarifying questions — called BEFORE the search runs. Returns 1-3 multiple-
@@ -191,11 +191,12 @@ export const AIService = {
     goal: string,
     picoSoFar: Record<string, string>,
     round: number,
+    asked: string[] = [],
     signal?: AbortSignal,
   ): Promise<{ done: boolean; question?: ClarifyingQuestion }> {
     return postJSON<{ done: boolean; question?: ClarifyingQuestion }>(
       "/pico/clarify-next",
-      { goal, pico_so_far: picoSoFar, round, model: apiConfig.model },
+      { goal, pico_so_far: picoSoFar, round, asked, model: apiConfig.model },
       signal,
     );
   },
