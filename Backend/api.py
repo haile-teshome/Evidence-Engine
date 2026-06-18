@@ -204,6 +204,9 @@ class InferRequest(BaseModel):
     input: str
     model: Optional[str] = None
     previous_goal: Optional[str] = ""
+    # Previous strategy to refine from (PICO + criteria), when this is a
+    # follow-up message rather than a brand-new research goal.
+    prior: Optional[Dict[str, Any]] = None
 
 
 class Analysis(BaseModel):
@@ -263,7 +266,7 @@ def _coerce_str_list(v: Any) -> List[str]:
 @app.post("/api/pico/infer", response_model=Analysis)
 def pico_infer(req: InferRequest):
     model_name = resolve_for_thinking(req.model)
-    data = AIService.infer_pico_and_query(req.input, model_name, req.previous_goal or "")
+    data = AIService.infer_pico_and_query(req.input, model_name, req.previous_goal or "", prior=req.prior)
     p_str = _pico_value(data.get("p", ""))
     i_str = _pico_value(data.get("i", ""))
     c_str = _pico_value(data.get("c", ""))
@@ -393,6 +396,7 @@ class ClarifyNextRequest(BaseModel):
     goal: str
     pico_so_far: Dict[str, str] = Field(default_factory=dict)
     round: int = 0   # total questions answered so far — used for the safety cap
+    asked: List[str] = Field(default_factory=list)  # PICO element ids already asked
     model: Optional[str] = None
 
 
@@ -415,14 +419,19 @@ def pico_clarify_next(req: ClarifyNextRequest):
 
     answered = {k: v for k, v in (req.pico_so_far or {}).items() if v and str(v).strip()}
 
-    # Absolute safety cap: 8 exchanges is more than enough for any PICO question.
-    if req.round >= 8:
+    # At most ONE clarifying question per PICO element. Once all four have been
+    # asked (or the safety cap is hit) we're done — no re-asking.
+    PICO_IDS = ["population", "intervention", "comparator", "outcome"]
+    asked = {str(a).strip().lower() for a in (req.asked or [])}
+    remaining = [p for p in PICO_IDS if p not in asked]
+    if req.round >= 4 or not remaining:
         return {"done": True}
 
     pico_lines = (
         "\n".join(f"  {k.upper()}: {v}" for k, v in answered.items())
         or "  (nothing yet)"
     )
+    remaining_label = ", ".join(p.capitalize() for p in remaining)
 
     prompt = f"""You are a systematic-review librarian helping a researcher pin down their PICO
 before a database search.
@@ -434,27 +443,38 @@ PICO elements clarified so far:
 
 TASK
 ────
-Evaluate the four PICO elements: Population, Intervention, Comparator, Outcome.
+Decide which PICO elements (Population, Intervention, Comparator, Outcome) still
+NEED CLARIFICATION before a search. Only ask about elements that are NOT already
+well-defined.
 
-For each element decide its status:
-  ABSENT  — not mentioned in the goal and cannot be inferred at all
-  VAGUE   — mentioned or answered, but still too imprecise for a MeSH query
-             (e.g. "adults", "exercise", "treatment", "health outcomes")
-  DEFINED — specific enough to write a MeSH/PubMed query without guessing
-             (e.g. "adults ≥65 with type 2 diabetes", "HIIT ≥3×/week",
-              "HbA1c at 6 months", "metformin monotherapy")
+An element is ALREADY WELL-DEFINED (do NOT ask about it) when the goal names a
+concrete, searchable concept for it — even if it is not maximally precise.
+Reasonable specifics are fine and should be left alone, e.g. "older adults",
+"type 2 diabetes", "mindfulness-based therapy", "pet ownership",
+"depression symptoms". Do not push for extra precision on these.
+
+An element NEEDS CLARIFICATION only when it is:
+  • ABSENT — not stated in the goal and not reasonably implied; OR
+  • UNSEARCHABLY GENERIC — a bare word with no domain, e.g. "treatment",
+    "outcomes", "patients", "intervention" used on their own.
+
+You may ONLY ask about these elements (the others were already asked — never
+re-ask them): {remaining_label}.
 
 Rules:
-• If ALL four are DEFINED → return {{"done": true}}.
-• Otherwise, pick the ONE most important element that is ABSENT or VAGUE
-  (priority: Population > Intervention > Outcome > Comparator) and ask a
-  focused follow-up question with EXACTLY 3 specific options.
-• If a follow-up was already answered (it appears in the pico_so_far above)
-  but the value is still VAGUE, you MAY ask again with more targeted options.
-• Options must be concrete, measurable, and relevant to "{goal}".
-  BAD: "adults", "standard care", "health outcomes"
-  GOOD: "adults 18–65 with major depressive disorder (DSM-5)", "CBT ≥12 sessions",
-        "remission at 8 weeks (PHQ-9 < 5)"
+• Ask a question ONLY for an element that NEEDS CLARIFICATION by the test above.
+  If the goal already specifies an element reasonably, treat it as defined and
+  DO NOT ask about it.
+• Ask AT MOST ONE question, about a single element from the allowed list.
+• If every allowed element is already well-defined → return {{"done": true}}.
+  Prefer {{"done": true}} whenever you are unsure — do not ask filler questions.
+• Comparator is frequently left unspecified on purpose; only ask about it when
+  the question clearly hinges on a specific comparison.
+• When you do ask, pick the most important element that needs clarification
+  (priority: Population > Intervention > Outcome > Comparator) and give EXACTLY
+  3 concrete, measurable options relevant to "{goal}".
+  GOOD options: "adults 18–65 with major depressive disorder (DSM-5)",
+  "CBT ≥12 sessions", "remission at 8 weeks (PHQ-9 < 5)".
 
 Return ONLY one of:
 
@@ -480,6 +500,11 @@ Return ONLY one of:
             return {"done": True}
         q = data.get("question")
         if not isinstance(q, dict) or not q.get("title") or not q.get("options"):
+            return {"done": True}
+        # Enforce one-per-element: if the model picked an already-asked element
+        # (or an unknown id), stop rather than loop.
+        qid = str(q.get("id", "")).strip().lower()
+        if qid in asked or qid not in PICO_IDS:
             return {"done": True}
         opts: List[Dict[str, str]] = []
         for o in (q.get("options") or [])[:3]:

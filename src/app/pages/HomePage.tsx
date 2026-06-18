@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useStore } from "../lib/store";
+import { useStore, HistoryEntry } from "../lib/store";
 import { AIService, DataAggregator } from "../lib/mockServices";
 import type { ClarifyingQuestion } from "../lib/mockServices";
 import { Card } from "../components/ui/card";
@@ -12,9 +12,11 @@ import { PicoCards } from "../components/PicoCards";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, SlidersHorizontal, Copy, RotateCcw } from "lucide-react";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
+import { toast } from "sonner";
 
-function ReferencesBySource({ refs }: { refs: { title: string; url: string; source: string; id: string }[] }) {
+function ReferencesBySource({ refs, idPrefix }: { refs: { title: string; url: string; source: string; id: string }[]; idPrefix?: string }) {
   // The backend re-orders papers so that papers from the same source are
   // contiguous, with [N] citation markers in the summary matching this order.
   // We render the same sequence here under source headings — within each
@@ -38,7 +40,11 @@ function ReferencesBySource({ refs }: { refs: { title: string; url: string; sour
           <div className="text-xs font-medium text-foreground/80 mb-1">{g.source}</div>
           <ol className="space-y-1">
             {g.items.map(r => (
-              <li key={r.id || r.n} className="flex gap-2">
+              <li
+                key={r.id || r.n}
+                id={idPrefix ? `${idPrefix}-${r.n}` : undefined}
+                className="flex gap-2 rounded px-1 -mx-1 scroll-mt-2 transition-colors duration-300"
+              >
                 <span className="text-muted-foreground tabular-nums shrink-0">[{r.n}]</span>
                 <a
                   href={r.url}
@@ -137,7 +143,67 @@ function CriteriaList({
   );
 }
 
-function SummaryText({ text }: { text: string }) {
+function QueryBlock({ label, value }: { label: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-1.5">
+        <div className="text-sm font-semibold text-foreground">{label}</div>
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-7 px-2 text-xs"
+          onClick={() => {
+            navigator.clipboard?.writeText(value);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+          }}
+        >
+          {copied ? <Check className="size-3.5 mr-1" /> : <Copy className="size-3.5 mr-1" />}
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <pre className="bg-muted rounded-md p-3 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">{value}</pre>
+    </div>
+  );
+}
+
+// Turn inline citation markers like "[3]" or "[5, 7]" into clickable links that
+// jump to the matching reference. Returns a mix of strings and link nodes.
+function renderWithCitations(text: string, onCite?: (n: number) => void): React.ReactNode {
+  if (!onCite) return text;
+  const re = /\[(\d+(?:\s*,\s*\d+)*)\]/g;
+  const out: React.ReactNode[] = [];
+  let last = 0;
+  let m: RegExpExecArray | null;
+  let key = 0;
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    const nums = m[1].split(/\s*,\s*/).map(x => parseInt(x, 10)).filter(n => !Number.isNaN(n));
+    out.push(
+      <span key={`c${key++}`} className="whitespace-nowrap">
+        [{nums.map((n, i) => (
+          <span key={i}>
+            {i > 0 && ", "}
+            <button
+              type="button"
+              onClick={() => onCite(n)}
+              className="text-primary font-medium hover:underline"
+              title={`Go to reference ${n}`}
+            >
+              {n}
+            </button>
+          </span>
+        ))}]
+      </span>,
+    );
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+function SummaryText({ text, onCite }: { text: string; onCite?: (n: number) => void }) {
   // Split into sections on recognised headers, preserve bullets and paragraph breaks.
   const HEADERS = [
     "Research landscape overview",
@@ -174,7 +240,7 @@ function SummaryText({ text }: { text: string }) {
               {isBullets ? (
                 <ul className="list-disc pl-5 space-y-1">
                   {bullets.map((b, i) => (
-                    <li key={i}>{b.replace(/^\s*[-*•]\s+/, "")}</li>
+                    <li key={i}>{renderWithCitations(b.replace(/^\s*[-*•]\s+/, ""), onCite)}</li>
                   ))}
                 </ul>
               ) : (
@@ -183,7 +249,7 @@ function SummaryText({ text }: { text: string }) {
                   .split(/\n{2,}/)
                   .map((para, i) => (
                     <p key={i} className="mb-2 last:mb-0 whitespace-pre-wrap">
-                      {para.trim()}
+                      {renderWithCitations(para.trim(), onCite)}
                     </p>
                   ))
               )}
@@ -236,15 +302,20 @@ function ClarifyingQuestionsModal({
   const [loading, setLoading] = useState(false);
   const [freeText, setFreeText] = useState("");
   const freeRef = useRef<HTMLInputElement>(null);
+  // PICO element ids already asked — at most one question per element, no repeats.
+  const askedRef = useRef<Set<string>>(new Set());
 
   const fetchNext = useCallback(async (current: Record<string, string>, r: number) => {
     setLoading(true);
     setFreeText("");
     try {
-      const result = await AIService.getClarifyNext(goal, current, r);
-      if (result.done || !result.question) {
+      const result = await AIService.getClarifyNext(goal, current, r, Array.from(askedRef.current));
+      // Stop if done, no question, or the model circled back to an element we
+      // already asked about.
+      if (result.done || !result.question || askedRef.current.has(result.question.id)) {
         onDone(current);
       } else {
+        askedRef.current.add(result.question.id);
         setQuestion(result.question);
       }
     } catch {
@@ -260,6 +331,7 @@ function ClarifyingQuestionsModal({
       setQuestion(null);
       setRound(0);
       setFreeText("");
+      askedRef.current = new Set();
       fetchNext({}, 0);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -389,6 +461,84 @@ function ClarifyingQuestionsModal({
   );
 }
 
+function OverviewTab({ entry, idx }: { entry: HistoryEntry; idx: number }) {
+  const [refsOpen, setRefsOpen] = useState(false);
+  const refPrefix = `ref-${idx}`;
+  const hasRefs = !!(entry.references && entry.references.length > 0);
+
+  // Clicking a [n] citation opens the references panel and scrolls to ref n.
+  const scrollToRef = (n: number) => {
+    setRefsOpen(true);
+    setTimeout(() => {
+      const el = document.getElementById(`${refPrefix}-${n}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("bg-primary/10");
+      setTimeout(() => el.classList.remove("bg-primary/10"), 1600);
+    }, 70);
+  };
+
+  return (
+    <div className="space-y-4">
+      <section>
+        <div className="flex items-center gap-2 text-sm font-semibold text-foreground mb-1.5">
+          <Sparkles className="size-4 text-primary" />Research Question
+        </div>
+        <p className="leading-snug italic border-l-2 border-primary/40 pl-3">{entry.formal_question}</p>
+      </section>
+      {entry.summary && (
+        <>
+          <Separator />
+          <section>
+            <div className="text-sm font-semibold text-foreground mb-2">Summary</div>
+            <div className="rounded-md border bg-muted/20 p-3">
+              <SummaryText text={entry.summary} onCite={hasRefs ? scrollToRef : undefined} />
+            </div>
+          </section>
+        </>
+      )}
+      {hasRefs && (
+        <>
+          <Separator />
+          <Collapsible open={refsOpen} onOpenChange={setRefsOpen}>
+            <CollapsibleTrigger asChild>
+              <button className="group flex items-center gap-1.5 text-sm font-semibold text-foreground hover:text-primary">
+                <ChevronDown className="size-4 transition-transform group-data-[state=open]:rotate-180" />
+                References ({entry.references!.length})
+              </button>
+            </CollapsibleTrigger>
+            <CollapsibleContent className="pt-2">
+              <div className="max-h-72 overflow-auto rounded-md border bg-muted/20 p-3">
+                <ReferencesBySource refs={entry.references!} idPrefix={refPrefix} />
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        </>
+      )}
+    </div>
+  );
+}
+
+function RankRow({ d, threshold }: { d: any; threshold: number }) {
+  const score = d.leads_score as number;
+  return (
+    <li className="flex items-start gap-2.5 text-sm py-1.5 px-2 rounded-md hover:bg-muted/50">
+      <span
+        className={`shrink-0 rounded-md px-2 py-0.5 text-xs font-mono font-semibold tabular-nums ${scoreBadgeClass(score, threshold)}`}
+        title={d.reason}
+      >
+        {score >= 0 ? "+" : ""}{score.toFixed(2)}
+      </span>
+      <div className="min-w-0 flex-1">
+        <a href={d.paper?.url || "#"} target="_blank" rel="noreferrer" className="hover:underline break-words leading-snug">
+          {d.paper?.title || "(untitled)"}
+        </a>
+        {d.paper?.source && <span className="text-xs text-muted-foreground ml-2">[{d.paper.source}]</span>}
+      </div>
+    </li>
+  );
+}
+
 function RelevanceExplorer() {
   const s = useStore();
   const r = s.rerankResults;
@@ -398,87 +548,52 @@ function RelevanceExplorer() {
   const threshold = typeof r.effective_floor === "number" ? r.effective_floor : r.threshold;
   const kept = r.ranked.filter(x => x.leads_score >= threshold);
   const dropped = r.ranked.filter(x => x.leads_score < threshold);
+  const fmt = (n: number) => `${n >= 0 ? "+" : ""}${n.toFixed(2)}`;
 
   return (
-    <Collapsible>
-      <CollapsibleTrigger asChild>
-        <Button variant="outline" size="sm" className="w-full justify-between mt-3">
-          <span>Relevance rerank · {kept.length} kept / {dropped.length} dropped</span>
-          <ChevronDown className="size-4" />
-        </Button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="pt-4 space-y-4">
-        {kept.length > 0 && (
-          <section>
-            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
-              Kept — above relevance threshold (used for summary)
-            </div>
-            <ul className="space-y-1.5">
-              {kept.map((d, i) => (
-                <li key={(d.paper as any).id || i} className="flex items-start gap-2 text-sm">
-                  <span
-                    className={`shrink-0 rounded px-2 py-0.5 text-xs font-mono tabular-nums ${scoreBadgeClass(d.leads_score, threshold)}`}
-                    title={d.reason}
-                  >
-                    {d.leads_score >= 0 ? "+" : ""}{d.leads_score.toFixed(2)}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <a
-                      href={(d.paper as any).url || "#"}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="hover:underline break-words"
-                    >
-                      {(d.paper as any).title || "(untitled)"}
-                    </a>
-                    {(d.paper as any).source && (
-                      <span className="text-xs text-muted-foreground ml-2">[{(d.paper as any).source}]</span>
-                    )}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-1.5 text-xs">
+        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 px-2 py-0.5 font-medium">
+          <Check className="size-3" />{kept.length} kept
+        </span>
+        <span className="inline-flex items-center gap-1 rounded-full border border-rose-200 bg-rose-50 text-rose-700 px-2 py-0.5 font-medium">
+          <X className="size-3" />{dropped.length} dropped
+        </span>
+        <span className="inline-flex items-center rounded-full border bg-muted text-muted-foreground px-2 py-0.5 font-medium tabular-nums">
+          threshold {fmt(threshold)}
+        </span>
+      </div>
 
-        {dropped.length === 0 && (
-          <p className="text-sm text-muted-foreground">No papers were dropped at this threshold.</p>
-        )}
-
-        {dropped.length > 0 && (
-          <section>
-            <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">
-              Dropped — below relevance threshold
-            </div>
-            <ul className="space-y-1.5">
-              {dropped.map((d, i) => (
-                <li key={(d.paper as any).id || i} className="flex items-start gap-2 text-sm">
-                  <span
-                    className={`shrink-0 rounded px-2 py-0.5 text-xs font-mono tabular-nums ${scoreBadgeClass(d.leads_score, threshold)}`}
-                    title={d.reason}
-                  >
-                    {d.leads_score >= 0 ? "+" : ""}{d.leads_score.toFixed(2)}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <a
-                      href={(d.paper as any).url || "#"}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="hover:underline break-words"
-                    >
-                      {(d.paper as any).title || "(untitled)"}
-                    </a>
-                    {(d.paper as any).source && (
-                      <span className="text-xs text-muted-foreground ml-2">[{(d.paper as any).source}]</span>
-                    )}
-                  </div>
-                </li>
-              ))}
+      {kept.length > 0 && (
+        <section>
+          <div className="text-sm font-semibold text-foreground mb-1.5">
+            Kept — above threshold (used for the summary)
+          </div>
+          <div className="rounded-md border bg-muted/20 max-h-72 overflow-auto p-1">
+            <ul className="space-y-0.5">
+              {kept.map((d, i) => <RankRow key={(d.paper as any).id || i} d={d} threshold={threshold} />)}
             </ul>
-          </section>
-        )}
-      </CollapsibleContent>
-    </Collapsible>
+          </div>
+        </section>
+      )}
+
+      <Separator />
+
+      {dropped.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No papers were dropped at this threshold.</p>
+      ) : (
+        <section>
+          <div className="text-sm font-semibold text-foreground mb-1.5">
+            Dropped — below threshold
+          </div>
+          <div className="rounded-md border bg-muted/20 max-h-72 overflow-auto p-1">
+            <ul className="space-y-0.5">
+              {dropped.map((d, i) => <RankRow key={(d.paper as any).id || i} d={d} threshold={threshold} />)}
+            </ul>
+          </div>
+        </section>
+      )}
+    </div>
   );
 }
 
@@ -504,6 +619,7 @@ export function HomePage() {
   // async flow there can await the user's answers.
   const [clarifyOpen, setClarifyOpen] = useState(false);
   const [clarifyGoal, setClarifyGoal] = useState("");
+  const [reviewOpen, setReviewOpen] = useState(false);
   const clarifyResolverRef = useRef<((answers: Record<string, string>) => void) | null>(null);
 
   function markStage(id: StageId, patch: Partial<Stage>) {
@@ -574,8 +690,15 @@ export function HomePage() {
     const signal = abort.signal;
 
     try {
-      // 1. PICO inference
-      const analysis = await runStage("pico", signal, sig => AIService.inferPicoAndQuery(effectiveText, sig));
+      // 1. PICO inference. When a strategy already exists, treat this message as
+      //    a REFINEMENT of the CURRENT active strategy (the one shown in the
+      //    Strategy Review drawer — includes any edits / version reverts) so the
+      //    operationalised detail is preserved instead of regenerated.
+      const prior = s.history.length > 0
+        ? { p: s.pico.population, i: s.pico.intervention, c: s.pico.comparator, o: s.pico.outcome,
+            inclusion: s.inclusion, exclusion: s.exclusion }
+        : null;
+      const analysis = await runStage("pico", signal, sig => AIService.inferPicoAndQuery(effectiveText, prior, sig));
       if (!analysis) { s.updateTask("home-analysis", { status: signal.aborted ? "canceled" : "error" }); return; }
 
       const newPico = { population: analysis.p, intervention: analysis.i, comparator: analysis.c, outcome: analysis.o };
@@ -713,71 +836,112 @@ export function HomePage() {
             </div>
           </div>
           <Card className="overflow-hidden border-border/70 shadow-sm ring-1 ring-black/[0.02]">
-            <div className="bg-gradient-to-br from-primary/5 via-card to-card border-b border-border/60 px-5 py-4">
-              <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground mb-1">
-                <Sparkles className="size-3.5 text-primary" />Research Question
+            <Tabs defaultValue="overview" className="w-full">
+              <div className="border-b border-border/60 p-2.5 flex items-center justify-between gap-2 flex-wrap">
+                <TabsList>
+                  {[
+                    ["overview", "Overview"],
+                    ["pico", "PICO"],
+                    ["criteria", "Criteria"],
+                    ["search", "Search"],
+                    ...(idx === s.history.length - 1 && s.rerankResults ? [["relevance", "Relevance"]] : []),
+                  ].map(([value, label]) => (
+                    <TabsTrigger
+                      key={value}
+                      value={value}
+                      className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm"
+                    >
+                      {label}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+                {(() => {
+                  const pd: any = entry.pico_dict || {};
+                  const ePop = pd.population ?? pd.p ?? "";
+                  const eInt = pd.intervention ?? pd.i ?? "";
+                  const eCmp = pd.comparator ?? pd.c ?? "";
+                  const eOut = pd.outcome ?? pd.o ?? "";
+                  const isActive = entry.query === s.query
+                    && ePop === s.pico.population && eInt === s.pico.intervention
+                    && eCmp === s.pico.comparator && eOut === s.pico.outcome;
+                  return isActive ? (
+                    <span className="text-xs text-emerald-600 font-medium inline-flex items-center gap-1 px-2 shrink-0">
+                      <Check className="size-3.5" />Active version
+                    </span>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-8 text-xs shrink-0"
+                      title="Make this version's PICO, criteria, and search the active strategy"
+                      onClick={() => {
+                        s.setPico({ population: ePop, intervention: eInt, comparator: eCmp, outcome: eOut });
+                        s.setInclusion(entry.inclusion || []);
+                        s.setExclusion(entry.exclusion || []);
+                        s.setQuery(entry.query || "");
+                        s.setUnifiedSearchQuery(entry.query || "");
+                        toast.success("Strategy restored from this version");
+                      }}
+                    >
+                      <RotateCcw className="size-3.5 mr-1.5" />Use this version
+                    </Button>
+                  );
+                })()}
               </div>
-              <p className="leading-snug italic">{entry.formal_question}</p>
-            </div>
-            <div className="p-5 space-y-5">
-              {entry.summary && (
-                <section>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">Summary</div>
-                  <SummaryText text={entry.summary} />
-                </section>
-              )}
-              {entry.references && entry.references.length > 0 && (
-                <section>
-                  <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">References</div>
-                  <ReferencesBySource refs={entry.references} />
-                </section>
-              )}
-              <section>
-                <div className="text-xs uppercase tracking-wide text-muted-foreground mb-2">PICO Framework</div>
-                <PicoCards pico={entry.pico_dict} />
-              </section>
+              <div className="p-5">
+                <TabsContent value="overview" className="mt-0">
+                  <OverviewTab entry={entry} idx={idx} />
+                </TabsContent>
 
-            <Collapsible>
-              <CollapsibleTrigger asChild>
-                <Button variant="outline" size="sm" className="w-full justify-between">
-                  <span>Strategy: Criteria & Search String</span><ChevronDown className="size-4" />
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="pt-4 space-y-3">
-                <div className="grid md:grid-cols-2 gap-4">
-                  <div>
-                    <div className="font-medium mb-2">Include Criteria</div>
-                    <ul className="list-disc pl-5 space-y-1">
-                      {entry.inclusion.map((x, i) => <li key={i}>{x}</li>)}
-                    </ul>
+                <TabsContent value="pico" className="mt-0">
+                  <PicoCards pico={entry.pico_dict} />
+                </TabsContent>
+
+                <TabsContent value="criteria" className="mt-0">
+                  <div className="grid md:grid-cols-2 gap-4">
+                    <div className="rounded-lg border bg-card p-3">
+                      <div className="text-sm font-semibold text-emerald-700 mb-2">Include</div>
+                      <ul className="space-y-1.5">
+                        {entry.inclusion.map((x, i) => (
+                          <li key={i} className="flex gap-2 text-sm leading-snug">
+                            <span className="mt-1.5 size-1.5 rounded-full bg-emerald-500 shrink-0" />
+                            <span>{x}</span>
+                          </li>
+                        ))}
+                        {entry.inclusion.length === 0 && <li className="text-sm text-muted-foreground">None specified.</li>}
+                      </ul>
+                    </div>
+                    <div className="rounded-lg border bg-card p-3">
+                      <div className="text-sm font-semibold text-rose-700 mb-2">Exclude</div>
+                      <ul className="space-y-1.5">
+                        {entry.exclusion.map((x, i) => (
+                          <li key={i} className="flex gap-2 text-sm leading-snug">
+                            <span className="mt-1.5 size-1.5 rounded-full bg-rose-500 shrink-0" />
+                            <span>{x}</span>
+                          </li>
+                        ))}
+                        {entry.exclusion.length === 0 && <li className="text-sm text-muted-foreground">None specified.</li>}
+                      </ul>
+                    </div>
                   </div>
-                  <div>
-                    <div className="font-medium mb-2">Exclude Criteria</div>
-                    <ul className="list-disc pl-5 space-y-1">
-                      {entry.exclusion.map((x, i) => <li key={i}>{x}</li>)}
-                    </ul>
-                  </div>
-                </div>
-                <Separator />
-                <div>
-                  <div className="font-medium mb-2">Final MeSH Search String</div>
-                  <pre className="bg-muted rounded-md p-3 overflow-auto whitespace-pre-wrap font-mono text-xs">{entry.query}</pre>
-                </div>
-                {entry.adversarial_query && (
-                  <div>
-                    <div className="font-medium mb-2">Adversarial Query (for sensitivity check)</div>
-                    <pre className="bg-muted rounded-md p-3 overflow-auto whitespace-pre-wrap font-mono text-xs">{entry.adversarial_query}</pre>
-                  </div>
+                </TabsContent>
+
+                <TabsContent value="search" className="mt-0 space-y-4">
+                  <QueryBlock label="Final MeSH search string" value={entry.query} />
+                  {entry.adversarial_query && (
+                    <QueryBlock label="Adversarial query (sensitivity check)" value={entry.adversarial_query} />
+                  )}
+                </TabsContent>
+
+                {/* Relevance-rerank explorer — only for the most recent run,
+                    since rerankResults holds only the latest LEADS pass. */}
+                {idx === s.history.length - 1 && s.rerankResults && (
+                  <TabsContent value="relevance" className="mt-0">
+                    <RelevanceExplorer />
+                  </TabsContent>
                 )}
-              </CollapsibleContent>
-            </Collapsible>
-
-            {/* Relevance-rerank explorer — only for the most recent run,
-                since rerankResults holds only the latest LEADS pass. */}
-            {idx === s.history.length - 1 && s.rerankResults && (
-              <RelevanceExplorer />
-            )}
-            </div>
+              </div>
+            </Tabs>
           </Card>
         </div>
       ))}
@@ -790,60 +954,8 @@ export function HomePage() {
         />
       )}
 
-      {/* Strategy review */}
-      {s.history.length > 0 && (
-        <Card className="p-5 space-y-5">
-          <h2>Strategy Review</h2>
-          <div className="grid md:grid-cols-2 gap-4">
-            <div>
-              <label className="text-muted-foreground text-sm">Population</label>
-              <Textarea value={s.pico.population} onChange={e => s.setPico({ ...s.pico, population: e.target.value })} rows={2} />
-            </div>
-            <div>
-              <label className="text-muted-foreground text-sm">Intervention</label>
-              <Textarea value={s.pico.intervention} onChange={e => s.setPico({ ...s.pico, intervention: e.target.value })} rows={2} />
-            </div>
-            <div>
-              <label className="text-muted-foreground text-sm">Comparator</label>
-              <Textarea value={s.pico.comparator} onChange={e => s.setPico({ ...s.pico, comparator: e.target.value })} rows={2} />
-            </div>
-            <div>
-              <label className="text-muted-foreground text-sm">Outcome</label>
-              <Textarea value={s.pico.outcome} onChange={e => s.setPico({ ...s.pico, outcome: e.target.value })} rows={2} />
-            </div>
-          </div>
-
-          <Separator />
-
-          <div className="grid md:grid-cols-2 gap-6">
-            <div>
-              <label className="text-muted-foreground text-sm block mb-2">Inclusion Criteria</label>
-              <CriteriaList
-                items={s.inclusion}
-                onChange={s.setInclusion}
-                placeholder="e.g., randomized controlled trials"
-                variant="include"
-              />
-            </div>
-            <div>
-              <label className="text-muted-foreground text-sm block mb-2">Exclusion Criteria</label>
-              <CriteriaList
-                items={s.exclusion}
-                onChange={s.setExclusion}
-                placeholder="e.g., animal studies"
-                variant="exclude"
-              />
-            </div>
-          </div>
-
-          <Separator />
-
-          <div>
-            <label className="text-muted-foreground text-sm">Final Search String</label>
-            <Textarea value={s.query} onChange={e => { s.setQuery(e.target.value); s.setUnifiedSearchQuery(e.target.value); }} rows={3} className="font-mono" />
-          </div>
-        </Card>
-      )}
+      {/* Strategy review lives in a collapsible right-hand drawer (below), not
+          inline, so the main column stays short. */}
 
       <div className="h-24" />
 
@@ -860,7 +972,7 @@ export function HomePage() {
 
       {/* Refinement popup — floats above the chat input, Claude-clarifying-question style */}
       {(refining || refinement) && s.history.length > 0 && (
-        <div className="fixed bottom-20 left-72 right-0 z-30 px-6 pointer-events-none">
+        <div className={`fixed bottom-20 left-72 z-30 px-6 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
           <div className="max-w-4xl mx-auto pointer-events-auto">
             <Card className="p-4 border-primary/40 shadow-xl bg-card/98 backdrop-blur">
               <div className="flex items-start justify-between gap-3">
@@ -944,8 +1056,73 @@ export function HomePage() {
         </div>
       )}
 
+      {/* ── Strategy Review — collapsible right-hand drawer ────────────────── */}
+      {s.history.length > 0 && (
+        <>
+          {/* Floating opener — clearly visible, clear of the scrollbar + chat bar */}
+          {!reviewOpen && (
+            <button
+              onClick={() => setReviewOpen(true)}
+              className="fixed right-5 bottom-28 z-40 inline-flex items-center gap-2 rounded-full bg-primary text-primary-foreground shadow-lg px-4 py-2.5 text-sm font-medium hover:opacity-95 transition-opacity"
+              title="Edit PICO, criteria & search string"
+            >
+              <SlidersHorizontal className="size-4" />Strategy Review
+            </button>
+          )}
+          {/* Drawer panel */}
+          <div
+            className={`fixed top-0 right-0 h-screen w-[400px] max-w-[92vw] bg-card border-l shadow-2xl z-40 flex flex-col transition-transform duration-200 ${reviewOpen ? "translate-x-0" : "translate-x-full"}`}
+            aria-hidden={!reviewOpen}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
+              <div>
+                <h2 className="m-0 text-base">Strategy Review</h2>
+                <span className="text-xs text-muted-foreground">Edit PICO, criteria &amp; search string</span>
+              </div>
+              <button onClick={() => setReviewOpen(false)} className="text-muted-foreground hover:text-foreground" title="Close">
+                <X className="size-4" />
+              </button>
+            </div>
+            <Tabs defaultValue="pico" className="flex-1 flex flex-col min-h-0">
+              <div className="px-4 pt-3 shrink-0">
+                <TabsList className="grid grid-cols-3 w-full">
+                  <TabsTrigger value="pico">PICO</TabsTrigger>
+                  <TabsTrigger value="criteria">Criteria</TabsTrigger>
+                  <TabsTrigger value="search">Search</TabsTrigger>
+                </TabsList>
+              </div>
+              <div className="flex-1 overflow-auto p-4">
+                <TabsContent value="pico" className="mt-0 space-y-3">
+                  {(["population", "intervention", "comparator", "outcome"] as const).map(f => (
+                    <div key={f}>
+                      <label className="text-muted-foreground text-sm capitalize">{f}</label>
+                      <Textarea value={s.pico[f]} onChange={e => s.setPico({ ...s.pico, [f]: e.target.value })} rows={2} />
+                    </div>
+                  ))}
+                </TabsContent>
+                <TabsContent value="criteria" className="mt-0 space-y-4">
+                  <div>
+                    <label className="text-muted-foreground text-sm block mb-2">Inclusion Criteria</label>
+                    <CriteriaList items={s.inclusion} onChange={s.setInclusion} placeholder="e.g., randomized controlled trials" variant="include" />
+                  </div>
+                  <div>
+                    <label className="text-muted-foreground text-sm block mb-2">Exclusion Criteria</label>
+                    <CriteriaList items={s.exclusion} onChange={s.setExclusion} placeholder="e.g., animal studies" variant="exclude" />
+                  </div>
+                </TabsContent>
+                <TabsContent value="search" className="mt-0 space-y-2">
+                  <label className="text-muted-foreground text-sm">Final Search String</label>
+                  <Textarea value={s.query} onChange={e => { s.setQuery(e.target.value); s.setUnifiedSearchQuery(e.target.value); }} rows={8} className="font-mono text-xs" />
+                  <p className="text-xs text-muted-foreground">Edits here also update the per-database queries on the Planning page.</p>
+                </TabsContent>
+              </div>
+            </Tabs>
+          </div>
+        </>
+      )}
+
       {/* Chat input — fixed to bottom, matching content width */}
-      <div className="fixed bottom-0 left-72 right-0 z-30 px-6 py-4 pointer-events-none">
+      <div className={`fixed bottom-0 left-72 z-30 px-6 py-4 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
         <form onSubmit={(e) => { e.preventDefault(); handleSubmit(input); }}
           className="max-w-4xl mx-auto flex gap-2 items-center bg-card/95 backdrop-blur border rounded-full shadow-lg pl-5 pr-2 py-2 pointer-events-auto">
           <Input value={input} onChange={e => setInput(e.target.value)}
