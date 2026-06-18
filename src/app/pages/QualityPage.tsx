@@ -355,7 +355,7 @@ export function QualityPage() {
                             })}
                           </div>
                         </div>
-                        <div className="text-sm line-clamp-2 leading-snug">{r.title}</div>
+                        <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{r.title}</div>
                       </button>
                     );
                   })}

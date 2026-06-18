@@ -256,7 +256,7 @@ export function TextExtractionPage() {
                         <Badge variant={evCount > 0 ? "default" : "secondary"} className="text-[10px]">{evCount} quotes</Badge>
                         <Badge variant="outline" className="text-[10px]">{r.values.length} values</Badge>
                       </div>
-                      <div className="text-sm line-clamp-2 leading-snug">{r.title}</div>
+                      <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{r.title}</div>
                     </button>
                   );
                 })}
