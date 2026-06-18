@@ -180,7 +180,7 @@ export function ExtractionPage() {
                         </Badge>
                         <span className="text-[10px] text-muted-foreground">{p.Source}</span>
                       </div>
-                      <div className="text-sm line-clamp-2 leading-snug">{p.Paper_Title}</div>
+                      <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{p.Paper_Title}</div>
                     </button>
                   );
                 })}
