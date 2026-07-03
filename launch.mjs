@@ -168,6 +168,22 @@ function needsBuild() {
   return srcNewest > builtAt;
 }
 
+function findOllama() {
+  const home = os.homedir();
+  const cands = IS_WIN
+    ? [path.join(process.env["LOCALAPPDATA"] || path.join(home, "AppData", "Local"), "Programs", "Ollama", "ollama.exe"), "ollama.exe", "ollama"]
+    : ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama", "ollama"];
+  for (const c of cands) {
+    if (c.includes("/") || c.includes("\\")) {
+      if (fs.existsSync(c)) return c;
+    } else {
+      const w = spawnSync(IS_WIN ? "where" : "which", [c], { encoding: "utf8" });
+      if (w.status === 0 && w.stdout.trim()) return w.stdout.trim().split(/\r?\n/)[0];
+    }
+  }
+  return null;
+}
+
 function openDefaultBrowser(url) {
   if (process.platform === "darwin") spawn("open", [url], { stdio: "ignore", detached: true }).unref();
   else if (IS_WIN) spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true }).unref();
@@ -245,8 +261,21 @@ async function main() {
   const ok = await waitHealthy([APP_URL, `http://localhost:${BACKEND_PORT}/docs`], 90);
   if (!ok) { log("Services did not come up in time."); cleanup(1); return; }
 
+  // Ollama powers the default local (private) screening model. If it's installed
+  // but not running, start it for the user; if it's not installed, point them to it.
   if (!(await httpOk("http://localhost:11434/"))) {
-    log("Note: Ollama not running (:11434). Local-model features need it — open the Ollama app.");
+    const ollama = findOllama();
+    if (ollama) {
+      log("Starting Ollama (local AI models)...");
+      const o = spawn(ollama, ["serve"], { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
+      started.push(o);
+      for (let i = 0; i < 15 && !(await httpOk("http://localhost:11434/")); i++) await sleep(1000);
+    }
+    if (!(await httpOk("http://localhost:11434/"))) {
+      log("Note: Ollama isn't running. Local models need it — install from https://ollama.com");
+      log("      then pull the default model:  ollama pull hf.co/mradermacher/leads-mistral-7b-v1-GGUF");
+      log("      (Or just pick a cloud model in the sidebar.)");
+    }
   }
 
   // 5) open in its own window and wait; closing it shuts everything down
