@@ -45,19 +45,67 @@ async function waitHealthy(urls, timeoutSec) {
   return false;
 }
 
-// pick a python that has the backend deps; else the first python found (for install)
-function pickPython() {
-  const cands = IS_WIN ? ["python", "py", "python3"] : ["python3", "python"];
-  let firstFound = null;
+const VENV_DIR = path.join(BACKEND_DIR, ".venv");
+const VENV_PY = IS_WIN
+  ? path.join(VENV_DIR, "Scripts", "python.exe")
+  : path.join(VENV_DIR, "bin", "python");
+
+function pyVersionOk(cmd) {
+  // Returns the (major, minor) if runnable and >= 3.9, else null.
+  const r = spawnSync(cmd, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"],
+    { encoding: "utf8" });
+  if (r.status !== 0 || !r.stdout) return null;
+  const [maj, min] = r.stdout.trim().split(/\s+/).map(Number);
+  return maj === 3 && min >= 9 ? { maj, min } : null;
+}
+
+// Find a base interpreter capable of creating a venv. Prefer newer versions;
+// the plain `python3` on a Mac's Finder PATH is often an old/broken system one,
+// so we try explicit versioned names first.
+function findBasePython() {
+  const cands = IS_WIN
+    ? ["python", "py", "python3", "python3.12", "python3.11"]
+    : ["python3.13", "python3.12", "python3.11", "python3.10", "python3", "python"];
+  let best = null, bestVer = -1;
   for (const c of cands) {
-    const v = spawnSync(c, ["--version"], { stdio: "ignore" });
-    if (v.status === 0 || v.status === null) {
-      if (!firstFound) firstFound = c;
-      const dep = spawnSync(c, ["-c", "import fastapi, uvicorn"], { stdio: "ignore" });
-      if (dep.status === 0) return { cmd: c, hasDeps: true };
-    }
+    const v = pyVersionOk(c);
+    if (!v) continue;
+    const canVenv = spawnSync(c, ["-c", "import venv"], { stdio: "ignore" });
+    if (canVenv.status !== 0) continue;
+    const score = v.min;              // higher minor == newer 3.x
+    if (score > bestVer) { best = c; bestVer = score; }
   }
-  return { cmd: firstFound, hasDeps: false };
+  return best;
+}
+
+function venvHasDeps() {
+  if (!fs.existsSync(VENV_PY)) return false;
+  const dep = spawnSync(VENV_PY, ["-c", "import fastapi, uvicorn"], { stdio: "ignore" });
+  return dep.status === 0;
+}
+
+// Ensure a working, isolated backend interpreter. Returns the python path to run
+// the backend with, or null if we couldn't build one.
+function ensureBackendPython() {
+  if (venvHasDeps()) return VENV_PY;
+
+  const base = findBasePython();
+  if (!base) return null;
+
+  if (!fs.existsSync(VENV_PY)) {
+    log("First run: creating an isolated Python environment for the backend...");
+    const mk = spawnSync(base, ["-m", "venv", VENV_DIR], { stdio: "ignore" });
+    if (mk.status !== 0 || !fs.existsSync(VENV_PY)) return null;
+  }
+
+  const req = path.join(BACKEND_DIR, "requirements.txt");
+  if (fs.existsSync(req)) {
+    log("Installing backend dependencies (one time, a couple of minutes)...");
+    spawnSync(VENV_PY, ["-m", "pip", "install", "--upgrade", "pip"], { stdio: "ignore" });
+    const inst = spawnSync(VENV_PY, ["-m", "pip", "install", "-r", req], { stdio: "inherit" });
+    if (inst.status !== 0) return null;
+  }
+  return venvHasDeps() ? VENV_PY : null;
 }
 
 function findChrome() {
@@ -154,27 +202,23 @@ async function main() {
     const r = spawnSync(IS_WIN ? "npm.cmd" : "npm", ["install"], { cwd: PROJECT, stdio: "inherit" });
     if (r.status !== 0) { log("npm install failed."); process.exit(1); }
   }
-  const py = pickPython();
-  if (!py.cmd) {
-    log("Python 3 is required for the backend but was not found.");
-    log("Install it from https://www.python.org/downloads/ (macOS/Windows), then run this again.");
-    openDefaultBrowser("https://www.python.org/downloads/");
-    process.exit(1);
-  }
-  if (!py.hasDeps && fs.existsSync(path.join(BACKEND_DIR, "requirements.txt"))) {
-    log("First run: installing backend dependencies...");
-    spawnSync(py.cmd, ["-m", "pip", "install", "-r", path.join(BACKEND_DIR, "requirements.txt")],
-      { cwd: PROJECT, stdio: "inherit" });
-  }
-
   const spawnOpts = { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN };
 
-  // 2) backend
+  // 2) backend — run from an isolated venv so it always uses a working Python
+  //    with correctly-built deps, regardless of what `python3` resolves to when
+  //    launched from Finder/Explorer (which often finds an old system Python).
   if (await httpOk(`http://localhost:${BACKEND_PORT}/docs`)) {
     log(`Backend already running on :${BACKEND_PORT}`);
   } else {
+    const backendPy = ensureBackendPython();
+    if (!backendPy) {
+      log("Could not set up the Python backend. Install Python 3.10+ from");
+      log("https://www.python.org/downloads/ (or `brew install python`), then run this again.");
+      openDefaultBrowser("https://www.python.org/downloads/");
+      cleanup(1); return;
+    }
     log(`Starting backend on :${BACKEND_PORT}...`);
-    const b = spawn(py.cmd, ["-m", "uvicorn", "api:app", "--app-dir", BACKEND_DIR, "--port", String(BACKEND_PORT)], spawnOpts);
+    const b = spawn(backendPy, ["-m", "uvicorn", "api:app", "--app-dir", BACKEND_DIR, "--port", String(BACKEND_PORT)], spawnOpts);
     started.push(b);
   }
 
@@ -214,7 +258,20 @@ async function main() {
       `--user-data-dir=${path.join(os.homedir(), ".evidence-engine-appwin")}`,
       "--no-first-run", "--no-default-browser-check",
     ], { stdio: "ignore" });
-    win.on("exit", () => cleanup(0));
+    const openedAt = Date.now();
+    win.on("exit", () => {
+      // If Chrome exits almost immediately it didn't own the window — it handed
+      // the URL off to an Evidence Engine window that's ALREADY open (same
+      // profile). Tearing the servers down here would break that live window,
+      // which is the "it won't open" bug. So only shut down on a real close.
+      if (Date.now() - openedAt < 4000) {
+        log("An Evidence Engine window is already open.");
+        if (started.length === 0) process.exit(0);   // another launcher owns the servers
+        keepAlive();                                  // we own them; idle until closed/Ctrl-C
+      } else {
+        cleanup(0);
+      }
+    });
     win.on("error", () => { openDefaultBrowser(APP_URL); keepAlive(); });
   } else {
     openDefaultBrowser(APP_URL);
