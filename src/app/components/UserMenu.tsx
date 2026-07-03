@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useAuth, OAuthProvider } from "../lib/auth";
+import { supabaseConfigured } from "../lib/supabaseClient";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "./ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./ui/dialog";
 import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from "./ui/dropdown-menu";
-import { LogIn, LogOut, Github } from "lucide-react";
+import { LogIn, LogOut, Github, HardDrive } from "lucide-react";
 import { toast } from "sonner";
 
 function GoogleIcon() {
@@ -57,6 +58,30 @@ export function UserMenu() {
     setBusy(true);
     try { await signInWithProvider(provider); }
     catch (err: any) { toast.error(err.message || "SSO failed"); setBusy(false); }
+  }
+
+  // No cloud backend configured (e.g. the shared/local build): don't offer a
+  // sign-in that can't work. Show a friendly "local mode" indicator instead.
+  if (!supabaseConfigured) {
+    return (
+      <>
+        <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setOpen(true)} title="Running locally on this computer">
+          <HardDrive className="size-4 mr-2" />Local mode
+        </Button>
+        <Dialog open={open} onOpenChange={setOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Running in local mode</DialogTitle>
+              <DialogDescription>
+                Evidence Engine is running entirely on this computer. Your work saves here
+                automatically — no account needed. Cloud sign-in and cross-device sync
+                aren't set up for this build, so there's nothing to log into.
+              </DialogDescription>
+            </DialogHeader>
+          </DialogContent>
+        </Dialog>
+      </>
+    );
   }
 
   if (user) {
