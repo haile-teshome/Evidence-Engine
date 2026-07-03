@@ -12,7 +12,7 @@ import { PicoCards } from "../components/PicoCards";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, SlidersHorizontal, Copy, RotateCcw } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
 
@@ -619,7 +619,10 @@ export function HomePage() {
   // async flow there can await the user's answers.
   const [clarifyOpen, setClarifyOpen] = useState(false);
   const [clarifyGoal, setClarifyGoal] = useState("");
-  const [reviewOpen, setReviewOpen] = useState(false);
+  // Strategy Review drawer open-state lives in the store so the header bar can
+  // toggle it (the floating button was removed).
+  const reviewOpen = s.reviewOpen;
+  const setReviewOpen = s.setReviewOpen;
   const clarifyResolverRef = useRef<((answers: Record<string, string>) => void) | null>(null);
 
   function markStage(id: StageId, patch: Partial<Stage>) {
@@ -1059,16 +1062,7 @@ export function HomePage() {
       {/* ── Strategy Review — collapsible right-hand drawer ────────────────── */}
       {s.history.length > 0 && (
         <>
-          {/* Floating opener — clearly visible, clear of the scrollbar + chat bar */}
-          {!reviewOpen && (
-            <button
-              onClick={() => setReviewOpen(true)}
-              className="fixed right-5 bottom-28 z-40 inline-flex items-center gap-2 rounded-full bg-primary text-primary-foreground shadow-lg px-4 py-2.5 text-sm font-medium hover:opacity-95 transition-opacity"
-              title="Edit PICO, criteria & search string"
-            >
-              <SlidersHorizontal className="size-4" />Strategy Review
-            </button>
-          )}
+          {/* Opened from the "Strategy Review" button in the top header bar. */}
           {/* Drawer panel */}
           <div
             className={`fixed top-0 right-0 h-screen w-[400px] max-w-[92vw] bg-card border-l shadow-2xl z-40 flex flex-col transition-transform duration-200 ${reviewOpen ? "translate-x-0" : "translate-x-full"}`}

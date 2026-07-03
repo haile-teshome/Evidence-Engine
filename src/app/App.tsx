@@ -21,7 +21,7 @@ import { TextExtractionPage } from "./pages/TextExtractionPage";
 import { MetaAnalysisPage } from "./pages/MetaAnalysisPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { WritingPage } from "./pages/WritingPage";
-import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Users, PenLine } from "lucide-react";
+import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Users, PenLine, SlidersHorizontal } from "lucide-react";
 
 const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> = {
   home: { title: "Research Strategy", subtitle: "PICO-driven question framing and search design", icon: Home },
@@ -59,7 +59,7 @@ function Shell() {
     <div className="flex min-h-screen bg-background text-foreground">
       <Toaster richColors position="top-right" />
       <Sidebar />
-      <main className="flex-1 overflow-x-hidden">
+      <main className="flex-1 overflow-x-clip">
         <header className="border-b bg-card/50 backdrop-blur sticky top-0 z-20 px-6 py-4">
           <div className="max-w-6xl mx-auto flex items-center gap-3">
             <Icon className="size-6 text-primary" />
@@ -67,6 +67,15 @@ function Shell() {
               <h1>{meta.title}</h1>
               <p className="text-sm text-muted-foreground">{meta.subtitle}</p>
             </div>
+            {s.page === "home" && s.history.length > 0 && (
+              <button
+                onClick={() => s.setReviewOpen(!s.reviewOpen)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-medium transition-colors ${s.reviewOpen ? "bg-primary text-primary-foreground border-primary" : "bg-primary/10 border-primary/30 text-foreground hover:bg-primary/20"}`}
+                title="Edit PICO, criteria & search string"
+              >
+                <SlidersHorizontal className="size-3.5" />Strategy Review
+              </button>
+            )}
             {s.currentProjectId && (
               <button
                 onClick={() => s.setPage("projects")}

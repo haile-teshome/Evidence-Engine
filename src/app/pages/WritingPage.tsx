@@ -1,14 +1,16 @@
-import { useMemo, useState, useEffect } from "react";
+import { Fragment, useMemo, useState, useEffect, type ReactNode } from "react";
 import { useStore } from "../lib/store";
 import { Card } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Separator } from "../components/ui/separator";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { Textarea } from "../components/ui/textarea";
+import { Input } from "../components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription } from "../components/ui/alert";
-import { Download, Copy, ChevronDown, Loader2, BookOpen, FileText, RefreshCw } from "lucide-react";
+import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, Layers, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { ScreenResult, FullTextResult } from "../lib/apiClient";
 
@@ -92,6 +94,96 @@ function toRisEntry(meta: PaperMeta): string {
   lines.push(`N1  - Source: ${meta.source}`);
   lines.push("ER  - ");
   return lines.join("\n");
+}
+
+// ── Methods appendix rendering (bold **labels**, paragraphs) ──────────────────
+
+function renderInlineBold(text: string): ReactNode {
+  // Split on **bold** spans and render the bold parts as <strong>.
+  const parts = text.split(/(\*\*[^*]+\*\*)/g);
+  return parts.map((part, i) => {
+    const m = part.match(/^\*\*([^*]+)\*\*$/);
+    return m ? <strong key={i}>{m[1]}</strong> : <Fragment key={i}>{part}</Fragment>;
+  });
+}
+
+function renderMethodsAppendix(text: string): ReactNode {
+  const blocks = text.trim().split(/\n{2,}/).filter(Boolean);
+  const paras = blocks.length > 1 ? blocks : text.trim().split(/\n/).filter(Boolean);
+  return paras.map((p, i) => (
+    <p key={i} className="text-sm leading-relaxed">{renderInlineBold(p.trim())}</p>
+  ));
+}
+
+// ── Plain-text citation styles ────────────────────────────────────────────────
+
+function authorList(meta: PaperMeta): string[] {
+  return (meta.authors || "").split(/\s*;\s*/).map(a => a.trim()).filter(Boolean);
+}
+
+function citationAPA(m: PaperMeta): string {
+  const a = authorList(m);
+  const auth = a.length ? (a.length > 1 ? a.slice(0, -1).join(", ") + ", & " + a[a.length - 1] : a[0]) : (m.source || "Anonymous");
+  const yr = m.year ? ` (${m.year}).` : " (n.d.).";
+  const jrnl = m.journal
+    ? ` ${m.journal}${m.volume ? `, ${m.volume}` : ""}${m.issue ? `(${m.issue})` : ""}${m.pages ? `, ${m.pages}` : ""}.`
+    : "";
+  const link = m.doi ? ` https://doi.org/${m.doi}` : (m.url ? ` ${m.url}` : "");
+  return `${auth}${yr} ${m.title}.${jrnl}${link}`.replace(/\s+/g, " ").trim();
+}
+
+function citationMLA(m: PaperMeta): string {
+  const a = authorList(m);
+  const auth = a.length ? a.join(", ") + "." : "";
+  const jrnl = m.journal
+    ? ` ${m.journal}${m.volume ? `, vol. ${m.volume}` : ""}${m.issue ? `, no. ${m.issue}` : ""}`
+    : "";
+  const yr = m.year ? `, ${m.year}` : "";
+  const pg = m.pages ? `, pp. ${m.pages}` : "";
+  const link = m.doi ? `, doi:${m.doi}` : (m.url ? `, ${m.url}` : "");
+  return `${auth} "${m.title}."${jrnl}${yr}${pg}${link}.`.replace(/\s+/g, " ").trim();
+}
+
+function citationVancouver(m: PaperMeta, idx: number): string {
+  const a = authorList(m);
+  const auth = a.length ? a.join(", ") + "." : "";
+  const jrnl = m.journal ? ` ${m.journal}.` : "";
+  const tail = `${m.year ? ` ${m.year}` : ""}${m.volume ? `;${m.volume}` : ""}${m.issue ? `(${m.issue})` : ""}${m.pages ? `:${m.pages}` : ""}`;
+  return `${idx}. ${auth} ${m.title}.${jrnl}${tail ? `${tail}.` : ""}`.replace(/\s+/g, " ").trim();
+}
+
+function citationChicago(m: PaperMeta): string {
+  const a = authorList(m);
+  const auth = a.length ? a.join(", ") + "." : "";
+  const yr = m.year ? ` ${m.year}.` : " n.d.";
+  const jrnl = m.journal
+    ? ` ${m.journal}${m.volume ? ` ${m.volume}` : ""}${m.issue ? `, no. ${m.issue}` : ""}${m.pages ? `: ${m.pages}` : ""}.`
+    : "";
+  const link = m.doi ? ` https://doi.org/${m.doi}.` : "";
+  return `${auth}${yr} "${m.title}."${jrnl}${link}`.replace(/\s+/g, " ").trim();
+}
+
+type CiteFormat = "BibTeX" | "RIS" | "APA" | "MLA" | "Vancouver" | "Chicago";
+
+const CITE_FORMATS: { value: CiteFormat; ext: string; mime: string; joiner: string }[] = [
+  { value: "BibTeX",    ext: "bib", mime: "application/x-bibtex", joiner: "\n\n" },
+  { value: "RIS",       ext: "ris", mime: "application/x-research-info-systems", joiner: "\n\n" },
+  { value: "APA",       ext: "txt", mime: "text/plain", joiner: "\n\n" },
+  { value: "MLA",       ext: "txt", mime: "text/plain", joiner: "\n\n" },
+  { value: "Vancouver", ext: "txt", mime: "text/plain", joiner: "\n" },
+  { value: "Chicago",   ext: "txt", mime: "text/plain", joiner: "\n\n" },
+];
+
+function formatCitation(m: PaperMeta, fmt: CiteFormat, idx: number): string {
+  switch (fmt) {
+    case "RIS":       return toRisEntry(m);
+    case "APA":       return citationAPA(m);
+    case "MLA":       return citationMLA(m);
+    case "Vancouver": return citationVancouver(m, idx);
+    case "Chicago":   return citationChicago(m);
+    case "BibTeX":
+    default:          return toBibTeXEntry(m, idx);
+  }
 }
 
 function downloadFile(content: string, filename: string, mime: string) {
@@ -285,21 +377,45 @@ export function WritingPage() {
     };
   }, [s.fullTextResults, s.results, s.abstractOverrides, s.rerankResults, s.uniquePapers, s.rawPapers]);
 
-  const [enriched, setEnriched] = useState<Record<string, Partial<PaperMeta>>>({});
+  // Enrichment cache + generated summary live in the store so switching tabs
+  // (which unmounts this page) doesn't re-fetch metadata every time.
+  const enriched = s.writingEnriched;
+  const setEnriched = s.setWritingEnriched;
+  const summary = s.writingSummary;
+  const setSummary = s.setWritingSummary;
   const [enriching, setEnriching] = useState(false);
-  const [summary, setSummary] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [format, setFormat] = useState<CiteFormat>("BibTeX");
+  const [query, setQuery] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchDate, setSearchDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [editingSummary, setEditingSummary] = useState(false);
 
   const merged = useMemo<PaperMeta[]>(
     () => includedPapers.map(p => ({ ...p, ...(enriched[p.paper_id] ?? {}) })),
     [includedPapers, enriched],
   );
 
+  // Number every paper by its stable position, then filter for display so a
+  // search never renumbers the citations.
+  const rows = useMemo(() => merged.map((p, i) => ({ p, n: i + 1 })), [merged]);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter(({ p }) =>
+      [p.title, p.authors, p.journal, p.source, p.doi, p.year != null ? String(p.year) : ""]
+        .some(f => (f || "").toLowerCase().includes(q)),
+    );
+  }, [rows, query]);
+
+  const selectedRow = rows.find(r => r.p.paper_id === selectedId) ?? rows[0] ?? null;
+
   // ── Enrichment ──────────────────────────────────────────────────────────────
 
-  async function enrichAll(papers = includedPapers) {
+  async function enrichAll(papers = includedPapers, force = false) {
+    const todo = papers.filter(p => force || !enriched[p.paper_id]);
+    if (todo.length === 0) return;   // already cached — no refetch
     setEnriching(true);
-    const todo = papers.filter(p => !enriched[p.paper_id]);
     let done = 0;
     for (const p of todo) {
       const data = await fetchMetadata(p);
@@ -320,27 +436,24 @@ export function WritingPage() {
 
   // ── Exports ─────────────────────────────────────────────────────────────────
 
-  function allBibTeX(): string {
-    return merged.map((p, i) => toBibTeXEntry(p, i + 1)).join("\n\n");
+  const fmtCfg = CITE_FORMATS.find(f => f.value === format) ?? CITE_FORMATS[0];
+
+  function allFormatted(): string {
+    return merged.map((p, i) => formatCitation(p, format, i + 1)).join(fmtCfg.joiner);
   }
 
-  function allRis(): string {
-    return merged.map(toRisEntry).join("\n\n");
+  function downloadAll() {
+    downloadFile(allFormatted(), `references.${fmtCfg.ext}`, fmtCfg.mime);
+    toast.success(
+      format === "RIS"
+        ? "Downloaded references.ris — import into Zotero via File → Import"
+        : `Downloaded references.${fmtCfg.ext}`,
+    );
   }
 
-  function downloadBib() {
-    downloadFile(allBibTeX(), "references.bib", "application/x-bibtex");
-    toast.success("Downloaded references.bib");
-  }
-
-  function downloadRis() {
-    downloadFile(allRis(), "references.ris", "application/x-research-info-systems");
-    toast.success("Downloaded references.ris — import into Zotero via File → Import");
-  }
-
-  function copyBib() {
-    navigator.clipboard.writeText(allBibTeX());
-    toast.success("BibTeX copied to clipboard");
+  function copyAll() {
+    navigator.clipboard.writeText(allFormatted());
+    toast.success(`All ${merged.length} citations copied as ${format}`);
   }
 
   // ── Methods summary ──────────────────────────────────────────────────────────
@@ -374,6 +487,9 @@ export function WritingPage() {
         exclusion_criteria: s.exclusion,
         goal: s.history[s.history.length - 1]?.query ?? "",
         model: s.model,
+        // RAISE: stages where AI made/suggested judgements (for the AI-use subsection)
+        ai_model: modelName,
+        ai_steps: aiSteps.map(st => ({ stage: st.stage, purpose: st.purpose, oversight: st.oversight })),
       };
 
       const r = await fetch("/api/writing/summary", {
@@ -391,6 +507,95 @@ export function WritingPage() {
     }
   }
 
+  // ── PRISMA-S search-strategy data (deterministic, from stored data) ──────────
+  const apiDbs = s.sources.filter(x => x !== "Local PDFs");
+  const baseQuery = (s.unifiedSearchQuery || s.query || "").trim();
+  const countOf = (src: string): number | null => {
+    if (s.simulation && s.simulation[src] != null) return s.simulation[src];
+    if (s.dbTestResults?.[src]?.total_found != null) return s.dbTestResults[src].total_found;
+    if (s.rawPapers) { const c = s.rawPapers.filter(p => p.source === src).length; return c || null; }
+    return null;
+  };
+  const searchRows = apiDbs.map(src => ({
+    db: src,
+    query: (s.perDbQueries[src] || baseQuery || "").trim(),
+    count: countOf(src),
+  }));
+  const totalRetrieved = searchRows.reduce((a, r) => a + (r.count ?? 0), 0);
+  const identified = s.rawPapers?.length ?? (searchRows.some(r => r.count != null) ? totalRetrieved : null);
+  const dupRemoved = s.duplicatesCount ?? 0;
+  const afterDedup = s.uniquePapers?.length ?? (identified != null ? Math.max(0, identified - dupRemoved) : null);
+
+  function buildSearchAppendix(): string {
+    const L: string[] = [];
+    L.push("SEARCH STRATEGY (PRISMA-S)");
+    L.push("");
+    L.push(`Databases searched (${apiDbs.length}): ${apiDbs.join(", ") || "none"}.`);
+    if (s.sources.includes("Local PDFs")) L.push(`Additional records: uploaded local PDFs (${s.files.length}).`);
+    L.push(`Search date: ${searchDate}.`);
+    if (baseQuery) {
+      L.push("");
+      L.push("Base query (applied to each database unless a custom string is shown below):");
+      L.push(baseQuery);
+    }
+    L.push("");
+    L.push("Per-database searches");
+    L.push("─────────────────────");
+    for (const r of searchRows) {
+      L.push("");
+      L.push(r.db);
+      L.push(`  Query run:         ${r.query || "(not specified)"}`);
+      L.push(`  Date searched:     ${searchDate}`);
+      L.push(`  Records retrieved: ${r.count != null ? r.count.toLocaleString() : "not run"}`);
+    }
+    L.push("");
+    L.push("Identification");
+    L.push("──────────────");
+    if (identified != null) L.push(`  Records identified across databases: ${identified.toLocaleString()}`);
+    L.push(`  Duplicate records removed:           ${dupRemoved.toLocaleString()}`);
+    if (afterDedup != null) L.push(`  Records after de-duplication:         ${afterDedup.toLocaleString()}`);
+    return L.join("\n");
+  }
+
+  function appendixCsv(): string {
+    const esc = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
+    const rows = [["Database", "Query", "Date searched", "Records retrieved"]];
+    for (const r of searchRows) rows.push([r.db, r.query, searchDate, r.count != null ? String(r.count) : "not run"]);
+    return rows.map(row => row.map(esc).join(",")).join("\n");
+  }
+
+  // ── RAISE AI use disclosure (grounded in stages that actually ran) ───────────
+  // RAISE requires transparent reporting of any AI use that makes or suggests
+  // judgements (eligibility, appraisal, extraction, synthesis, drafting).
+  const modelName = s.model || "the configured large language model";
+  const aiSteps = useMemo(() => {
+    const steps: { stage: string; purpose: string; judgement: boolean; oversight: string }[] = [];
+    const has = (v: any) => Array.isArray(v) ? v.length > 0 : !!v;
+    if (has(s.unifiedSearchQuery) || has(s.simulationRuns) || has(s.history))
+      steps.push({ stage: "Search strategy development", purpose: "Suggested and expanded database search strings (synonyms, controlled vocabulary).", judgement: true, oversight: "Search strings were reviewed and editable by the reviewer before execution." });
+    if (has(s.rerankResults))
+      steps.push({ stage: "Relevance ranking", purpose: "Ranked retrieved records by relevance to the review question.", judgement: true, oversight: "Used to prioritise screening order; no records were excluded on this basis alone." });
+    if (has(s.results)) {
+      const ov = Object.keys(s.abstractOverrides || {}).length;
+      steps.push({ stage: "Title and abstract screening", purpose: "Suggested eligibility decisions (include/exclude) with reasons from title/abstract.", judgement: true, oversight: `Reviewer-facing decisions with override capability${ov ? `; ${ov} AI decision(s) were overridden by a reviewer` : ""}.` });
+    }
+    if (has(s.snowballScreened))
+      steps.push({ stage: "Citation snowballing screening", purpose: "Suggested eligibility of references identified via backward/forward citation searching.", judgement: true, oversight: "Reviewer selected which records to carry forward." });
+    if (has(s.fullTextResults)) {
+      const ov = Object.keys(s.fullTextOverrides || {}).length;
+      steps.push({ stage: "Full-text eligibility assessment", purpose: "Suggested full-text eligibility against inclusion/exclusion criteria, with reasons.", judgement: true, oversight: `Reviewer-facing decisions with override capability${ov ? `; ${ov} AI decision(s) were overridden by a reviewer` : ""}.` });
+    }
+    if (has(s.qualityReports)) {
+      const ov = (s.qualityOverrides || []).length;
+      steps.push({ stage: "Risk-of-bias / quality assessment", purpose: "Suggested domain-level risk-of-bias / methodological appraisal judgements.", judgement: true, oversight: `Each AI judgement was reviewer-editable${ov ? `; ${ov} judgement(s) were overridden by a reviewer` : ""}.` });
+    }
+    if (has(s.extractedPapers) || has(s.textExtractions))
+      steps.push({ stage: "Data extraction", purpose: "Extracted numerical and/or qualitative data items from study reports.", judgement: true, oversight: "Extracted values were displayed against the source for reviewer verification and correction." });
+    if (has(s.writingSummary))
+      steps.push({ stage: "Manuscript drafting", purpose: "Drafted the methods / search-strategy appendix text.", judgement: true, oversight: "Draft text was reviewer-editable before use." });
+    return steps;
+  }, [s.unifiedSearchQuery, s.simulationRuns, s.history, s.rerankResults, s.results, s.abstractOverrides, s.snowballScreened, s.fullTextResults, s.fullTextOverrides, s.qualityReports, s.qualityOverrides, s.extractedPapers, s.textExtractions, s.writingSummary]);
+
   // ── Render ───────────────────────────────────────────────────────────────────
 
   if (!includedPapers.length) {
@@ -403,173 +608,319 @@ export function WritingPage() {
     );
   }
 
-  const hasDois = merged.some(p => p.doi);
   const enrichedCount = Object.keys(enriched).length;
 
   return (
-    <div className="space-y-4">
-
-      {/* ── Paper pool ── */}
-      <Card className="p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold">Included Papers</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {merged.length} papers · {stage}
-            </p>
-          </div>
-          <div className="flex gap-2">
-            {enriching
-              ? <span className="flex items-center gap-1.5 text-xs text-muted-foreground px-2">
-                  <Loader2 className="size-3.5 animate-spin" />Fetching metadata…
-                </span>
-              : <Button variant="outline" size="sm" onClick={() => enrichAll()}>
-                  <RefreshCw className="size-3.5 mr-1.5" />Re-fetch metadata
-                </Button>
-            }
-            <Button variant="outline" size="sm" onClick={copyBib}>
-              <Copy className="size-3.5 mr-1.5" />BibTeX
-            </Button>
-            <Button variant="outline" size="sm" onClick={downloadBib}>
-              <Download className="size-3.5 mr-1.5" />.bib
-            </Button>
-            <Button size="sm" onClick={downloadRis}>
-              <Download className="size-3.5 mr-1.5" />.ris (Zotero)
-            </Button>
-          </div>
-        </div>
-
-        <div className="rounded-md border overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-6">#</TableHead>
-                <TableHead>Title</TableHead>
-                <TableHead className="w-28">Source</TableHead>
-                <TableHead className="w-16">Year</TableHead>
-                <TableHead className="w-48">Authors</TableHead>
-                <TableHead className="w-24">DOI</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {merged.map((p, i) => (
-                <TableRow key={p.paper_id}>
-                  <TableCell className="text-muted-foreground text-xs">{i + 1}</TableCell>
-                  <TableCell>
-                    <a href={p.url} target="_blank" rel="noreferrer"
-                      className="text-sm font-medium hover:underline text-primary line-clamp-2">
-                      {p.title}
-                    </a>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="secondary" className="text-xs">{p.source}</Badge>
-                  </TableCell>
-                  <TableCell className="text-sm tabular-nums">{p.year ?? "—"}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground truncate max-w-[12rem]">
-                    {p.authors ?? <span className="italic">not fetched</span>}
-                  </TableCell>
-                  <TableCell>
-                    {p.doi
-                      ? <a href={`https://doi.org/${p.doi}`} target="_blank" rel="noreferrer"
-                          className="text-xs text-primary hover:underline truncate block max-w-[6rem]">
-                          {p.doi}
-                        </a>
-                      : <span className="text-xs text-muted-foreground">—</span>}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-
-        {hasDois && enrichedCount === 0 && (
-          <p className="text-xs text-muted-foreground">
-            {merged.filter(p => p.doi).length} papers have DOIs — click <strong>Enrich metadata</strong> to fetch authors, journal, volume, and pages from CrossRef.
-          </p>
-        )}
-        {enrichedCount > 0 && (
-          <p className="text-xs text-emerald-600">{enrichedCount} papers enriched from CrossRef.</p>
-        )}
-      </Card>
-
-      {/* ── Methods summary ── */}
-      <Card className="p-4 space-y-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold">Methods Summary</h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              PRISMA-compliant search strategy paragraph — databases, queries, dates, screening funnel
-            </p>
-          </div>
-          <Button onClick={generateSummary} disabled={generating}>
-            {generating
-              ? <><Loader2 className="size-4 mr-2 animate-spin" />Generating…</>
-              : <><BookOpen className="size-4 mr-2" />Generate with AI</>}
-          </Button>
-        </div>
-
-        {summary && (
-          <>
-            <Separator />
-            <Textarea
-              value={summary}
-              onChange={e => setSummary(e.target.value)}
-              rows={12}
-              className="font-serif text-sm leading-relaxed"
-            />
-            <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(summary); toast.success("Copied"); }}>
-                <Copy className="size-3.5 mr-1.5" />Copy
-              </Button>
-              <Button variant="outline" size="sm"
-                onClick={() => downloadFile(summary, "methods_summary.txt", "text/plain")}>
-                <Download className="size-3.5 mr-1.5" />Download
-              </Button>
+    <div className="space-y-3">
+      {/* ── Compact header: stats + bulk export ─────────────────────────────── */}
+      <Card className="p-3">
+        <div className="flex items-end gap-3 flex-wrap">
+          <div className="mr-auto min-w-0">
+            <h2 className="font-medium leading-tight">Writing Assistant</h2>
+            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+              <Pill icon={BookOpen}>{merged.length} papers</Pill>
+              <Pill icon={Layers} title="Pipeline stage these papers came from">{stage}</Pill>
+              {enrichedCount > 0 && <Pill icon={CheckCircle2} tone="green" title="Full metadata fetched (cached this session)">{enrichedCount} enriched</Pill>}
+              {enriching && <Pill icon={Loader2} spin>fetching metadata…</Pill>}
             </div>
-          </>
-        )}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button variant="outline" size="sm" onClick={() => enrichAll(includedPapers, true)} disabled={enriching}>
+              <RefreshCw className="size-3.5 mr-1.5" />Re-fetch
+            </Button>
+            <Select value={format} onValueChange={v => setFormat(v as CiteFormat)}>
+              <SelectTrigger className="h-9 w-[7.5rem]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {CITE_FORMATS.map(f => <SelectItem key={f.value} value={f.value}>{f.value}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="sm" onClick={copyAll}>
+              <Copy className="size-3.5 mr-1.5" />Copy all
+            </Button>
+            <Button size="sm" onClick={downloadAll}>
+              <Download className="size-3.5 mr-1.5" />.{fmtCfg.ext}
+            </Button>
+          </div>
+        </div>
       </Card>
 
-      {/* ── Individual citation entries ── */}
-      <Card className="p-4 space-y-2">
-        <div className="flex items-center justify-between mb-1">
-          <h2 className="font-semibold">Citation Library</h2>
-          <Button variant="ghost" size="sm" onClick={copyBib}>
-            <Copy className="size-3.5 mr-1.5" />Copy all BibTeX
-          </Button>
-        </div>
-        {merged.map((p, i) => (
-          <Collapsible key={p.paper_id}>
-            <CollapsibleTrigger asChild>
-              <Button variant="outline" className="w-full justify-between text-left h-auto py-2">
-                <span className="flex items-center gap-2 min-w-0">
-                  <FileText className="size-3.5 shrink-0 text-muted-foreground" />
-                  <span className="truncate text-sm">[{i + 1}] {p.title}</span>
-                </span>
-                <ChevronDown className="size-4 shrink-0 ml-2" />
-              </Button>
-            </CollapsibleTrigger>
-            <CollapsibleContent>
-              <div className="mt-1 rounded-md bg-muted/40 p-3 space-y-2">
-                <pre className="text-xs font-mono whitespace-pre-wrap break-words leading-relaxed">
-                  {toBibTeXEntry(p, i + 1)}
-                </pre>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="ghost" className="h-7 text-xs"
-                    onClick={() => { navigator.clipboard.writeText(toBibTeXEntry(p, i + 1)); toast.success("Copied"); }}>
-                    <Copy className="size-3 mr-1" />Copy BibTeX
-                  </Button>
-                  <Button size="sm" variant="ghost" className="h-7 text-xs"
-                    onClick={() => { navigator.clipboard.writeText(toRisEntry(p)); toast.success("Copied RIS"); }}>
-                    <Copy className="size-3 mr-1" />Copy RIS
-                  </Button>
+      <Tabs defaultValue="citations">
+        <TabsList>
+          <TabsTrigger value="citations" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Citations</TabsTrigger>
+          <TabsTrigger value="methods" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Search strategy</TabsTrigger>
+        </TabsList>
+
+        {/* ── Citations: searchable paper list (left) + citation detail (right) ── */}
+        <TabsContent value="citations" className="mt-3">
+          <div className="flex gap-4 h-[calc(100vh-15rem)] min-h-[28rem]">
+            <Card className="w-80 shrink-0 p-0 overflow-hidden flex flex-col">
+              <div className="p-2 border-b">
+                <div className="relative">
+                  <Search className="size-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={query}
+                    onChange={e => setQuery(e.target.value)}
+                    placeholder={`Filter ${merged.length} papers…`}
+                    className="pl-7 h-8 text-sm"
+                  />
                 </div>
               </div>
-            </CollapsibleContent>
-          </Collapsible>
-        ))}
-      </Card>
+              <div className="overflow-auto flex-1">
+                {filtered.map(({ p, n }) => {
+                  const active = p.paper_id === selectedRow?.p.paper_id;
+                  return (
+                    <button
+                      key={p.paper_id}
+                      onClick={() => setSelectedId(p.paper_id)}
+                      className={`w-full text-left px-3 py-2.5 border-b transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent hover:bg-muted/50"}`}
+                    >
+                      <div className="flex items-center gap-2 mb-1 text-[10px] text-muted-foreground">
+                        <span className="tabular-nums">[{n}]</span>
+                        <Badge variant="outline" className="text-[10px]">{p.source}</Badge>
+                        {p.year && <span className="tabular-nums">{p.year}</span>}
+                      </div>
+                      <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{p.title}</div>
+                    </button>
+                  );
+                })}
+                {filtered.length === 0 && (
+                  <div className="p-4 text-sm text-muted-foreground">No papers match “{query}”.</div>
+                )}
+              </div>
+            </Card>
 
+            <Card className="flex-1 min-w-0 p-0 overflow-hidden flex flex-col">
+              {!selectedRow ? (
+                <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Select a paper on the left.</div>
+              ) : (
+                <CitationDetail row={selectedRow} format={format} enriching={enriching} />
+              )}
+            </Card>
+          </div>
+        </TabsContent>
+
+        {/* ── Search strategy (PRISMA-S) — per-database table ── */}
+        <TabsContent value="methods" className="mt-3 space-y-3">
+          <Card className="p-4 space-y-4">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div>
+                <h3 className="font-medium">Search strategy (PRISMA-S)</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Per-database query, date run, and records retrieved — report this as a supplement.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <label className="text-xs text-muted-foreground flex items-center gap-1.5">
+                  Search date
+                  <Input type="date" value={searchDate} onChange={e => setSearchDate(e.target.value)} className="h-8 w-[9.5rem] text-sm" />
+                </label>
+                <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(buildSearchAppendix()); toast.success("Copied appendix"); }}>
+                  <Copy className="size-3.5 mr-1.5" />Copy
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => downloadFile(buildSearchAppendix(), "search_strategy.txt", "text/plain")}>
+                  <Download className="size-3.5 mr-1.5" />.txt
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => downloadFile(appendixCsv(), "search_strategy.csv", "text/csv")}>
+                  <Download className="size-3.5 mr-1.5" />.csv
+                </Button>
+              </div>
+            </div>
+
+            {baseQuery && (
+              <div>
+                <div className="text-xs font-semibold text-muted-foreground mb-1.5">Base query (applied unless a database has a custom string)</div>
+                <pre className="rounded-md border bg-muted/30 p-3 text-xs font-mono whitespace-pre-wrap break-words leading-relaxed">{baseQuery}</pre>
+              </div>
+            )}
+
+            <div className="rounded-md border overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-40">Database</TableHead>
+                    <TableHead>Query run</TableHead>
+                    <TableHead className="w-28">Date</TableHead>
+                    <TableHead className="w-24 text-right">Records</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {searchRows.map(r => (
+                    <TableRow key={r.db} className="align-top">
+                      <TableCell className="font-medium">{r.db}</TableCell>
+                      <TableCell>
+                        <pre className="font-mono text-xs whitespace-pre-wrap break-words leading-relaxed max-w-[44rem]">{r.query || "(not specified)"}</pre>
+                      </TableCell>
+                      <TableCell className="text-sm tabular-nums whitespace-nowrap">{searchDate}</TableCell>
+                      <TableCell className="text-right text-sm tabular-nums">
+                        {r.count != null ? r.count.toLocaleString() : <span className="text-muted-foreground">not run</span>}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                  {searchRows.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={4} className="text-sm text-muted-foreground text-center py-6">
+                        No databases selected. Pick sources in the sidebar.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                  {searchRows.length > 0 && (
+                    <>
+                      <TableRow className="border-t-2 bg-muted/30">
+                        <TableCell colSpan={3} className="font-medium">Total records retrieved</TableCell>
+                        <TableCell className="text-right text-sm font-semibold tabular-nums">
+                          {identified != null ? identified.toLocaleString() : "—"}
+                        </TableCell>
+                      </TableRow>
+                      <TableRow className="bg-muted/30">
+                        <TableCell colSpan={3} className="font-medium">Duplicates removed</TableCell>
+                        <TableCell className="text-right text-sm font-semibold tabular-nums">{dupRemoved.toLocaleString()}</TableCell>
+                      </TableRow>
+                      <TableRow className="bg-muted/30">
+                        <TableCell colSpan={3} className="font-medium">Unique records screened</TableCell>
+                        <TableCell className="text-right text-sm font-semibold tabular-nums">
+                          {afterDedup != null ? afterDedup.toLocaleString() : "—"}
+                        </TableCell>
+                      </TableRow>
+                    </>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </Card>
+
+          {/* Search-strategy methods appendix (Design / Sources / Eligibility / Selection / Synthesis) */}
+          <Card className="p-4 space-y-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <h3 className="font-medium">Search strategy methods (appendix)</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">Prose methods appendix: design &amp; scope, data sources, eligibility, study selection, synthesis, and a RAISE-compliant AI &amp; automation use declaration.</p>
+              </div>
+              <Button size="sm" variant="outline" onClick={generateSummary} disabled={generating}>
+                {generating
+                  ? <><Loader2 className="size-4 mr-2 animate-spin" />Generating…</>
+                  : <><BookOpen className="size-4 mr-2" />{summary ? "Regenerate" : "Generate with AI"}</>}
+              </Button>
+            </div>
+            {summary && (
+              <>
+                <Separator />
+                {editingSummary ? (
+                  <Textarea value={summary} onChange={e => setSummary(e.target.value)} rows={16} className="font-mono text-xs leading-relaxed" />
+                ) : (
+                  <div className="space-y-3 font-serif">{renderMethodsAppendix(summary)}</div>
+                )}
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setEditingSummary(v => !v)}>
+                    {editingSummary ? "Done" : "Edit"}
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(summary); toast.success("Copied"); }}>
+                    <Copy className="size-3.5 mr-1.5" />Copy
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={() => downloadFile(summary, "methods_appendix.txt", "text/plain")}>
+                    <Download className="size-3.5 mr-1.5" />Download
+                  </Button>
+                </div>
+              </>
+            )}
+          </Card>
+
+        </TabsContent>
+      </Tabs>
     </div>
+  );
+}
+
+// ── Selected-citation detail (right pane) ─────────────────────────────────────
+function CitationDetail({ row, format, enriching }: { row: { p: PaperMeta; n: number }; format: CiteFormat; enriching: boolean }) {
+  const { p, n } = row;
+  const meta: { label: string; value?: string }[] = [
+    { label: "Authors", value: p.authors },
+    { label: "Journal", value: p.journal },
+    { label: "Year", value: p.year != null ? String(p.year) : undefined },
+    { label: "Volume", value: [p.volume, p.issue && `(${p.issue})`].filter(Boolean).join("") || undefined },
+    { label: "Pages", value: p.pages },
+  ].filter(m => m.value);
+
+  return (
+    <>
+      <div className="border-b p-4 space-y-2">
+        <div className="flex items-start gap-2">
+          <span className="text-xs text-muted-foreground tabular-nums shrink-0 pt-0.5">[{n}]</span>
+          <a href={p.url} target="_blank" rel="noreferrer" className="font-medium leading-snug hover:underline inline-flex items-start gap-1">
+            <span>{p.title}</span>
+            <ExternalLink className="size-3 mt-1 shrink-0 text-muted-foreground" />
+          </a>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <Badge variant="secondary">{p.source}</Badge>
+          {p.doi && (
+            <a href={`https://doi.org/${p.doi}`} target="_blank" rel="noreferrer" className="text-primary hover:underline">doi:{p.doi}</a>
+          )}
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-auto p-4 space-y-4">
+        <div>
+          <div className="text-xs font-semibold text-muted-foreground mb-2">Metadata</div>
+          {meta.length > 0 ? (
+            <dl className="grid grid-cols-[5rem_1fr] gap-x-3 gap-y-1 text-sm">
+              {meta.map(m => (
+                <Fragment key={m.label}>
+                  <dt className="text-muted-foreground">{m.label}</dt>
+                  <dd className="min-w-0 break-words">{m.value}</dd>
+                </Fragment>
+              ))}
+            </dl>
+          ) : (
+            <p className="text-sm text-muted-foreground italic">
+              {enriching ? "Fetching metadata…" : "No author/journal metadata available for this record."}
+            </p>
+          )}
+        </div>
+
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <div className="text-xs font-semibold text-muted-foreground">{format} citation</div>
+            <div className="flex gap-1">
+              <Button size="sm" variant="ghost" className="h-7 text-xs"
+                onClick={() => { navigator.clipboard.writeText(formatCitation(p, format, n)); toast.success(`Copied ${format}`); }}>
+                <Copy className="size-3 mr-1" />Copy {format}
+              </Button>
+              {format !== "BibTeX" && (
+                <Button size="sm" variant="ghost" className="h-7 text-xs"
+                  onClick={() => { navigator.clipboard.writeText(toBibTeXEntry(p, n)); toast.success("Copied BibTeX"); }}>BibTeX</Button>
+              )}
+              {format !== "RIS" && (
+                <Button size="sm" variant="ghost" className="h-7 text-xs"
+                  onClick={() => { navigator.clipboard.writeText(toRisEntry(p)); toast.success("Copied RIS"); }}>RIS</Button>
+              )}
+            </div>
+          </div>
+          <pre className="rounded-md border bg-muted/30 p-3 text-xs font-mono whitespace-pre-wrap break-words leading-relaxed">
+            {formatCitation(p, format, n)}
+          </pre>
+        </div>
+      </div>
+    </>
+  );
+}
+
+// Compact count pill (matches the other pages).
+function Pill({
+  icon: Icon, children, tone = "default", title, spin = false,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  children: React.ReactNode;
+  tone?: "default" | "green";
+  title?: string;
+  spin?: boolean;
+}) {
+  const cls = tone === "green"
+    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+    : "bg-muted text-muted-foreground border-transparent";
+  return (
+    <span title={title} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
+      <Icon className={`size-3 ${spin ? "animate-spin" : ""}`} />{children}
+    </span>
   );
 }

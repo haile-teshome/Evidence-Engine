@@ -7,7 +7,7 @@ import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
 import { Badge } from "../components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { ChevronDown, Bot, Play, X, History, GitCompare, Trash2, Database, Layers, FlaskConical } from "lucide-react";
+import { ChevronDown, Bot, Play, X, History, GitCompare, Trash2, FlaskConical, Wand2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { QueryDiff } from "../components/QueryDiff";
 import { AnalysisProgress, Stage as ProgStage } from "../components/AnalysisProgress";
@@ -114,13 +114,17 @@ function HistoryColumn({
   runs,
   compareA,
   compareB,
+  activeRunId,
   onSelectCompare,
+  onUse,
   onClear,
 }: {
   runs: SimulationRun[];
   compareA: string | null;
   compareB: string | null;
+  activeRunId: string | null;
   onSelectCompare: (id: string) => void;
+  onUse: (run: SimulationRun) => void;
   onClear: () => void;
 }) {
   return (
@@ -166,14 +170,25 @@ function HistoryColumn({
                 <div className="font-mono text-[10px] text-muted-foreground truncate mt-1">
                   {run.unifiedQuery.slice(0, 60)}{run.unifiedQuery.length > 60 ? "…" : ""}
                 </div>
-                <Button
-                  size="sm"
-                  variant={selected ? "default" : "outline"}
-                  className="h-6 text-xs px-2 mt-1.5 w-full"
-                  onClick={() => onSelectCompare(run.id)}
-                >
-                  {isA ? "Selected A" : isB ? "Selected B" : "Compare"}
-                </Button>
+                <div className="flex gap-1.5 mt-1.5">
+                  <Button
+                    size="sm"
+                    variant={activeRunId === run.id ? "default" : "outline"}
+                    className="h-6 text-xs px-2 flex-1"
+                    onClick={() => onUse(run)}
+                    title="Load this run's queries as the active plan"
+                  >
+                    {activeRunId === run.id ? "In use" : "Use"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant={selected ? "default" : "outline"}
+                    className="h-6 text-xs px-2 flex-1"
+                    onClick={() => onSelectCompare(run.id)}
+                  >
+                    {isA ? "A" : isB ? "B" : "Compare"}
+                  </Button>
+                </div>
               </div>
             );
           })}
@@ -189,25 +204,6 @@ function HistoryColumn({
   );
 }
 
-// ── Compact count pill ──────────────────────────────────────────────────────
-function Pill({
-  icon: Icon, children, tone = "default", title,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  children: React.ReactNode;
-  tone?: "default" | "green";
-  title?: string;
-}) {
-  const cls = tone === "green"
-    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-    : "bg-muted text-muted-foreground border-transparent";
-  return (
-    <span title={title} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
-      <Icon className="size-3" />{children}
-    </span>
-  );
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export function SimulationPage() {
@@ -216,10 +212,12 @@ export function SimulationPage() {
   const optTask = s.tasks["ai-optimize"];
   const optRunning = optTask?.status === "running";
   const [testing, setTesting] = useState<string | null>(null);
+  const [adapting, setAdapting] = useState(false);
 
   // Compare state — tracks which two run IDs are selected (A then B).
   const [compareA, setCompareA] = useState<string | null>(null);
   const [compareB, setCompareB] = useState<string | null>(null);
+  const [usedRunId, setUsedRunId] = useState<string | null>(null);
   // Two-pane workspace: which database's query is open on the right.
   const [selectedDb, setSelectedDb] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(false);
@@ -232,6 +230,14 @@ export function SimulationPage() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [s.sources.join(","), s.unifiedSearchQuery]);
+
+  // Default to the latest run; auto-switch to a newly created one. An explicit
+  // "Use" on an older run overrides this until the next run is created.
+  // (Must run before any early return so hook order stays stable.)
+  const newestRunId = s.simulationRuns.length ? s.simulationRuns[s.simulationRuns.length - 1].id : null;
+  useEffect(() => {
+    if (newestRunId) setUsedRunId(newestRunId);
+  }, [newestRunId]);
 
   if (s.history.length === 0) {
     return <Alert><AlertDescription>Start by defining a research goal on the Home page.</AlertDescription></Alert>;
@@ -261,6 +267,31 @@ export function SimulationPage() {
     setCompareB(id);
   }
 
+  // Load a previous run's queries as the active plan
+  function handleUseRun(run: SimulationRun) {
+    s.setUnifiedSearchQuery(run.unifiedQuery);
+    s.setPerDbQueries({ ...run.perDbQueries });
+    s.setSimulation(run.counts);
+    setUsedRunId(run.id);
+    setCompareA(null);
+    setCompareB(null);
+    toast.success(`Loaded ${run.label} — ${run.totalYield.toLocaleString()} papers`);
+  }
+
+  // Does a run's queries still match what's currently in the editor?
+  const runMatchesActive = (run: SimulationRun) =>
+    run.unifiedQuery === s.unifiedSearchQuery &&
+    apiSources.every(
+      src => (run.perDbQueries[src] || run.unifiedQuery) === (s.perDbQueries[src] || s.unifiedSearchQuery),
+    );
+
+  // The explicitly-selected run wins (runs can share identical queries); otherwise
+  // fall back to the most recent run matching the current editor state.
+  const activeRunId =
+    (usedRunId && s.simulationRuns.some(r => r.id === usedRunId && runMatchesActive(r)) ? usedRunId : null) ??
+    [...s.simulationRuns].reverse().find(runMatchesActive)?.id ??
+    null;
+
   async function testDb(src: string) {
     setTesting(src);
     try {
@@ -286,6 +317,20 @@ export function SimulationPage() {
     }
     s.setSimulation(out);
     saveRun(out, "manual");
+  }
+
+  async function adaptToDatabases() {
+    if (!s.unifiedSearchQuery.trim()) { toast.error("Enter a base query first"); return; }
+    setAdapting(true);
+    try {
+      const map = await AIService.adaptQueriesPerSource(s.unifiedSearchQuery, apiSources);
+      if (!Object.keys(map).length) { toast.error("No queries returned"); return; }
+      s.setPerDbQueries(prev => ({ ...prev, ...map }));
+      s.setSimulation(null);
+      toast.success(`Adapted query syntax for ${Object.keys(map).length} database(s)`);
+    } catch (e: any) {
+      toast.error(`Adapt failed: ${e?.message || "unknown error"}`);
+    } finally { setAdapting(false); }
   }
 
   async function runAiOptimize() {
@@ -364,29 +409,27 @@ export function SimulationPage() {
 
   return (
     <div className="space-y-3">
-      {/* ── Header: base query + actions + pills ─────────────────────────── */}
+      {/* ── Header: wide base query + vertical action buttons ─────────────── */}
       <Card className="p-3 space-y-3">
-        <div className="flex items-start gap-3 flex-wrap">
-          <div className="flex-1 min-w-[280px]">
+        <div className="flex items-start gap-3">
+          <div className="flex-1 min-w-0">
             <label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Base query · all databases</label>
-            <Textarea value={s.unifiedSearchQuery} onChange={e => updateUnified(e.target.value)} rows={2} className="font-mono text-sm mt-1" />
+            <Textarea value={s.unifiedSearchQuery} onChange={e => updateUnified(e.target.value)} rows={3} className="font-mono text-sm mt-1 min-h-[5.5rem] max-h-40 overflow-auto" />
           </div>
-          <div className="flex gap-2 pt-5 flex-wrap">
-            <Button variant="outline" onClick={runAiOptimize} disabled={optRunning}>
+          <div className="flex flex-col gap-2 w-44 shrink-0 pt-5">
+            <Button variant="outline" onClick={adaptToDatabases} disabled={adapting || optRunning} className="w-full justify-start" title="Convert the base query into each database's native syntax (PubMed tags, Scopus TITLE-ABS-KEY, Embase :ti,ab, arXiv abs:, …)">
+              {adapting ? <Loader2 className="size-4 mr-2 animate-spin" /> : <Wand2 className="size-4 mr-2" />}Adapt to databases
+            </Button>
+            <Button variant="outline" onClick={runAiOptimize} disabled={optRunning} className="w-full justify-start">
               <Bot className="size-4 mr-2" />AI Optimize
             </Button>
-            <Button onClick={runSimulation} disabled={optRunning}>
+            <Button onClick={runSimulation} disabled={optRunning} className="w-full justify-start">
               <Play className="size-4 mr-2" />Run Planning
             </Button>
-            <Button variant="ghost" onClick={() => { s.setSimulation(null); s.setDbTestResults(null); s.setAgenticTrace(null); s.setAgenticSummary(null); }}>
+            <Button variant="ghost" onClick={() => { s.setSimulation(null); s.setDbTestResults(null); s.setAgenticTrace(null); s.setAgenticSummary(null); }} className="w-full justify-start">
               <X className="size-4 mr-2" />Clear
             </Button>
           </div>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Pill icon={Database}>{apiSources.length} database{apiSources.length === 1 ? "" : "s"}</Pill>
-          {s.simulation && <Pill icon={Layers} tone="green" title={`Up to ${s.numPerSource}/source is downloaded then deduplicated`}>{totalYield.toLocaleString()} total yield</Pill>}
-          {s.simulationRuns.length > 0 && <Pill icon={History}>{s.simulationRuns.length} run{s.simulationRuns.length === 1 ? "" : "s"}</Pill>}
         </div>
         {optTask && optTask.status === "running" && (
           <div className="space-y-2">
@@ -532,7 +575,9 @@ export function SimulationPage() {
           runs={s.simulationRuns}
           compareA={compareA}
           compareB={compareB}
+          activeRunId={activeRunId}
           onSelectCompare={handleSelectCompare}
+          onUse={handleUseRun}
           onClear={() => { s.clearSimulationRuns(); setCompareA(null); setCompareB(null); }}
         />
       </div>

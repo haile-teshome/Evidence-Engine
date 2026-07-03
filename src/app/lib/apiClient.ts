@@ -173,6 +173,17 @@ export const AIService = {
     return postJSON<Analysis>("/pico/infer", { input, prior: prior || undefined, model: apiConfig.model }, signal);
   },
 
+  // Translate the PubMed-style base query into each engine's native syntax,
+  // preserving terms and Boolean logic. Returns a per-source query map.
+  async adaptQueriesPerSource(baseQuery: string, sources: string[], signal?: AbortSignal): Promise<Record<string, string>> {
+    const r = await postJSON<{ per_source_queries: Record<string, string> }>(
+      "/simulation/adapt",
+      { base_query: baseQuery, sources, model: apiConfig.model },
+      signal,
+    );
+    return r.per_source_queries || {};
+  },
+
   // Clarifying questions — called BEFORE the search runs. Returns 1-3 multiple-
   // choice questions that disambiguate underspecified PICO elements. The Home
   // page shows them in a Claude-style modal so the user owns the answer.
