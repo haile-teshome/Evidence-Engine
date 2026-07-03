@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useStore, SESSION_STORAGE_KEY } from "../lib/store";
 import { useAuth } from "../lib/auth";
 import { listSessions, loadSession, saveSession, deleteSession, SessionMeta } from "../lib/sessions";
+import { supabaseConfigured } from "../lib/supabaseClient";
 import { AIService } from "../lib/mockServices";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
@@ -215,7 +216,9 @@ export function SessionsPanel() {
   if (!user) {
     return (
       <Card className="p-3 text-xs text-muted-foreground">
-        Sign in (top-right) to save and sync research sessions.
+        {supabaseConfigured
+          ? "Sign in (top-right) to save and sync research sessions."
+          : "Your work is saved locally on this computer automatically."}
       </Card>
     );
   }
