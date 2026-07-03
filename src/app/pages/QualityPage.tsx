@@ -114,10 +114,6 @@ export function QualityPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
 
-  if (s.history.length === 0) {
-    return <Alert><AlertDescription>Define a research goal on the Home page first.</AlertDescription></Alert>;
-  }
-
   async function runFetchAndAssess() {
     if (!s.query) { toast.error("Define a query on the Home page first."); return; }
     const { abort } = s.startTask("quality-assess", [{ id: "qa", label: "Quality assessment", status: "running" }]);
@@ -228,6 +224,11 @@ export function QualityPage() {
     }
     return { low, some, high, no_info };
   }, [reports, overrides]);
+
+  // All hooks are declared above; only now is it safe to bail out early.
+  if (s.history.length === 0) {
+    return <Alert><AlertDescription>Define a research goal on the Home page first.</AlertDescription></Alert>;
+  }
 
   const kept = reports ? reports.filter(r => !s.excludedByQuality.has(r.paper_id)).length : 0;
 
