@@ -107,6 +107,9 @@ export type TaskRecord = {
 type Ctx = {
   // Sidebar
   page: PageId; setPage: (p: PageId) => void;
+  // Transient UI: whether the Home page's Strategy Review drawer is open (lives
+  // in the store so the header bar can toggle it). Not persisted.
+  reviewOpen: boolean; setReviewOpen: (v: boolean) => void;
   model: string; setModel: (v: string) => void;
   sources: string[]; setSources: (v: string[]) => void;
   numPerSource: number; setNumPerSource: (v: number) => void;
@@ -194,6 +197,10 @@ type Ctx = {
   // Extraction
   extractedPapers: ExtractedPaper[] | null; setExtractedPapers: (v: ExtractedPaper[] | null) => void;
   textExtractions: TextExtractionResult[]; setTextExtractions: React.Dispatch<React.SetStateAction<TextExtractionResult[]>>;
+  // Writing Assistant: cached citation metadata enrichment + generated methods
+  // summary, so switching tabs doesn't re-fetch everything.
+  writingEnriched: Record<string, Record<string, any>>; setWritingEnriched: React.Dispatch<React.SetStateAction<Record<string, Record<string, any>>>>;
+  writingSummary: string; setWritingSummary: (v: string) => void;
 
   // PRISMA
   prisma: PrismaCounts; setPrisma: React.Dispatch<React.SetStateAction<PrismaCounts>>;
@@ -270,6 +277,7 @@ function loadPage(): PageId {
 export function StoreProvider({ children }: { children: ReactNode }) {
   // Restore the last-viewed tab so a browser refresh keeps you in place.
   const [page, setPage] = useState<PageId>(loadPage);
+  const [reviewOpen, setReviewOpen] = useState(false);
   useEffect(() => {
     try { localStorage.setItem(PAGE_STORAGE_KEY, page); } catch { /* ignore */ }
   }, [page]);
@@ -374,6 +382,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [extractedPapers, setExtractedPapers] = useState<ExtractedPaper[] | null>(null);
   const [fullTexts, setFullTexts] = useState<Record<string, FullTextRecord>>({});
   const [textExtractions, setTextExtractions] = useState<TextExtractionResult[]>([]);
+  const [writingEnriched, setWritingEnriched] = useState<Record<string, Record<string, any>>>({});
+  const [writingSummary, setWritingSummary] = useState("");
 
   const [prisma, setPrisma] = useState<PrismaCounts>({
     identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0,
@@ -473,6 +483,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // localStorage quota; backend sessions always keep them.
     simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary,
     textExtractions, fullTexts,
+    writingEnriched, writingSummary,
   });
 
   const hydrate = (d: any) => {
@@ -510,6 +521,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setAgenticTrace(d.agenticTrace ?? null);
     setAgenticSummary(d.agenticSummary ?? null);
     if (Array.isArray(d.textExtractions)) setTextExtractions(d.textExtractions);
+    if (d.writingEnriched && typeof d.writingEnriched === "object") setWritingEnriched(d.writingEnriched);
+    if (typeof d.writingSummary === "string") setWritingSummary(d.writingSummary);
     // Only restore full texts when present — a quota-trimmed local snapshot
     // omits them, and we don't want to wipe anything already loaded.
     if (d.fullTexts && typeof d.fullTexts === "object") setFullTexts(d.fullTexts);
@@ -547,6 +560,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
       snowballResults, snowballScreened, extractedPapers, prisma,
       simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
+      writingEnriched, writingSummary,
       currentSessionId, currentSessionTitle]);
 
   useEffect(() => {
@@ -580,6 +594,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setResults(null); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
     setSnowballResults(null); setSnowballScreened(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
+    setWritingEnriched({}); setWritingSummary("");
     setPrisma({ identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0, excluded_total: 0, exclusion_breakdown: {}, included_final: 0 });
     setCurrentSessionId(null); setCurrentSessionTitle("Untitled session");
     setCurrentProjectId(null); setCurrentProjectName(""); setCurrentProjectRole(null); setCurrentProjectMode(null);
@@ -587,7 +602,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   };
 
   const value: Ctx = {
-    page, setPage, model, setModel, sources, setSources, numPerSource, setNumPerSource, files, setFiles,
+    page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, files, setFiles,
     history, setHistory, pico, setPico, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
     unifiedSearchQuery, setUnifiedSearchQuery, perDbQueries, setPerDbQueries, simulation, setSimulation,
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
@@ -604,6 +619,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     results, setResults, screeningDuration, setScreeningDuration, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
+    writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,
     currentSessionId, setCurrentSessionId, currentSessionTitle, setCurrentSessionTitle,
     ezproxyConnected, setEzproxyConnected,
     elsevierToken, setElsevierToken,

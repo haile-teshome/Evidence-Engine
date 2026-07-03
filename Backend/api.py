@@ -1090,6 +1090,93 @@ def simulation_yield(req: SimulateYieldRequest):
     return {"counts": counts}
 
 
+# ── Per-database syntax adaptation ──────────────────────────────────────────────
+# Translate a PubMed-style base query into each search engine's native syntax,
+# preserving the terms and Boolean logic. The base query is authored in PubMed
+# field-tag syntax ([tiab], [Mesh], …) which most other engines reject.
+
+# Concise rules so the LLM produces idiomatic, executable strings per engine.
+_ENGINE_SYNTAX_RULES = {
+    "PubMed": "Native PubMed/MEDLINE syntax. Keep field tags: [tiab], [ti], [Mesh], [Mesh:NoExp], date [dp] (e.g. 2017:2026[dp]), language [la], publication type [pt]. This is the canonical form.",
+    "Europe PMC": "Europe PMC syntax. Boolean AND/OR/NOT in caps. Use fields TITLE:\"..\", ABSTRACT:\"..\", or no field for all-fields. MeSH via MESH:\"..\". Do NOT use PubMed bracket tags.",
+    "Semantic Scholar": "Plain keyword/phrase search. No field tags. Quote phrases. Keep AND/OR/NOT and parentheses but no PubMed brackets.",
+    "OpenAlex": "Free-text relevance search (no field tags, limited Boolean). Provide the key quoted phrases and terms; drop PubMed brackets, dates and publication-type filters.",
+    "CrossRef": "Bibliographic free-text search. No field tags or Boolean operators; provide the key quoted phrases and terms only.",
+    "arXiv": "arXiv API syntax. Use field prefixes ti:, abs:, all:, cat:. Phrases in quotes. Boolean AND/OR/ANDNOT. Map [ti]→ti:, [tiab]/[tw]→abs:, drop [Mesh]/[dp]/[la]. Combine concept blocks with AND.",
+    "bioRxiv": "Preprint server with NO Boolean field search. Provide a short, focused keyword phrase of the 3-6 most important terms only.",
+    "medRxiv": "Preprint server with NO Boolean field search. Provide a short, focused keyword phrase of the 3-6 most important terms only.",
+    "DOAJ": "DOAJ Elasticsearch query-string syntax. Fields bibjson.title:\"..\", bibjson.abstract:\"..\". Boolean AND/OR in caps, quotes for phrases. Drop PubMed brackets.",
+    "CORE": "CORE query syntax. Fields title:\"..\", abstract:\"..\", yearPublished:>=2017. Boolean AND/OR/NOT, quotes for phrases. Drop PubMed brackets.",
+    "Scopus": "Scopus syntax. Wrap free-text in TITLE-ABS-KEY( .. ); use TITLE( ) for title-only. Boolean AND/OR/AND NOT. Dates via PUBYEAR > 2016, language via LANGUAGE(english). Drop PubMed brackets.",
+    "Embase": "Embase (Emtree) syntax. Free-text as 'term':ti,ab ; Emtree explosion as 'term'/exp. Boolean AND/OR/NOT. Dates [2017-2026]/py, language 'english':la. Lowercase terms. Drop PubMed brackets.",
+}
+
+
+def _strip_pubmed_tags(q: str) -> str:
+    """Deterministic fallback: remove PubMed bracket field tags and tidy whitespace."""
+    out = re.sub(r"\[[^\]]+\]", "", q)
+    out = re.sub(r"\bNOT\s*\(\s*\)", "", out)
+    out = re.sub(r"\s+", " ", out)
+    out = re.sub(r"\(\s*\)", "", out).strip()
+    return out
+
+
+class AdaptQueriesRequest(BaseModel):
+    base_query: str
+    sources: List[str]
+    model: str = ""
+
+
+@app.post("/api/simulation/adapt")
+def simulation_adapt(req: AdaptQueriesRequest):
+    """Adapt the base query to each engine's native syntax (terms/logic preserved)."""
+    from langchain_core.messages import HumanMessage
+
+    sources = [s for s in req.sources if s != "Local PDFs"]
+    base = (req.base_query or "").strip()
+    if not base or not sources:
+        return {"per_source_queries": {}}
+
+    # Deterministic fallback for every source.
+    fallback = {}
+    for src in sources:
+        fallback[src] = base if src == "PubMed" else _strip_pubmed_tags(base)
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if not model:
+        return {"per_source_queries": fallback}
+
+    rules = "\n".join(f"  - {src}: {_ENGINE_SYNTAX_RULES.get(src, 'General academic database; drop PubMed bracket tags, keep Boolean logic and quoted phrases.')}" for src in sources)
+    prompt = f"""You are an expert systematic-review information specialist. Translate the following PubMed-style Boolean search query into the NATIVE syntax of each target database.
+
+CRITICAL RULES:
+- PRESERVE the search terms, synonyms, quoted phrases and Boolean logic (the AND/OR structure of the concept blocks) exactly. Do NOT add, remove, or reword search concepts.
+- ONLY change field tags, operators, and formatting so the query is valid and idiomatic for each engine.
+- Each engine's specific syntax rules:
+{rules}
+
+BASE QUERY (PubMed syntax):
+{base}
+
+Return ONLY a JSON object mapping each database name to its adapted query string, with these exact keys: {sources}. No commentary, no code fences."""
+
+    try:
+        resp = model.invoke([HumanMessage(content=prompt)])
+        content = resp.content if isinstance(resp.content, str) else str(resp.content)
+        content = content.strip()
+        # Pull the JSON object out of the response.
+        m = re.search(r"\{.*\}", content, re.DOTALL)
+        data = _json.loads(m.group(0)) if m else {}
+        out = {}
+        for src in sources:
+            v = data.get(src)
+            out[src] = v.strip() if isinstance(v, str) and v.strip() else fallback[src]
+        return {"per_source_queries": out}
+    except Exception as e:
+        print(f"simulation_adapt failed, using deterministic fallback: {e}")
+        return {"per_source_queries": fallback}
+
+
 class DedupeRequest(BaseModel):
     papers: List[PaperIn]
 
@@ -3793,6 +3880,9 @@ class WritingSummaryRequest(BaseModel):
     exclusion_criteria: List[str] = []
     goal: str = ""
     model: str = ""
+    # RAISE AI-use disclosure: stages where AI made or suggested judgements
+    ai_model: str = ""
+    ai_steps: List[Dict[str, str]] = []
 
 
 @app.post("/api/writing/summary")
@@ -3848,7 +3938,16 @@ def writing_summary(req: WritingSummaryRequest):
         funnel_parts.append(f"Final included studies: {req.included_final:,}")
     funnel_block = " → ".join(funnel_parts) if funnel_parts else ""
 
-    prompt = f"""You are writing the Information Sources and Search Strategy section of a systematic review methods section (PRISMA 2020 compliant).
+    # RAISE AI-use block
+    if req.ai_steps:
+        ai_lines = [f"AI system: {req.ai_model or 'a large language model'}.", "Stages where AI made or suggested judgements (all reviewer-facing and overridable):"]
+        for st in req.ai_steps:
+            ai_lines.append(f"  • {st.get('stage','')}: {st.get('purpose','')} (Oversight: {st.get('oversight','')})")
+        ai_block = "\n".join(ai_lines)
+    else:
+        ai_block = "(No AI-assisted judgement stages were recorded.)"
+
+    prompt = f"""You are writing the Search Strategy Methods appendix of a systematic review (PRISMA 2020 compliant). This is the prose appendix that accompanies the per-database search-string table; it must read like a polished journal methods appendix.
 
 Review question: {req.goal or '(not specified)'}
 
@@ -3866,15 +3965,28 @@ Search date: {req.search_date or 'not recorded'}
 PRISMA screening funnel:
 {funnel_block or '(screening counts not yet available)'}
 
-Write a single, well-structured paragraph (150–250 words) for the Methods section of a manuscript. It must:
-1. Name every database searched and the date the search was conducted
-2. Describe the search strategy (keywords, Boolean operators, MeSH/controlled vocabulary terms if identifiable from the query strings)
-3. State any date or language restrictions if apparent from the queries
-4. Briefly describe the screening process (title/abstract screening, full-text review) and the PRISMA record counts
-5. Mention the inclusion and exclusion criteria applied
+AI and automation use (for the AI-use subsection):
+{ai_block}
 
-Write in past tense, third person, passive voice where appropriate. Do not invent details.
-Output only the paragraph — no headings, no bullet points, no preamble."""
+Write the appendix as SIX labeled subsections, in this exact order, each a flowing, substantive prose paragraph (no bullet points inside them). Put each subsection label in bold, followed by the paragraph. Match the depth, specificity and formal register of a published methods appendix in a high-quality journal: each paragraph should be 3-6 full sentences, concrete, and free of filler.
+
+**Design and scope:** State the review type and aim, the clinical/topic domain (infer it specifically from the review question and PICO, naming the actual field), and how evidence was synthesized. If no effect estimates were pooled, state that it is a narrative synthesis and that formal risk-of-bias assessment or quantitative meta-analysis was not performed; otherwise describe the synthesis approach. Note adherence to the applicable items of the PRISMA 2020 statement.
+
+**Data sources and search strategy:** Name every database searched and the search date / date range. Describe the concept blocks combined with the Boolean operator AND, deriving and naming the blocks from the PICO and the query strings (e.g. the population block, the intervention block, the outcome/application block), and give representative example terms from each. Note the use of controlled vocabulary (MeSH or database equivalents) alongside free-text title/abstract fields where identifiable from the strings, and mention any preprint or supplementary sources searched. State that the complete search strings and the date run for each source are provided in the accompanying appendix table.
+
+**Eligibility criteria:** Describe, in prose, the study types and content that were included and excluded, grounded in the inclusion/exclusion criteria above and any date or language limits apparent from the queries. Be specific about what made a record eligible.
+
+**Study selection:** Describe de-duplication and the screening workflow using the PRISMA counts (records retrieved, duplicates removed, unique records screened, and final included studies, only where provided). Describe title and abstract screening followed by full-text review, and that disagreements were resolved by consensus or adjudication by a senior reviewer. Note that the selection process is summarized in the PRISMA flow diagram.
+
+**Data charting and synthesis:** Describe how each included study was charted (the key dimensions extracted), how studies were organized, and how findings were synthesized into the narrative.
+
+**Use of AI and automation:** Provide a transparent declaration following the Responsible use of AI in evidence SynthEsis (RAISE) recommendations endorsed by Cochrane, the Campbell Collaboration, JBI and the Collaboration for Environmental Evidence. State that the review authors remain ultimately responsible for the content, methods and findings, including the decision to use AI. Name the AI system used and report, in prose, each stage at which AI made or suggested a judgement (drawn from the AI and automation use list above), making clear that all such use was conducted with human oversight and that every AI-generated judgement was reviewer-facing and could be overridden. Briefly note the principal limitations of large language models (potential for bias, overfitting, opaque decision-making and fabricated outputs) and that these were mitigated by human oversight, and state that ethical, legal and regulatory standards were observed. If no AI stages were recorded, state plainly that no AI or automation that makes or suggests judgements was used.
+
+Rules:
+- Write in past tense, third person, formal academic register, matching the quality of a published systematic-review methods appendix.
+- Use ONLY the numbers, stages and facts provided above; do not invent counts, reviewer numbers, tool names, or details not given. If a number is missing, omit that claim rather than guessing.
+- Do NOT name any specific commercial software, product, or company other than the AI system named above and the named bibliographic databases; for de-duplication/screening management refer generically (e.g. "a systematic review management tool") or simply state records were de-duplicated and screened.
+- Output only the six labeled subsections — no overall title, no preamble, no closing remarks."""
 
     resp = model.invoke([HumanMessage(content=prompt)])
     return {"summary": resp.content.strip()}
