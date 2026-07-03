@@ -52,3 +52,6 @@ open Terminal and run: `xattr -dr com.apple.quarantine "Evidence Engine.app"`.)
   the sidebar). Cloud models need an API key.
 - **Ports busy** — if you already have something on ports 5180 or 8000, close it
   and relaunch.
+- **"permission denied" / launcher won't run (macOS)** — the zip may have dropped
+  the executable flag. In Terminal, `cd` into the folder and run:
+  `chmod +x launch.command "Evidence Engine.app/Contents/MacOS/EvidenceEngine"`
