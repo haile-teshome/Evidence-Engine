@@ -1,5 +1,13 @@
 #!/bin/bash
 # macOS launcher for Evidence Engine. Double-click to run.
-# Keep this file in the project root; the Desktop copy points here by absolute path.
-export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-exec node "/Users/hteshome/Downloads/Systematic Review Platform/launch.mjs"
+# Self-locating: works no matter where this folder lives, on any Mac.
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+if ! command -v node >/dev/null 2>&1; then
+  osascript -e 'display alert "Node.js is required" message "Evidence Engine needs Node.js (LTS). Opening the download page — install it, then double-click this file again."' >/dev/null 2>&1
+  open "https://nodejs.org/en/download"
+  exit 1
+fi
+
+exec node "$DIR/launch.mjs"

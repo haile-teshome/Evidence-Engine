@@ -126,7 +126,12 @@ async function main() {
     if (r.status !== 0) { log("npm install failed."); process.exit(1); }
   }
   const py = pickPython();
-  if (!py.cmd) { log("Python not found. Install Python 3."); process.exit(1); }
+  if (!py.cmd) {
+    log("Python 3 is required for the backend but was not found.");
+    log("Install it from https://www.python.org/downloads/ (macOS/Windows), then run this again.");
+    openDefaultBrowser("https://www.python.org/downloads/");
+    process.exit(1);
+  }
   if (!py.hasDeps && fs.existsSync(path.join(BACKEND_DIR, "requirements.txt"))) {
     log("First run: installing backend dependencies...");
     spawnSync(py.cmd, ["-m", "pip", "install", "-r", path.join(BACKEND_DIR, "requirements.txt")],

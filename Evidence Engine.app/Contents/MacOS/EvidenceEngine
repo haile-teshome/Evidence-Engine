@@ -1,0 +1,13 @@
+#!/bin/bash
+# Self-locating: the project root is three levels up from this executable
+# (Contents/MacOS -> Contents -> Evidence Engine.app -> project root).
+# Keep this .app INSIDE the project folder so it stays portable when shared.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT="$(cd "$HERE/../../.." && pwd)"
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+if ! command -v node >/dev/null 2>&1; then
+  osascript -e 'display alert "Node.js is required" message "Evidence Engine needs Node.js (LTS). Opening the download page — install it, then open this app again."' >/dev/null 2>&1
+  open "https://nodejs.org/en/download"
+  exit 1
+fi
+exec node "$PROJECT/launch.mjs"
