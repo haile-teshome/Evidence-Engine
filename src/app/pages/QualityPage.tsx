@@ -124,8 +124,19 @@ export function QualityPage() {
     s.updateTask("quality-assess", { detail: "Fetching papers from databases…" });
     const signal = abort.signal;
     try {
-      const { papers: all } = await DataAggregator.fetchAll(s.query, s.sources, s.pico, s.numPerSource, signal, s.elsevierToken, s.ezproxyConnected);
+      // Full planning corpus: each source's own query, up to its planning yield.
+      const { papers: all, truncated } = await DataAggregator.fetchForScreening(
+        s.sources,
+        s.perDbQueries,
+        s.unifiedSearchQuery || s.query,
+        s.simulation,
+        s.pico,
+        { signal, elsevierToken: s.elsevierToken, ezproxyConnected: s.ezproxyConnected },
+      );
       if (signal.aborted) { s.updateTask("quality-assess", { status: "canceled" }); return; }
+      if (truncated.length > 0) {
+        toast.info(`Very large result set — capped ${truncated.join(", ")} for assessment.`);
+      }
       s.setRawPapers(all);
 
       s.updateTask("quality-assess", { detail: "Deduplicating…" });

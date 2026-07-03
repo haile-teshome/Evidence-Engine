@@ -627,6 +627,37 @@ export const DataAggregator = {
     return result;
   },
 
+  // Fetch the FULL planning corpus for screening: for each source use its
+  // per-database query (from the Planning page) and pull up to that source's
+  // planning yield, so everything the search found is screened — not a fixed
+  // small sample. `cap` is a safety ceiling per source; anything above it is
+  // reported back in `truncated` so nothing is silently dropped.
+  async fetchForScreening(
+    sources: string[],
+    perDbQueries: Record<string, string>,
+    baseQuery: string,
+    yields: Record<string, number> | null,
+    pico: Pico,
+    opts: { cap?: number; signal?: AbortSignal; elsevierToken?: string; ezproxyConnected?: boolean } = {},
+  ): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; truncated: string[] }> {
+    const cap = opts.cap ?? 2000;
+    const papers: Paper[] = [];
+    const sourceCounts: Record<string, number> = {};
+    const truncated: string[] = [];
+    for (const src of sources) {
+      if (opts.signal?.aborted) break;
+      const q = (perDbQueries[src] || baseQuery || "").trim();
+      if (!q) continue;
+      const planned = yields?.[src];
+      const budget = planned && planned > 0 ? Math.min(planned, cap) : cap;
+      if (planned && planned > cap) truncated.push(`${src} (${planned.toLocaleString()} → ${cap.toLocaleString()})`);
+      const res = await DataAggregator.fetchAll(q, [src], pico, budget, opts.signal, opts.elsevierToken, opts.ezproxyConnected);
+      papers.push(...res.papers);
+      Object.assign(sourceCounts, res.sourceCounts);
+    }
+    return { papers, sourceCounts, truncated };
+  },
+
   async simulateYield(query: string, sources: string[], signal?: AbortSignal, elsevierToken = "", ezproxyConnected = false): Promise<Record<string, number>> {
     const elsevierSources = ["Scopus", "Embase"];
     const backendSources = ezproxyConnected ? sources.filter(s => !elsevierSources.includes(s)) : sources;

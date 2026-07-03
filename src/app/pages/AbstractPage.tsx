@@ -91,8 +91,20 @@ export function AbstractPage() {
             { id: "screen", label: "Screening papers", status: "pending" },
           ],
         });
-        const { papers: all } = await DataAggregator.fetchAll(s.query, s.sources, s.pico, s.numPerSource, signal, s.elsevierToken, s.ezproxyConnected);
+        // Pull the FULL planning corpus: every source's own query, up to its
+        // planning yield — so all found papers are screened, not a small sample.
+        const { papers: all, truncated } = await DataAggregator.fetchForScreening(
+          s.sources,
+          s.perDbQueries,
+          s.unifiedSearchQuery || s.query,
+          s.simulation,
+          s.pico,
+          { signal, elsevierToken: s.elsevierToken, ezproxyConnected: s.ezproxyConnected },
+        );
         if (signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
+        if (truncated.length > 0) {
+          toast.info(`Very large result set — capped ${truncated.join(", ")} for screening.`);
+        }
         const { unique, duplicates } = Deduplicator.run(all);
         // Persist so a later QA run can reuse this set, and so the PRISMA flow
         // has accurate counts even when the user skipped QA.
