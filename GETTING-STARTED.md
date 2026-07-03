@@ -25,8 +25,10 @@ Put this whole folder wherever you like, then:
 - **macOS** — double-click **`Evidence Engine.app`** (or **`launch.command`**).
 - **Windows** — double-click **`launch.bat`**.
 
-The **first** launch installs the app's dependencies automatically (a few
-minutes, one time). Later launches take a few seconds.
+The **first** launch installs dependencies and builds an optimized version of
+the app automatically (a few minutes, one time). Later launches take a few
+seconds. The app is rebuilt only when its code changes, so day-to-day it runs
+the fast production build, not the slower developer server.
 
 **To quit:** just close the app window. Everything shuts down on its own.
 

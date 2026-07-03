@@ -91,6 +91,35 @@ function findChrome() {
   return cands.find((p) => fs.existsSync(p)) || null;
 }
 
+// Newest mtime under a directory (recursive), skipping node_modules/dist/.git.
+function newestMtime(dir, skip = new Set(["node_modules", "dist", ".git"])) {
+  let newest = 0;
+  let entries = [];
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return 0; }
+  for (const e of entries) {
+    if (skip.has(e.name)) continue;
+    const full = path.join(dir, e.name);
+    try {
+      if (e.isDirectory()) newest = Math.max(newest, newestMtime(full, skip));
+      else newest = Math.max(newest, fs.statSync(full).mtimeMs);
+    } catch { /* unreadable; ignore */ }
+  }
+  return newest;
+}
+
+// Rebuild if there is no build yet, or if any source file is newer than it.
+function needsBuild() {
+  const built = path.join(PROJECT, "dist", "index.html");
+  if (!fs.existsSync(built)) return true;
+  const builtAt = fs.statSync(built).mtimeMs;
+  const srcNewest = Math.max(
+    newestMtime(path.join(PROJECT, "src")),
+    ...["index.html", "vite.config.ts", "package.json", "tailwind.config.js"]
+      .map((f) => { try { return fs.statSync(path.join(PROJECT, f)).mtimeMs; } catch { return 0; } }),
+  );
+  return srcNewest > builtAt;
+}
+
 function openDefaultBrowser(url) {
   if (process.platform === "darwin") spawn("open", [url], { stdio: "ignore", detached: true }).unref();
   else if (IS_WIN) spawn("cmd", ["/c", "start", "", url], { stdio: "ignore", detached: true }).unref();
@@ -149,13 +178,22 @@ async function main() {
     started.push(b);
   }
 
-  // 3) frontend (run vite's JS entry with this node -> works the same on all OSes)
+  // 3) frontend — serve a PRODUCTION build (fast: minified assets + React in
+  //    production mode), not the dev server. Build once and cache in dist/;
+  //    rebuild only when a source file is newer than the last build.
+  const viteJs = path.join(PROJECT, "node_modules", "vite", "bin", "vite.js");
   if (await httpOk(APP_URL)) {
     log(`Frontend already running on :${FRONTEND_PORT}`);
   } else {
+    if (needsBuild()) {
+      log("Building the app (first run or sources changed; ~a few seconds)...");
+      const bres = spawnSync(process.execPath, [viteJs, "build"], { cwd: PROJECT, stdio: "ignore" });
+      if (bres.status !== 0 || !fs.existsSync(path.join(PROJECT, "dist", "index.html"))) {
+        log("Build failed."); cleanup(1); return;
+      }
+    }
     log(`Starting frontend on :${FRONTEND_PORT}...`);
-    const viteJs = path.join(PROJECT, "node_modules", "vite", "bin", "vite.js");
-    const f = spawn(process.execPath, [viteJs, "--port", String(FRONTEND_PORT), "--strictPort"], spawnOpts);
+    const f = spawn(process.execPath, [viteJs, "preview", "--port", String(FRONTEND_PORT), "--strictPort"], spawnOpts);
     started.push(f);
   }
 

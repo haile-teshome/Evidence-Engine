@@ -23,4 +23,15 @@ export default defineConfig({
       },
     },
   },
+
+  // `vite preview` serves the production build (what the launcher runs at
+  // runtime). It needs the same /api proxy as the dev server.
+  preview: {
+    proxy: {
+      '/api': {
+        target: process.env.VITE_API_BASE_URL || 'http://localhost:8000',
+        changeOrigin: true,
+      },
+    },
+  },
 })
