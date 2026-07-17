@@ -48,13 +48,13 @@ open Terminal and run: `xattr -dr com.apple.quarantine "Evidence Engine.app"`.)
 - **"Python 3 is required"** — install Python from the link above, then relaunch.
 - **Nothing opens / stuck on "Waiting for services"** — close the window and
   relaunch; the first run may still be installing dependencies.
-- **"Ollama isn't reachable" / local model unavailable** — the AI screening needs
-  a model. Two choices:
-  - **Local & private (recommended):** install [Ollama](https://ollama.com), then in a
-    terminal run `ollama pull hf.co/mradermacher/leads-mistral-7b-v1-GGUF` (~4 GB, one
-    time). The launcher starts Ollama automatically once it's installed.
-  - **Cloud:** pick Claude / GPT / Gemini in the sidebar and add an API key in
-    `Backend/.env` (copy from `Backend/.env.example`). Nothing to install.
+- **Local AI model** — handled automatically. On first launch the app installs
+  Ollama (if needed), starts it, and downloads the default screening model
+  (~4 GB) in the background. Local screening works once that finishes; you can use
+  a cloud model in the sidebar in the meantime. If you're offline, the download
+  is skipped and retried next launch.
+  - Prefer no local download? Pick Claude / GPT / Gemini in the sidebar and add an
+    API key in `Backend/.env` (copy from `Backend/.env.example`).
 - **Ports busy** — if you already have something on ports 5180 or 8000, close it
   and relaunch.
 - **"permission denied" / launcher won't run (macOS)** — the zip may have dropped

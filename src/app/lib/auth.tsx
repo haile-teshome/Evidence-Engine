@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { apiFetch, REVIEWER_ID_KEY, DEFAULT_REVIEWER_ID } from "./backendClient";
+import { useBackendReady } from "./backendReady";
 
 // Local reviewer profiles replace cloud accounts. A "user" is just a named
 // profile (with an optional email) stored in the local backend. There are no
@@ -42,22 +43,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(DEFAULT_USER);
   const [reviewers, setReviewers] = useState<AuthUser[]>([DEFAULT_USER]);
   const [loading, setLoading] = useState(true);
+  const backendReady = useBackendReady();
 
+  // Load reviewer profiles on mount, and again once the backend finishes
+  // starting (on a cold start the first call falls back to the default profile).
   useEffect(() => {
     let active = true;
     (async () => {
       const list = await loadReviewers();
       if (!active) return;
       setReviewers(list);
-      let savedId = DEFAULT_REVIEWER_ID;
-      try { savedId = localStorage.getItem(REVIEWER_ID_KEY) || DEFAULT_REVIEWER_ID; } catch { /* ignore */ }
-      const found = list.find(r => r.id === savedId) || list.find(r => r.id === DEFAULT_REVIEWER_ID) || list[0] || DEFAULT_USER;
-      setUser(found);
-      try { localStorage.setItem(REVIEWER_ID_KEY, found.id); } catch { /* ignore */ }
+      setUser(prev => {
+        // Keep the currently-selected profile; just refresh its record.
+        let savedId = prev?.id || DEFAULT_REVIEWER_ID;
+        try { savedId = prev?.id || localStorage.getItem(REVIEWER_ID_KEY) || DEFAULT_REVIEWER_ID; } catch { /* ignore */ }
+        const found = list.find(r => r.id === savedId) || list.find(r => r.id === DEFAULT_REVIEWER_ID) || list[0] || DEFAULT_USER;
+        try { localStorage.setItem(REVIEWER_ID_KEY, found.id); } catch { /* ignore */ }
+        return found;
+      });
       setLoading(false);
     })();
     return () => { active = false; };
-  }, []);
+  }, [backendReady]);
 
   async function refreshReviewers() {
     setReviewers(await loadReviewers());
