@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { useStore, SESSION_STORAGE_KEY } from "../lib/store";
 import { useAuth } from "../lib/auth";
 import { listSessions, loadSession, saveSession, deleteSession, SessionMeta } from "../lib/sessions";
-import { supabaseConfigured } from "../lib/supabaseClient";
 import { AIService } from "../lib/mockServices";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
@@ -65,15 +64,23 @@ export function SessionsPanel() {
   const restoredRef = useRef(false);
   useEffect(() => {
     if (!user || restoredRef.current) return;
-    if (s.currentSessionId || s.history.length > 0) { restoredRef.current = true; return; }
+    restoredRef.current = true;
     let savedId: string | null = null;
     try { savedId = localStorage.getItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
-    restoredRef.current = true;
     if (!savedId) return;
+    // The local snapshot may already have restored this session, but localStorage
+    // is capped (~5 MB) and silently drops the heaviest late-stage fields
+    // (extractions, quality, snowball) when it overflows. The backend KV store has
+    // no such cap, so it's the authoritative, fuller copy — re-hydrate from it on
+    // open. Guard against clobbering a DIFFERENT session or unsaved local work.
+    if (s.currentSessionId && s.currentSessionId !== savedId) return;
+    if (!s.currentSessionId && s.history.length > 0) return;
     (async () => {
       try {
         const sess = await loadSession(savedId!);
-        s.hydrate(sess.data);
+        // Reconcile (non-destructive): if the local snapshot already restored
+        // late-stage tabs, an empty field in the backend copy must not wipe them.
+        s.hydrate(sess.data, false);
         s.setCurrentSessionId(sess.id);
         s.setCurrentSessionTitle(sess.title);
         // Intentionally do NOT change the page — keep the tab restored from
@@ -210,15 +217,14 @@ export function SessionsPanel() {
     s.snowballResults,
     s.snowballScreened,
     s.extractedPapers,
+    s.textExtractions,
     s.prisma,
   ]);
 
   if (!user) {
     return (
       <Card className="p-3 text-xs text-muted-foreground">
-        {supabaseConfigured
-          ? "Sign in (top-right) to save and sync research sessions."
-          : "Your work is saved locally on this computer automatically."}
+        Your work is saved locally on this computer automatically.
       </Card>
     );
   }

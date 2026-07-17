@@ -56,4 +56,5 @@ Interactive Swagger docs at <http://localhost:8000/docs>.
 - The frontend's selected model (from the sidebar) is pushed into `apiConfig.model` by [store.tsx](../src/app/lib/store.tsx) and forwarded to AI endpoints.
 - API keys live in `.env` on the backend — never shipped to the browser.
 - `Deduplicator.run` stays client-side (pure logic) to keep the UI responsive.
-- Auth is not yet enforced. Before exposing this server publicly, add Supabase JWT verification — the existing [supabaseClient.ts](../src/app/lib/supabaseClient.ts) already calls `getSession()` for the Supabase-hosted functions; the same token can be forwarded here.
+- Sessions and multi-reviewer project data are stored locally by [store.py](store.py) in a SQLite database (`~/.evidence-engine/evidence.db`, override with `EE_DB_PATH`).
+- Identity is local: the frontend sends the active reviewer profile id in the `X-Reviewer-Id` header and `store.current_user` resolves it (defaulting to the built-in `local` profile). There is no password auth. Before exposing this server publicly for remote collaboration, replace `current_user` with real token verification (e.g. JWT) — every route already scopes data by the returned id, so nothing else changes.

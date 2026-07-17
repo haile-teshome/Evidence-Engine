@@ -1,89 +1,101 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { supabase, apiFetch, supabaseConfigured } from "./supabaseClient";
+import { apiFetch, REVIEWER_ID_KEY, DEFAULT_REVIEWER_ID } from "./backendClient";
 
-type AuthUser = { id: string; email: string; name?: string };
+// Local reviewer profiles replace cloud accounts. A "user" is just a named
+// profile (with an optional email) stored in the local backend. There are no
+// passwords or sign-in — you pick or create a profile, and its id scopes your
+// sessions and per-reviewer decisions in multi-reviewer projects.
 
-export type OAuthProvider = "google" | "azure" | "github";
+export type AuthUser = { id: string; email: string; name?: string };
+
+const DEFAULT_USER: AuthUser = { id: DEFAULT_REVIEWER_ID, email: "", name: "You" };
 
 type AuthCtx = {
   user: AuthUser | null;
   loading: boolean;
-  signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, name: string) => Promise<void>;
-  signInWithProvider: (provider: OAuthProvider) => Promise<void>;
-  signOut: () => Promise<void>;
+  reviewers: AuthUser[];
+  addReviewer: (name: string, email?: string) => Promise<void>;
+  selectReviewer: (id: string) => void;
+  signOut: () => void;                 // switch back to the default local profile
+  refreshReviewers: () => Promise<void>;
 };
 
 const Ctx = createContext<AuthCtx | null>(null);
 
+async function loadReviewers(): Promise<AuthUser[]> {
+  try {
+    const r = await apiFetch("/reviewers");
+    const list: AuthUser[] = (r.reviewers || []).map((x: any) => ({
+      id: x.id,
+      email: x.email || "",
+      name: x.name || "Reviewer",
+    }));
+    return list.length ? list : [DEFAULT_USER];
+  } catch {
+    // Backend not up yet (or offline) — fall back to the default profile so the
+    // app is always usable locally.
+    return [DEFAULT_USER];
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(DEFAULT_USER);
+  const [reviewers, setReviewers] = useState<AuthUser[]>([DEFAULT_USER]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // No Supabase configured → render as a logged-out demo user, no network calls.
-    if (!supabaseConfigured) {
-      setLoading(false);
-      return;
-    }
     let active = true;
-    supabase.auth.getSession().then(({ data }) => {
+    (async () => {
+      const list = await loadReviewers();
       if (!active) return;
-      const u = data.session?.user;
-      setUser(u ? { id: u.id, email: u.email || "", name: (u.user_metadata as any)?.name } : null);
+      setReviewers(list);
+      let savedId = DEFAULT_REVIEWER_ID;
+      try { savedId = localStorage.getItem(REVIEWER_ID_KEY) || DEFAULT_REVIEWER_ID; } catch { /* ignore */ }
+      const found = list.find(r => r.id === savedId) || list.find(r => r.id === DEFAULT_REVIEWER_ID) || list[0] || DEFAULT_USER;
+      setUser(found);
+      try { localStorage.setItem(REVIEWER_ID_KEY, found.id); } catch { /* ignore */ }
       setLoading(false);
-    });
-    const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
-      const u = session?.user;
-      setUser(u ? { id: u.id, email: u.email || "", name: (u.user_metadata as any)?.name } : null);
-    });
-    return () => { active = false; sub.subscription.unsubscribe(); };
+    })();
+    return () => { active = false; };
   }, []);
 
-  function ensureConfigured() {
-    if (!supabaseConfigured) {
-      throw new Error(
-        "Supabase auth is not configured. Set VITE_SUPABASE_PROJECT_ID and " +
-          "VITE_SUPABASE_ANON_KEY in .env.local to enable sign-in."
-      );
-    }
+  async function refreshReviewers() {
+    setReviewers(await loadReviewers());
   }
 
-  async function signIn(email: string, password: string) {
-    ensureConfigured();
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw new Error(`Sign-in failed: ${error.message}`);
-  }
-  async function signUp(email: string, password: string, name: string) {
-    ensureConfigured();
-    await apiFetch("/signup", { method: "POST", body: JSON.stringify({ email, password, name }) });
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error) throw new Error(`Auto sign-in after signup failed: ${error.message}`);
-  }
-  async function signInWithProvider(provider: OAuthProvider) {
-    ensureConfigured();
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider,
-      options: { redirectTo: window.location.origin },
-    });
-    if (error) throw new Error(`OAuth (${provider}) failed: ${error.message}. Make sure the provider is enabled in your Supabase project.`);
-  }
-  async function signOut() {
-    if (!supabaseConfigured) { setUser(null); return; }
-    const { error } = await supabase.auth.signOut();
-    if (error) console.error(`Sign-out error: ${error.message}`);
+  function selectReviewer(id: string) {
+    const found = reviewers.find(r => r.id === id) || DEFAULT_USER;
+    setUser(found);
+    try { localStorage.setItem(REVIEWER_ID_KEY, found.id); } catch { /* ignore */ }
   }
 
-  return <Ctx.Provider value={{ user, loading, signIn, signUp, signInWithProvider, signOut }}>{children}</Ctx.Provider>;
+  async function addReviewer(name: string, email?: string) {
+    const r = await apiFetch("/reviewers", { method: "POST", body: JSON.stringify({ name, email: email || "" }) });
+    const nu: AuthUser = { id: r.reviewer.id, email: r.reviewer.email || "", name: r.reviewer.name };
+    setReviewers(await loadReviewers());
+    setUser(nu);
+    try { localStorage.setItem(REVIEWER_ID_KEY, nu.id); } catch { /* ignore */ }
+  }
+
+  function signOut() {
+    selectReviewer(DEFAULT_REVIEWER_ID);
+  }
+
+  return (
+    <Ctx.Provider value={{ user, loading, reviewers, addReviewer, selectReviewer, signOut, refreshReviewers }}>
+      {children}
+    </Ctx.Provider>
+  );
 }
 
 const noopAuth: AuthCtx = {
-  user: null,
+  user: DEFAULT_USER,
   loading: false,
-  signIn: async () => { throw new Error("AuthProvider missing"); },
-  signUp: async () => { throw new Error("AuthProvider missing"); },
-  signInWithProvider: async () => { throw new Error("AuthProvider missing"); },
-  signOut: async () => { /* noop */ },
+  reviewers: [DEFAULT_USER],
+  addReviewer: async () => { throw new Error("AuthProvider missing"); },
+  selectReviewer: () => { /* noop */ },
+  signOut: () => { /* noop */ },
+  refreshReviewers: async () => { /* noop */ },
 };
 
 export function useAuth() {

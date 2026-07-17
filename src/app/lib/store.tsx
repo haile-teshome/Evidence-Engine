@@ -219,7 +219,7 @@ type Ctx = {
   currentSessionId: string | null; setCurrentSessionId: (v: string | null) => void;
   currentSessionTitle: string; setCurrentSessionTitle: (v: string) => void;
   snapshot: () => any;
-  hydrate: (data: any) => void;
+  hydrate: (data: any, authoritative?: boolean) => void;
   reset: () => void;
 
   // Multi-reviewer project context. When `currentProjectId` is set the
@@ -486,8 +486,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     writingEnriched, writingSummary,
   });
 
-  const hydrate = (d: any) => {
+  // `authoritative` = true replaces every field outright (explicit session
+  // load/switch — the incoming session IS the truth, even where it's empty).
+  // `authoritative` = false is a RECONCILIATION (restore-on-open, where the
+  // local snapshot and the backend session are two views of the same session):
+  // an absent or empty incoming collection must NOT clobber one the store
+  // already has populated. Without this, a leaner/staler source (or a session
+  // whose late-stage tabs were dropped) wipes extractions/quality/snowball on
+  // reopen and autosave then persists the empties — the tabs-go-blank bug.
+  const hydrate = (d: any, authoritative = true) => {
     if (!d) return;
+    // Prefer a non-empty incoming collection; otherwise keep what we have.
+    const isEmpty = (v: any) =>
+      v == null ||
+      (Array.isArray(v) && v.length === 0) ||
+      (typeof v === "object" && !Array.isArray(v) && Object.keys(v).length === 0);
+    const pick = <T,>(incoming: T | null | undefined, cur: T | null, fallback: T | null = null): T | null => {
+      if (authoritative) return (incoming ?? fallback) as T | null;
+      // Reconciliation: keep whatever is already populated (the local snapshot
+      // is written more often, so it's the fresher of the two views of this
+      // session); only fill in fields the current store is still missing.
+      if (!isEmpty(cur)) return cur;
+      return (incoming ?? fallback) as T | null;
+    };
+
     setHistory(d.history || []);
     setPico(d.pico || { population: "", intervention: "", comparator: "", outcome: "" });
     setInclusion(d.inclusion || []);
@@ -498,21 +520,21 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (Array.isArray(d.sources)) setSources(d.sources);
     if (typeof d.numPerSource === "number") setNumPerSource(d.numPerSource);
     if (d.model) setModel(d.model);
-    setRawPapers(d.rawPapers ?? null);
-    setUniquePapers(d.uniquePapers ?? null);
+    setRawPapers(prev => pick(d.rawPapers, prev));
+    setUniquePapers(prev => pick(d.uniquePapers, prev));
     setDuplicatesCount(d.duplicatesCount ?? 0);
-    setQualityReports(d.qualityReports ?? null);
+    setQualityReports(prev => pick(d.qualityReports, prev));
     setExcludedByQuality(new Set(d.excludedByQuality || []));
     setQualityOverrides(Array.isArray(d.qualityOverrides) ? d.qualityOverrides : []);
     setAbstractOverrides(d.abstractOverrides && typeof d.abstractOverrides === "object" ? d.abstractOverrides : {});
     setFullTextOverrides(d.fullTextOverrides && typeof d.fullTextOverrides === "object" ? d.fullTextOverrides : {});
     if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
-    setRerankResults(d.rerankResults ?? null);
-    setResults(d.results ?? null);
-    setFullTextResults(d.fullTextResults ?? null);
-    setSnowballResults(d.snowballResults ?? null);
-    setSnowballScreened(d.snowballScreened ?? null);
-    setExtractedPapers(d.extractedPapers ?? null);
+    setRerankResults(prev => pick(d.rerankResults, prev));
+    setResults(prev => pick(d.results, prev));
+    setFullTextResults(prev => pick(d.fullTextResults, prev));
+    setSnowballResults(prev => pick(d.snowballResults, prev));
+    setSnowballScreened(prev => pick(d.snowballScreened, prev));
+    setExtractedPapers(prev => pick(d.extractedPapers, prev));
     if (d.prisma) setPrisma(d.prisma);
     // Planning + per-tab run outputs.
     setSimulation(d.simulation ?? null);
@@ -520,12 +542,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setDbTestResults(d.dbTestResults ?? null);
     setAgenticTrace(d.agenticTrace ?? null);
     setAgenticSummary(d.agenticSummary ?? null);
-    if (Array.isArray(d.textExtractions)) setTextExtractions(d.textExtractions);
+    setTextExtractions(prev => pick(d.textExtractions, prev, []) ?? []);
     if (d.writingEnriched && typeof d.writingEnriched === "object") setWritingEnriched(d.writingEnriched);
     if (typeof d.writingSummary === "string") setWritingSummary(d.writingSummary);
-    // Only restore full texts when present — a quota-trimmed local snapshot
-    // omits them, and we don't want to wipe anything already loaded.
-    if (d.fullTexts && typeof d.fullTexts === "object") setFullTexts(d.fullTexts);
+    setFullTexts(prev => pick(d.fullTexts, prev, {}) ?? {});
   };
 
   // ── Local persistence ─────────────────────────────────────────────────────
@@ -540,18 +560,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Envelope keeps the session identity with the data, so a refresh keeps
       // editing the SAME session instead of spawning a duplicate.
       const env = { data: snapshot(), sessionId: currentSessionId, sessionTitle: currentSessionTitle };
-      try {
-        localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify(env));
-      } catch {
-        // Likely the quota — full texts are by far the heaviest field. Save
-        // everything else so the session still restores; the raw full-text
-        // bodies can be re-fetched on the Acquisition tab. (Backend sessions
-        // still keep them.)
+      // Try the full snapshot; if it exceeds the localStorage quota (~5 MB), shed
+      // the heaviest, re-derivable fields one tier at a time so the structured
+      // stage outputs (extractions, quality, snowball, text-extraction) always
+      // persist rather than the whole write being dropped. Backend sessions keep
+      // everything; these drops only lean out the offline/local cache, and the
+      // shed data (full texts, planning traces, pre-dedup corpus) is re-fetchable.
+      const SHED_TIERS: string[][] = [
+        [],
+        ["fullTexts"],
+        ["fullTexts", "agenticTrace", "simulationRuns", "dbTestResults"],
+        ["fullTexts", "agenticTrace", "simulationRuns", "dbTestResults", "rawPapers"],
+      ];
+      for (const drop of SHED_TIERS) {
+        const data: any = { ...env.data };
+        for (const k of drop) delete data[k];
         try {
-          const { fullTexts: _omit, ...lean } = env.data as any;
-          localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ ...env, data: lean }));
-        } catch { /* still too big — skip this cycle */ }
+          localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ ...env, data }));
+          break;   // saved; leaner tiers not needed
+        } catch { /* over quota — try the next, leaner tier */ }
       }
+      // If even the leanest tier overflows, the previous snapshot is left intact.
     }, 600);
     return () => clearTimeout(t);
   }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
@@ -572,7 +601,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const parsed = JSON.parse(raw);
       // Back-compat: older snapshots stored the bare data object.
       const data = parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
-      hydrate(data);
+      hydrate(data, false);   // reconcile with the backend copy, don't clobber
       // Restore the session identity so auto-save updates this session rather
       // than creating a new one on every refresh.
       if (parsed && parsed.sessionId) setCurrentSessionId(parsed.sessionId);

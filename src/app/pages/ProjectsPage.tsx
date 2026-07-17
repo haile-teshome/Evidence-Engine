@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useStore } from "../lib/store";
 import { useAuth } from "../lib/auth";
-import { supabaseConfigured } from "../lib/supabaseClient";
 import {
   Project, ProjectMember, ScreeningMode, ProjectRole, Invite, AssignmentStrategy,
   listProjects, createProject, getProject, createInvite, setMemberRole,
@@ -93,9 +92,7 @@ export function ProjectsPage() {
     return (
       <Alert>
         <AlertDescription>
-          {supabaseConfigured
-            ? "Sign in (top-right) to create projects and collaborate with other reviewers."
-            : "Multi-reviewer projects need cloud sync, which isn't set up for this local build. Everything else works locally on this computer — just skip this tab."}
+          Pick a reviewer profile (top-right) to create projects and collaborate with other reviewers.
         </AlertDescription>
       </Alert>
     );

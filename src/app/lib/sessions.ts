@@ -1,4 +1,4 @@
-import { apiFetch } from "./supabaseClient";
+import { apiFetch } from "./backendClient";
 
 export type SessionMeta = { id: string; title: string; updated_at: string; created_at: string };
 export type SessionData = {
@@ -24,6 +24,7 @@ export type SessionData = {
   snowballResults: any[] | null;
   snowballScreened: any[] | null;
   extractedPapers: any[] | null;
+  textExtractions: any[];
   prisma: any;
 };
 

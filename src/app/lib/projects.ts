@@ -11,7 +11,7 @@
 //
 // All endpoints go through the Hono edge function (apiFetch).
 
-import { apiFetch } from "./supabaseClient";
+import { apiFetch } from "./backendClient";
 
 export type ProjectRole = "lead" | "reviewer" | "adjudicator" | "viewer";
 export type ScreeningMode = "single" | "dual" | "dual_blinded";
