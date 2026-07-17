@@ -27,6 +27,8 @@ const EE_CACHE = path.join(os.homedir(), ".evidence-engine");     // downloaded 
 const DEFAULT_MODEL = "hf.co/mradermacher/leads-mistral-7b-v1-GGUF";  // default local screener
 
 const started = [];               // child processes we spawned (to clean up)
+let heldWindow = null;            // the Chrome child — kept referenced so Node
+                                  // (v22) doesn't GC and tear it down mid-run.
 let cleaned = false;
 
 function log(m) { process.stdout.write(m + "\n"); }
@@ -287,6 +289,44 @@ function openDefaultBrowser(url) {
   else spawn("xdg-open", [url], { stdio: "ignore", detached: true }).unref();
 }
 
+const MIME = {
+  ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript",
+  ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+  ".webp": "image/webp", ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
+  ".map": "application/json", ".csv": "text/csv", ".wasm": "application/wasm", ".txt": "text/plain",
+};
+
+// Serve the prebuilt SPA from distDir and reverse-proxy /api/* to the backend.
+// Runs in-process (dies with the launcher). Using this instead of `vite preview`
+// means the packaged bundle needs no node_modules at runtime — only the built
+// dist/. Streaming-safe so backend SSE endpoints work.
+function serveFrontend(distDir, port) {
+  const server = http.createServer((req, res) => {
+    if (req.url.startsWith("/api")) {
+      const up = http.request(
+        { host: "localhost", port: BACKEND_PORT, path: req.url, method: req.method, headers: req.headers },
+        (r) => { res.writeHead(r.statusCode || 502, r.headers); r.pipe(res); },
+      );
+      up.on("error", () => { if (!res.headersSent) res.writeHead(502); res.end("backend not ready"); });
+      req.pipe(up);
+      return;
+    }
+    let rel = decodeURIComponent((req.url.split("?")[0] || "/"));
+    if (rel.endsWith("/")) rel += "index.html";
+    let file = path.join(distDir, rel);
+    if (!file.startsWith(distDir)) { res.writeHead(403); res.end(); return; }   // no traversal
+    fs.stat(file, (err, st) => {
+      if (err || !st.isFile()) file = path.join(distDir, "index.html");   // SPA fallback
+      res.writeHead(200, { "Content-Type": MIME[path.extname(file).toLowerCase()] || "application/octet-stream" });
+      fs.createReadStream(file).on("error", () => { if (!res.headersSent) res.writeHead(500); res.end(); }).pipe(res);
+    });
+  });
+  server.on("error", (e) => log("Frontend server error: " + e.message));
+  server.listen(port, "localhost");
+  return server;
+}
+
 function killChild(child) {
   if (!child || child.killed) return;
   try {
@@ -361,7 +401,13 @@ async function monitorWindow() {
   let appeared = false;
   for (let i = 0; i < 60 && !appeared; i++) { appeared = (await appPageCount()) >= 1; if (!appeared) await sleep(500); }
   if (!appeared) return;   // never confirmed a window — leave Ctrl-C in charge
-  while ((await appPageCount()) >= 1) await sleep(1000);
+  // Require several consecutive empty reads before declaring the window closed,
+  // so a transient DevTools hiccup doesn't shut a live app down by mistake.
+  let gone = 0;
+  while (gone < 4) {
+    await sleep(1000);
+    if ((await appPageCount()) >= 1) gone = 0; else gone++;
+  }
   log("App window closed.");
   cleanup(0);
 }
@@ -425,12 +471,6 @@ async function main() {
   // run owns its servers and window, and closing the window later frees all of it.
   await reclaimFromPriorInstances();
 
-  // 1) first-run deps
-  if (!fs.existsSync(path.join(PROJECT, "node_modules"))) {
-    log("First run: installing frontend dependencies (a few minutes)...");
-    const r = spawnSync(IS_WIN ? "npm.cmd" : "npm", ["install"], { cwd: PROJECT, stdio: "inherit" });
-    if (r.status !== 0) { log("npm install failed."); process.exit(1); }
-  }
   const spawnOpts = { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN };
 
   // 2) backend — run from an isolated venv so it always uses a working Python
@@ -452,23 +492,31 @@ async function main() {
     started.push(b);
   }
 
-  // 3) frontend — serve a PRODUCTION build (fast: minified assets + React in
-  //    production mode), not the dev server. Build once and cache in dist/;
-  //    rebuild only when a source file is newer than the last build.
+  // 3) frontend — serve the prebuilt production build with a tiny built-in static
+  //    server (no runtime dependency on node_modules). vite is only a BUILD tool:
+  //    a packaged bundle ships dist/ prebuilt and no node_modules, so it skips
+  //    straight to serving; from-source runs build when the toolchain is present.
+  const distIndex = path.join(PROJECT, "dist", "index.html");
   const viteJs = path.join(PROJECT, "node_modules", "vite", "bin", "vite.js");
-  if (await httpOk(APP_URL)) {
-    log(`Frontend already running on :${FRONTEND_PORT}`);
-  } else {
-    if (needsBuild()) {
+  const wantBuild = !fs.existsSync(distIndex) || (fs.existsSync(viteJs) && needsBuild());
+  if (wantBuild) {
+    if (!fs.existsSync(viteJs) && !fs.existsSync(path.join(PROJECT, "node_modules"))) {
+      log("First run: installing frontend dependencies (a few minutes)...");
+      const r = spawnSync(IS_WIN ? "npm.cmd" : "npm", ["install"], { cwd: PROJECT, stdio: "inherit" });
+      if (r.status !== 0) { log("npm install failed."); process.exit(1); }
+    }
+    if (fs.existsSync(viteJs)) {
       log("Building the app (first run or sources changed; ~a few seconds)...");
       const bres = spawnSync(process.execPath, [viteJs, "build"], { cwd: PROJECT, stdio: "ignore" });
-      if (bres.status !== 0 || !fs.existsSync(path.join(PROJECT, "dist", "index.html"))) {
-        log("Build failed."); cleanup(1); return;
-      }
+      if (bres.status !== 0) { log("Build failed."); cleanup(1); return; }
     }
-    log(`Starting frontend on :${FRONTEND_PORT}...`);
-    const f = spawn(process.execPath, [viteJs, "preview", "--port", String(FRONTEND_PORT), "--strictPort"], spawnOpts);
-    started.push(f);
+  }
+  if (!fs.existsSync(distIndex)) {
+    log("No frontend build (dist/) found and no build toolchain available."); cleanup(1); return;
+  }
+  {
+    log(`Serving the app on :${FRONTEND_PORT}...`);
+    serveFrontend(path.join(PROJECT, "dist"), FRONTEND_PORT);
   }
 
   // 4) Wait only for the FRONTEND (the cached production build) — that comes up
@@ -493,6 +541,7 @@ async function main() {
       "--no-first-run", "--no-default-browser-check",
       "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
     ], { stdio: "ignore" });
+    heldWindow = win;   // keep a live reference so the child isn't garbage-collected
     win.on("error", () => { openDefaultBrowser(APP_LAUNCH_URL); keepAlive(); });
     if (IS_WIN) {
       // Windows: rely on the child's exit (handoff-aware), as before.

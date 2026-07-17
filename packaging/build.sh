@@ -54,6 +54,7 @@ echo "==> [4/6] Assembling bundle → $STAGE"
 rm -rf "$OUT"; mkdir -p "$STAGE"
 rsync -a \
   --exclude '.git' --exclude '.build-cache' --exclude 'dist-bundle' \
+  --exclude 'node_modules' \
   --exclude 'Backend/.venv' --exclude 'Backend/wheels' --exclude 'runtime' \
   --exclude '**/__pycache__' --exclude '.env.local' --exclude 'Backend/.env' \
   "$ROOT/" "$STAGE/"
@@ -67,6 +68,7 @@ BPY="$STAGE/runtime/python/bin/python3"
 "$BPY" -m pip download -r "$STAGE/Backend/requirements.txt" -d "$STAGE/Backend/wheels" >/dev/null
 
 echo "==> [6/6] Zipping"
+rm -f "$ROOT/dist-bundle/EvidenceEngine-$TARGET.zip"   # zip APPENDS to an existing archive; start fresh
 ( cd "$OUT" && zip -qr "../EvidenceEngine-$TARGET.zip" "Evidence Engine" )
 echo "==> Done: $ROOT/dist-bundle/EvidenceEngine-$TARGET.zip"
 echo "    Users unzip it and double-click 'Evidence Engine.app' (macOS) or run launch.command / launch.sh."

@@ -36,7 +36,7 @@ Write-Host "==> [4/6] Assembling bundle -> $Stage"
 if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 # Copy the project, excluding dev/build cruft and user-side regenerated dirs.
-$exclude = @(".git", ".build-cache", "dist-bundle", "runtime", "wheels", ".venv", "__pycache__", ".env.local", ".env")
+$exclude = @(".git", ".build-cache", "dist-bundle", "node_modules", "runtime", "wheels", ".venv", "__pycache__", ".env.local", ".env")
 robocopy $Root $Stage /E /XD ($exclude | ForEach-Object { Join-Path $Root $_ }) /XF ".env.local" | Out-Null
 
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage "runtime\node") | Out-Null
