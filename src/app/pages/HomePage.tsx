@@ -301,6 +301,9 @@ function ClarifyingQuestionsModal({
   const [round, setRound] = useState(0);
   const [loading, setLoading] = useState(false);
   const [freeText, setFreeText] = useState("");
+  // Multiple options can be selected per PICO element (e.g. several eligible
+  // populations or outcomes); they're combined into one criterion on confirm.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   const freeRef = useRef<HTMLInputElement>(null);
   // PICO element ids already asked — at most one question per element, no repeats.
   const askedRef = useRef<Set<string>>(new Set());
@@ -308,6 +311,7 @@ function ClarifyingQuestionsModal({
   const fetchNext = useCallback(async (current: Record<string, string>, r: number) => {
     setLoading(true);
     setFreeText("");
+    setSelected(new Set());
     try {
       const result = await AIService.getClarifyNext(goal, current, r, Array.from(askedRef.current));
       // Stop if done, no question, or the model circled back to an element we
@@ -346,9 +350,32 @@ function ClarifyingQuestionsModal({
     fetchNext(next, nextRound);
   }
 
-  function submitFreeText() {
+  function toggle(label: string) {
+    setSelected(prev => {
+      const n = new Set(prev);
+      if (n.has(label)) n.delete(label); else n.add(label);
+      return n;
+    });
+  }
+
+  // Add whatever is typed in "Other" as a selected option (chip), so custom
+  // values sit alongside the suggested ones and several can be added.
+  function addCustom() {
     const v = freeText.trim();
-    if (v) pick(v);
+    if (!v) return;
+    setSelected(prev => new Set(prev).add(v));
+    setFreeText("");
+    freeRef.current?.focus();
+  }
+
+  // Combine every selected option (plus any not-yet-added free-text) into one
+  // criterion for this PICO element, then advance.
+  function confirm() {
+    if (!question || loading) return;
+    const ft = freeText.trim();
+    const parts = [...new Set(ft ? [...selected, ft] : [...selected])];
+    if (parts.length === 0) return;
+    pick(parts.join("; "));
   }
 
   if (!open) return null;
@@ -407,35 +434,75 @@ function ClarifyingQuestionsModal({
             </div>
           ) : (
             <div className="px-4 pb-2 space-y-1.5">
-              {question!.options.slice(0, 3).map((opt, i) => (
+              <div className="text-[11px] text-muted-foreground px-1 pb-0.5">Select one or more, then Confirm.</div>
+              {question!.options.slice(0, 3).map((opt, i) => {
+                const on = selected.has(opt.label);
+                return (
+                  <button
+                    key={opt.id}
+                    onClick={() => toggle(opt.label)}
+                    aria-pressed={on}
+                    className={`w-full text-left px-3 py-2.5 rounded-md border transition-colors flex items-center gap-3 ${
+                      on ? "bg-primary/10 border-primary" : "bg-card hover:bg-accent hover:border-primary/40"
+                    }`}
+                  >
+                    <span className={`shrink-0 size-5 rounded-sm border flex items-center justify-center ${
+                      on ? "bg-primary border-primary text-primary-foreground" : "bg-muted text-muted-foreground"
+                    }`}>
+                      {on ? <Check className="size-3.5" /> : <span className="text-[11px] tabular-nums font-mono">{i + 1}</span>}
+                    </span>
+                    <span className="text-sm flex-1 leading-snug">{opt.label}</span>
+                  </button>
+                );
+              })}
+
+              {/* Custom values added via "Other" — shown as selected chips. */}
+              {[...selected].filter(l => !question!.options.slice(0, 3).some(o => o.label === l)).map(label => (
                 <button
-                  key={opt.id}
-                  onClick={() => pick(opt.label)}
-                  className="w-full text-left px-3 py-2.5 rounded-md border bg-card hover:bg-accent hover:border-primary/40 transition-colors flex items-center gap-3"
+                  key={label}
+                  onClick={() => toggle(label)}
+                  aria-pressed
+                  className="w-full text-left px-3 py-2.5 rounded-md border bg-primary/10 border-primary transition-colors flex items-center gap-3"
                 >
-                  <span className="shrink-0 size-5 rounded-sm border bg-muted text-muted-foreground text-[11px] flex items-center justify-center tabular-nums font-mono">
-                    {i + 1}
+                  <span className="shrink-0 size-5 rounded-sm border bg-primary border-primary text-primary-foreground flex items-center justify-center">
+                    <Check className="size-3.5" />
                   </span>
-                  <span className="text-sm flex-1 leading-snug">{opt.label}</span>
+                  <span className="text-sm flex-1 leading-snug">{label}</span>
+                  <X className="size-3.5 text-muted-foreground shrink-0" />
                 </button>
               ))}
 
-              {/* Blank fill-in */}
+              {/* Blank fill-in: adds the typed value as a selectable option. */}
               <div className="flex items-center gap-2 mt-1 px-3 py-1.5 rounded-md border border-dashed bg-muted/20">
                 <Wand2 className="size-3.5 text-muted-foreground shrink-0" />
                 <Input
                   ref={freeRef}
                   value={freeText}
                   onChange={e => setFreeText(e.target.value)}
-                  placeholder="Other: describe your own…"
+                  placeholder="Other: add your own…"
                   className="border-0 bg-transparent shadow-none focus-visible:ring-0 px-0 h-7 text-sm"
-                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); submitFreeText(); } }}
+                  onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addCustom(); } }}
                 />
                 {freeText.trim() && (
-                  <Button size="sm" onClick={submitFreeText} className="rounded-full h-7 px-3 shrink-0">
-                    Use this
+                  <Button size="sm" variant="outline" onClick={addCustom} className="rounded-full h-7 px-3 shrink-0">
+                    <Plus className="size-3.5 mr-1" />Add
                   </Button>
                 )}
+              </div>
+
+              {/* Confirm the combined selection for this PICO element */}
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-[11px] text-muted-foreground">
+                  {selected.size + (freeText.trim() ? 1 : 0)} selected
+                </span>
+                <Button
+                  size="sm"
+                  onClick={confirm}
+                  disabled={selected.size === 0 && !freeText.trim()}
+                  className="rounded-full h-7 px-4"
+                >
+                  Confirm{selected.size > 1 ? ` (${selected.size})` : ""}
+                </Button>
               </div>
             </div>
           )}
