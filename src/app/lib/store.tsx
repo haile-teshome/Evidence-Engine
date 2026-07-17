@@ -517,8 +517,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setInclusion(d.inclusion || []);
     setExclusion(d.exclusion || []);
     setQuery(d.query || "");
-    setUnifiedSearchQuery(d.unifiedSearchQuery || "");
-    setPerDbQueries(d.perDbQueries || {});
+    setUnifiedSearchQuery(prev => pick(d.unifiedSearchQuery, prev, "") ?? "");
+    setPerDbQueries(prev => pick(d.perDbQueries, prev, {}) ?? {});
     if (Array.isArray(d.sources)) setSources(d.sources);
     if (typeof d.numPerSource === "number") setNumPerSource(d.numPerSource);
     if (d.model) setModel(d.model);
@@ -539,11 +539,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setExtractedPapers(prev => pick(d.extractedPapers, prev));
     if (d.prisma) setPrisma(d.prisma);
     // Planning + per-tab run outputs.
-    setSimulation(d.simulation ?? null);
-    if (Array.isArray(d.simulationRuns)) setSimulationRuns(d.simulationRuns);
-    setDbTestResults(d.dbTestResults ?? null);
-    setAgenticTrace(d.agenticTrace ?? null);
-    setAgenticSummary(d.agenticSummary ?? null);
+    setSimulation(prev => pick(d.simulation, prev));
+    setSimulationRuns(prev => pick(d.simulationRuns, prev, []) ?? []);
+    setDbTestResults(prev => pick(d.dbTestResults, prev));
+    setAgenticTrace(prev => pick(d.agenticTrace, prev));
+    setAgenticSummary(prev => pick(d.agenticSummary, prev));
     setTextExtractions(prev => pick(d.textExtractions, prev, []) ?? []);
     if (d.writingEnriched && typeof d.writingEnriched === "object") setWritingEnriched(d.writingEnriched);
     if (typeof d.writingSummary === "string") setWritingSummary(d.writingSummary);
