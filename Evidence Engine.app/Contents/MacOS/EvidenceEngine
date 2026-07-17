@@ -18,4 +18,11 @@ else
   open "https://nodejs.org/en/download"
   exit 1
 fi
-exec "$NODE" "$PROJECT/launch.mjs"
+
+# Launch the manager DETACHED and quit immediately, so this .app never stays
+# "running." If it stayed running, clicking the icon again made macOS reactivate
+# it and pop a stray Google Chrome window. Now every click re-runs launch.mjs,
+# which uses its single-instance lock to just focus the existing window (or start
+# a fresh one if none is running).
+nohup "$NODE" "$PROJECT/launch.mjs" >/dev/null 2>&1 &
+exit 0
