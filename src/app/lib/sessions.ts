@@ -25,6 +25,12 @@ export type SessionData = {
   snowballScreened: any[] | null;
   extractedPapers: any[] | null;
   textExtractions: any[];
+  // Search-planning outputs.
+  simulation?: Record<string, number> | null;
+  simulationRuns?: any[];
+  dbTestResults?: any | null;
+  agenticTrace?: any[] | null;
+  agenticSummary?: any | null;
   prisma: any;
 };
 
