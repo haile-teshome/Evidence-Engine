@@ -68,3 +68,9 @@ tripod_llm_checklist*
 REPRODUCIBILITY.md
 submission_*/
 ~$*
+
+# Self-contained bundle build artifacts (packaging/build.sh)
+dist-bundle/
+.build-cache/
+runtime/
+Backend/wheels/
