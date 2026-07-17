@@ -58,6 +58,15 @@ const VENV_PY = IS_WIN
   ? path.join(VENV_DIR, "Scripts", "python.exe")
   : path.join(VENV_DIR, "bin", "python");
 
+// Self-contained bundle layout (produced by packaging/build-*.sh). When present,
+// these let the app run with NO system Node/Python install. Absent → the
+// launcher falls back to system runtimes (developer / from-source mode).
+const RUNTIME_DIR = path.join(PROJECT, "runtime");
+const BUNDLED_PY = IS_WIN
+  ? path.join(RUNTIME_DIR, "python", "python.exe")
+  : path.join(RUNTIME_DIR, "python", "bin", "python3");
+const WHEELS_DIR = path.join(BACKEND_DIR, "wheels");   // vendored deps for offline install
+
 function pyVersionOk(cmd) {
   // Returns the (major, minor) if runnable and >= 3.9, else null.
   const r = spawnSync(cmd, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"],
@@ -71,6 +80,9 @@ function pyVersionOk(cmd) {
 // the plain `python3` on a Mac's Finder PATH is often an old/broken system one,
 // so we try explicit versioned names first.
 function findBasePython() {
+  // Prefer the bundled interpreter so a self-contained install never depends on
+  // (or is broken by) whatever Python happens to be on the machine.
+  if (fs.existsSync(BUNDLED_PY) && pyVersionOk(BUNDLED_PY)) return BUNDLED_PY;
   const cands = IS_WIN
     ? ["python", "py", "python3", "python3.12", "python3.11"]
     : ["python3.13", "python3.12", "python3.11", "python3.10", "python3", "python"];
@@ -127,8 +139,14 @@ function ensureBackendPython() {
   const req = path.join(BACKEND_DIR, "requirements.txt");
   if (fs.existsSync(req)) {
     log("Installing backend dependencies (one time, a couple of minutes)...");
-    spawnSync(VENV_PY, ["-m", "pip", "install", "--upgrade", "pip"], { stdio: "ignore" });
-    const inst = spawnSync(VENV_PY, ["-m", "pip", "install", "-r", req], { stdio: "inherit" });
+    // Offline install from vendored wheels when the bundle ships them; otherwise
+    // fall back to PyPI (developer / from-source mode).
+    const offline = fs.existsSync(WHEELS_DIR);
+    const pipArgs = ["-m", "pip", "install"];
+    if (offline) pipArgs.push("--no-index", "--find-links", WHEELS_DIR);
+    else spawnSync(VENV_PY, ["-m", "pip", "install", "--upgrade", "pip"], { stdio: "ignore" });
+    pipArgs.push("-r", req);
+    const inst = spawnSync(VENV_PY, pipArgs, { stdio: "inherit" });
     if (inst.status !== 0) return null;
   }
   return venvHasDeps() ? VENV_PY : null;
