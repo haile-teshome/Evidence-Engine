@@ -24,6 +24,7 @@ const APP_LAUNCH_URL = `${APP_URL}?new=1`;
 const IS_WIN = process.platform === "win32";
 const OLLAMA_URL = "http://localhost:11434/";
 const EE_CACHE = path.join(os.homedir(), ".evidence-engine");     // downloaded tools
+const LOCK_FILE = path.join(EE_CACHE, "launcher.pid");            // single-instance guard
 const DEFAULT_MODEL = "hf.co/mradermacher/leads-mistral-7b-v1-GGUF";  // default local screener
 
 const started = [];               // child processes we spawned (to clean up)
@@ -395,6 +396,54 @@ async function appPageCount() {
   }
 }
 
+// Single-instance lock: the running launcher records its pid; a launch that
+// finds a LIVE pid there knows an instance is already running. Filesystem-based,
+// so it's reliable even for a Finder/Dock launch where localhost probes can be
+// flaky — that flakiness is what let a second click fall through and open a
+// stray blank window.
+function launcherLockAlive() {
+  try {
+    const pid = parseInt(fs.readFileSync(LOCK_FILE, "utf8").trim(), 10);
+    if (pid && pid !== process.pid) { process.kill(pid, 0); return true; }   // throws if dead
+  } catch { /* missing, stale, or dead pid */ }
+  return false;
+}
+function writeLock() {
+  try { fs.mkdirSync(EE_CACHE, { recursive: true }); fs.writeFileSync(LOCK_FILE, String(process.pid)); } catch { /* ignore */ }
+}
+function clearLock() {
+  try {
+    const pid = parseInt(fs.readFileSync(LOCK_FILE, "utf8").trim(), 10);
+    if (pid === process.pid) fs.rmSync(LOCK_FILE, { force: true });   // only remove our own
+  } catch { /* ignore */ }
+}
+
+// Bring an already-running app window to the front, via the DevTools activate
+// endpoint (used when the app is launched again while it's already open).
+async function focusExistingWindow() {
+  try {
+    const res = await fetch(`http://localhost:${DEBUG_PORT}/json`);
+    if (!res.ok) return;
+    const list = await res.json();
+    const page = (list || []).find((t) => t.type === "page");
+    if (page && page.id) await fetch(`http://localhost:${DEBUG_PORT}/json/activate/${page.id}`).catch(() => {});
+  } catch { /* ignore */ }
+}
+
+// True if an Evidence Engine window is already open. Primary signal is a live
+// DevTools "page" (only true when a window is actually showing); as a fallback
+// (e.g. an instance whose debug port is briefly unresponsive) treat "frontend
+// server up AND an app-profile Chrome window process alive" as open too.
+async function alreadyOpen() {
+  if (launcherLockAlive()) return true;   // instant, filesystem — most reliable
+  for (let i = 0; i < 3; i++) {
+    if ((await appPageCount()) >= 1) return true;
+    await sleep(200);
+  }
+  if ((await httpOk(APP_URL)) && appWindowAlive()) return true;
+  return false;
+}
+
 // Reliable shutdown for macOS/Linux: wait for the app window to appear, then for
 // it to close (no DevTools "page" targets left), then tear everything down.
 async function monitorWindow() {
@@ -458,6 +507,7 @@ function cleanup(code = 0) {
   // windowless after the window is closed, which would keep the Dock icon lit
   // and hold the profile. (On Windows it exits on its own.)
   if (!IS_WIN) { try { spawnSync("pkill", ["-f", path.basename(APP_PROFILE)], { stdio: "ignore" }); } catch { /* ignore */ } }
+  clearLock();
   log("Stopped.");
   process.exit(code);
 }
@@ -467,9 +517,20 @@ async function main() {
   process.on("SIGINT", () => cleanup(0));
   process.on("SIGTERM", () => cleanup(0));
 
-  // Start as the single owner: reclaim (shut down) any leftover instance so this
-  // run owns its servers and window, and closing the window later frees all of it.
+  // Already running? Just bring the existing window to the front and exit —
+  // don't start a second copy or open a stray browser tab. (Use process.exit,
+  // NOT cleanup, which would kill the very window we're focusing.)
+  if (await alreadyOpen()) {
+    log("Evidence Engine is already open — bringing it to the front.");
+    await focusExistingWindow();
+    process.exit(0);
+  }
+
+  // Otherwise start as the single owner: reclaim (shut down) any leftover
+  // instance so this run owns its servers and window, and closing the window
+  // later frees all of it.
   await reclaimFromPriorInstances();
+  writeLock();   // claim the single-instance lock so later launches just focus us
 
   const spawnOpts = { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN };
 
