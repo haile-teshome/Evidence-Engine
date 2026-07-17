@@ -188,15 +188,14 @@ export function Sidebar() {
           </Select>
           {ollamaRunning === false && (
             <p className="text-xs text-amber-600 mt-2">
-              Ollama isn't running (needed for local, private models). Install it from <a href="https://ollama.com" target="_blank" rel="noreferrer" className="underline">ollama.com</a>, then pull the default model:<br />
-              <code className="text-[10px]">ollama pull hf.co/mradermacher/leads-mistral-7b-v1-GGUF</code><br />
-              Or pick a cloud model above (needs an API key).
+              Setting up the local AI engine… the launcher installs and starts Ollama
+              automatically. If this doesn't clear, relaunch — or pick a cloud model above.
             </p>
           )}
           {ollamaRunning && localModels.length === 0 && (
             <p className="text-xs text-amber-600 mt-2">
-              Ollama is running but no models are installed. Pull the default screening model:<br />
-              <code className="text-[10px]">ollama pull hf.co/mradermacher/leads-mistral-7b-v1-GGUF</code>
+              The default AI model is downloading in the background (~4 GB, one time). Local
+              screening will work once it finishes. You can use a cloud model in the meantime.
             </p>
           )}
         </Card>

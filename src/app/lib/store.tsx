@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride } from "./mockServices";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method } from "./apiClient";
+import { FRESH_LAUNCH } from "./launchFlags";
 
 export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta" | "projects" | "writing";
 
@@ -267,6 +268,7 @@ const VALID_PAGES: PageId[] = [
   "snowball", "extraction", "textextraction", "prisma", "meta", "projects", "writing",
 ];
 function loadPage(): PageId {
+  if (FRESH_LAUNCH) return "home";   // a fresh app launch always starts on Home
   try {
     const v = localStorage.getItem(PAGE_STORAGE_KEY) as PageId | null;
     if (v && VALID_PAGES.includes(v)) return v;
@@ -595,6 +597,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (localRestored.current) return;
     localRestored.current = true;
+    // Fresh app launch → start a brand-new session on Home; don't restore the
+    // last one. Past sessions remain saved and loadable from the Sessions panel.
+    if (FRESH_LAUNCH) return;
     try {
       const raw = localStorage.getItem(LOCAL_SNAPSHOT_KEY);
       if (!raw) return;

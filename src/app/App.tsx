@@ -8,6 +8,7 @@ import { bucketAbstractExclusions, bucketFullTextExclusions } from "./lib/exclus
 import { Toaster } from "./components/ui/sonner";
 import { StoreProvider, useStore } from "./lib/store";
 import { AuthProvider } from "./lib/auth";
+import { BackendReadyProvider, useBackendReady } from "./lib/backendReady";
 import { UserMenu } from "./components/UserMenu";
 import { HomePage } from "./pages/HomePage";
 import { SimulationPage } from "./pages/SimulationPage";
@@ -21,7 +22,7 @@ import { TextExtractionPage } from "./pages/TextExtractionPage";
 import { MetaAnalysisPage } from "./pages/MetaAnalysisPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { WritingPage } from "./pages/WritingPage";
-import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Users, PenLine, SlidersHorizontal } from "lucide-react";
+import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Users, PenLine, SlidersHorizontal, Loader2 } from "lucide-react";
 
 const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> = {
   home: { title: "Research Strategy", subtitle: "PICO-driven question framing and search design", icon: Home },
@@ -41,6 +42,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> 
 
 function Shell() {
   const s = useStore();
+  const backendReady = useBackendReady();
   const meta = PAGE_META[s.page];
   const Icon = meta.icon;
   // If we landed on a /?invite=TOKEN URL, route to the Projects page so the
@@ -75,6 +77,15 @@ function Shell() {
               >
                 <SlidersHorizontal className="size-3.5" />Strategy Review
               </button>
+            )}
+            {!backendReady && (
+              <span
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400 text-xs font-medium"
+                title="The local engine (backend + AI model) is still starting. The app is usable now; screening and search unlock once it's ready."
+              >
+                <Loader2 className="size-3.5 animate-spin" />
+                Starting engine…
+              </span>
             )}
             {s.currentProjectId && (
               <button
@@ -271,11 +282,13 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 export default function App() {
   return (
     <ErrorBoundary>
-      <AuthProvider>
-        <StoreProvider>
-          <Shell />
-        </StoreProvider>
-      </AuthProvider>
+      <BackendReadyProvider>
+        <AuthProvider>
+          <StoreProvider>
+            <Shell />
+          </StoreProvider>
+        </AuthProvider>
+      </BackendReadyProvider>
     </ErrorBoundary>
   );
 }

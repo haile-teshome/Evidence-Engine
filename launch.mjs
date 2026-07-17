@@ -16,7 +16,15 @@ const BACKEND_DIR = path.join(PROJECT, "Backend");
 const FRONTEND_PORT = 5180;
 const BACKEND_PORT = 8000;
 const APP_URL = `http://localhost:${FRONTEND_PORT}/`;
+// The window is opened at this URL: the `?new=1` flag tells the app a fresh
+// launch happened so it starts on Home with a new session instead of restoring
+// the last one (an in-app refresh has no flag and still restores). Health checks
+// use the bare APP_URL.
+const APP_LAUNCH_URL = `${APP_URL}?new=1`;
 const IS_WIN = process.platform === "win32";
+const OLLAMA_URL = "http://localhost:11434/";
+const EE_CACHE = path.join(os.homedir(), ".evidence-engine");     // downloaded tools
+const DEFAULT_MODEL = "hf.co/mradermacher/leads-mistral-7b-v1-GGUF";  // default local screener
 
 const started = [];               // child processes we spawned (to clean up)
 let cleaned = false;
@@ -171,8 +179,10 @@ function needsBuild() {
 function findOllama() {
   const home = os.homedir();
   const cands = IS_WIN
-    ? [path.join(process.env["LOCALAPPDATA"] || path.join(home, "AppData", "Local"), "Programs", "Ollama", "ollama.exe"), "ollama.exe", "ollama"]
-    : ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama", "ollama"];
+    ? [path.join(process.env["LOCALAPPDATA"] || path.join(home, "AppData", "Local"), "Programs", "Ollama", "ollama.exe"),
+       path.join(EE_CACHE, "ollama.exe"), "ollama.exe", "ollama"]
+    : ["/usr/local/bin/ollama", "/opt/homebrew/bin/ollama", "/Applications/Ollama.app/Contents/Resources/ollama",
+       path.join(EE_CACHE, "Ollama.app", "Contents", "Resources", "ollama"), "ollama"];
   for (const c of cands) {
     if (c.includes("/") || c.includes("\\")) {
       if (fs.existsSync(c)) return c;
@@ -182,6 +192,57 @@ function findOllama() {
     }
   }
   return null;
+}
+
+// Download + install Ollama automatically. Returns a path to its binary, or null.
+function installOllama() {
+  try { fs.mkdirSync(EE_CACHE, { recursive: true }); } catch { /* exists */ }
+
+  if (process.platform === "darwin") {
+    const brew = spawnSync("which", ["brew"], { encoding: "utf8" });
+    if (brew.status === 0 && brew.stdout.trim()) {
+      log("Installing Ollama via Homebrew...");
+      spawnSync("brew", ["install", "ollama"], { stdio: "ignore" });
+      const f = findOllama(); if (f) return f;
+    }
+    const app = path.join(EE_CACHE, "Ollama.app");
+    const bin = path.join(app, "Contents", "Resources", "ollama");
+    if (fs.existsSync(bin)) return bin;
+    log("Downloading Ollama (~20 MB, one time)...");
+    const zip = path.join(EE_CACHE, "ollama-darwin.zip");
+    if (spawnSync("curl", ["-fsSL", "-o", zip, "https://ollama.com/download/Ollama-darwin.zip"], { stdio: "ignore" }).status !== 0) return null;
+    spawnSync("ditto", ["-x", "-k", zip, EE_CACHE], { stdio: "ignore" });
+    try { fs.rmSync(zip, { force: true }); } catch { /* ignore */ }
+    spawnSync("xattr", ["-dr", "com.apple.quarantine", app], { stdio: "ignore" });   // let the binary run
+    return fs.existsSync(bin) ? bin : null;
+  }
+
+  if (IS_WIN) {
+    const setup = path.join(EE_CACHE, "OllamaSetup.exe");
+    log("Downloading Ollama installer (one time)...");
+    if (spawnSync("curl", ["-fsSL", "-o", setup, "https://ollama.com/download/OllamaSetup.exe"], { stdio: "ignore" }).status !== 0) return null;
+    log("Installing Ollama...");
+    spawnSync(setup, ["/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"], { stdio: "ignore" });
+    return findOllama();
+  }
+
+  log("Installing Ollama...");
+  spawnSync("sh", ["-c", "curl -fsSL https://ollama.com/install.sh | sh"], { stdio: "ignore" });
+  return findOllama();
+}
+
+// Pull the default screening model if it isn't present. Runs in the BACKGROUND
+// (it's ~4 GB) so the app opens immediately; Ollama resumes the pull if quit.
+async function ensureModel(ollamaBin) {
+  try {
+    const r = await fetch(`${OLLAMA_URL}api/tags`);
+    const j = await r.json();
+    if ((j.models || []).some((m) => (m.name || "").startsWith(DEFAULT_MODEL))) return;
+  } catch { /* server not answering tags yet — pull anyway */ }
+  log(`Downloading the default AI model in the background (~4 GB): ${DEFAULT_MODEL}`);
+  log("The app is usable now; local screening works once the download finishes.");
+  const p = spawn(ollamaBin, ["pull", DEFAULT_MODEL], { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
+  started.push(p);
 }
 
 function openDefaultBrowser(url) {
@@ -198,11 +259,123 @@ function killChild(child) {
   } catch { /* already gone */ }
 }
 
+const APP_PROFILE = path.join(os.homedir(), ".evidence-engine-appwin");
+const DEBUG_PORT = 9765;   // Chrome DevTools port for the app window (see monitorWindow)
+
+// Is any Chrome process still using our dedicated app profile? Chrome's command
+// line carries `--user-data-dir=...evidence-engine-appwin`, and so do all its
+// helper/renderer processes, so this is true exactly while the window is open.
+function appWindowAlive() {
+  const marker = path.basename(APP_PROFILE);
+  try {
+    if (IS_WIN) {
+      const r = spawnSync("wmic", ["process", "get", "CommandLine"], { encoding: "utf8" });
+      return (r.stdout || "").includes(marker);
+    }
+    const r = spawnSync("pgrep", ["-f", marker], { encoding: "utf8" });
+    return r.status === 0 && (r.stdout || "").trim() !== "";
+  } catch { return false; }
+}
+
+// A previous unclean exit can leave Chrome's Singleton* lock files behind, which
+// makes the next launch fail to open a window (it silently hands off instead).
+// Clear them only when no Chrome process is actually using the profile.
+function clearStaleProfileLock() {
+  if (appWindowAlive()) return;
+  for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
+    try { fs.rmSync(path.join(APP_PROFILE, f), { force: true }); } catch { /* ignore */ }
+  }
+}
+
+// Mark the profile as having exited cleanly so Chrome never shows a
+// "restore pages?" bubble or reopens an extra empty window on the next launch —
+// that stray second window is what kept the instance (and the launcher) alive
+// after the app window was closed.
+function markProfileCleanExit() {
+  const prefs = path.join(APP_PROFILE, "Default", "Preferences");
+  try {
+    if (!fs.existsSync(prefs)) return;
+    const d = JSON.parse(fs.readFileSync(prefs, "utf8"));
+    d.profile = d.profile || {};
+    d.profile.exit_type = "Normal";
+    d.profile.exited_cleanly = true;
+    fs.writeFileSync(prefs, JSON.stringify(d));
+  } catch { /* worst case: a restore bubble appears once — harmless */ }
+}
+
+// How many app WINDOWS/tabs are open, via Chrome's DevTools endpoint. We can't
+// use process presence: on macOS, closing the app window leaves the Chrome
+// instance running windowless (background processes persist), so a
+// process-based check would think the window is still open forever. The
+// DevTools "page" targets disappear the instant the window is closed.
+async function appPageCount() {
+  try {
+    const res = await fetch(`http://localhost:${DEBUG_PORT}/json`);
+    if (!res.ok) return 0;
+    const list = await res.json();
+    return (list || []).filter((t) => t.type === "page").length;
+  } catch {
+    return 0;   // DevTools unreachable → instance gone → treat as closed
+  }
+}
+
+// Reliable shutdown for macOS/Linux: wait for the app window to appear, then for
+// it to close (no DevTools "page" targets left), then tear everything down.
+async function monitorWindow() {
+  let appeared = false;
+  for (let i = 0; i < 60 && !appeared; i++) { appeared = (await appPageCount()) >= 1; if (!appeared) await sleep(500); }
+  if (!appeared) return;   // never confirmed a window — leave Ctrl-C in charge
+  while ((await appPageCount()) >= 1) await sleep(1000);
+  log("App window closed.");
+  cleanup(0);
+}
+
+// Other launch.mjs processes for THIS project (excluding ourselves). A previous
+// run that didn't shut down cleanly leaves one of these holding the ports.
+function priorLauncherPids() {
+  try {
+    const r = spawnSync("pgrep", ["-f", "launch.mjs"], { encoding: "utf8" });
+    return (r.stdout || "").split(/\s+/).filter(Boolean).map(Number)
+      .filter((p) => p && p !== process.pid)
+      .filter((p) => {
+        const c = spawnSync("ps", ["-o", "command=", "-p", String(p)], { encoding: "utf8" });
+        return (c.stdout || "").includes(PROJECT);
+      });
+  } catch { return []; }
+}
+
+// Single-owner startup: shut down any previous Evidence Engine instance (its
+// launcher, servers, and app window) so this run starts fresh and fully owns
+// everything it spawns. This is what makes "close the window → everything dies"
+// and "reopen → the app opens" reliable, instead of a stale Chrome hijacking the
+// launch and opening a blank default-profile window.
+async function reclaimFromPriorInstances() {
+  if (IS_WIN) return;   // Windows keeps its existing child-exit flow
+  const pids = priorLauncherPids();
+  if (pids.length) {
+    log("Closing a previous Evidence Engine instance...");
+    // SIGTERM lets each old launcher run its own cleanup (killing its detached
+    // backend/frontend process groups) before exiting.
+    for (const pid of pids) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
+    for (let i = 0; i < 40 && priorLauncherPids().length; i++) await sleep(250);
+  }
+  // A launcher-less Chrome can still hold our profile (it survives its launcher).
+  if (appWindowAlive()) {
+    try { spawnSync("pkill", ["-f", path.basename(APP_PROFILE)], { stdio: "ignore" }); } catch { /* ignore */ }
+    for (let i = 0; i < 20 && appWindowAlive(); i++) await sleep(200);
+  }
+  clearStaleProfileLock();
+}
+
 function cleanup(code = 0) {
   if (cleaned) return;
   cleaned = true;
   log("\nShutting down Evidence Engine...");
   for (const c of started) killChild(c);
+  // Also kill the app-window Chrome instance itself — on macOS it lingers
+  // windowless after the window is closed, which would keep the Dock icon lit
+  // and hold the profile. (On Windows it exits on its own.)
+  if (!IS_WIN) { try { spawnSync("pkill", ["-f", path.basename(APP_PROFILE)], { stdio: "ignore" }); } catch { /* ignore */ } }
   log("Stopped.");
   process.exit(code);
 }
@@ -211,6 +384,10 @@ async function main() {
   log("=== Evidence Engine ===");
   process.on("SIGINT", () => cleanup(0));
   process.on("SIGTERM", () => cleanup(0));
+
+  // Start as the single owner: reclaim (shut down) any leftover instance so this
+  // run owns its servers and window, and closing the window later frees all of it.
+  await reclaimFromPriorInstances();
 
   // 1) first-run deps
   if (!fs.existsSync(path.join(PROJECT, "node_modules"))) {
@@ -257,54 +434,85 @@ async function main() {
     started.push(f);
   }
 
-  // 4) wait until healthy
-  const ok = await waitHealthy([APP_URL, `http://localhost:${BACKEND_PORT}/docs`], 90);
-  if (!ok) { log("Services did not come up in time."); cleanup(1); return; }
-
-  // Ollama powers the default local (private) screening model. If it's installed
-  // but not running, start it for the user; if it's not installed, point them to it.
-  if (!(await httpOk("http://localhost:11434/"))) {
-    const ollama = findOllama();
-    if (ollama) {
-      log("Starting Ollama (local AI models)...");
-      const o = spawn(ollama, ["serve"], { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
-      started.push(o);
-      for (let i = 0; i < 15 && !(await httpOk("http://localhost:11434/")); i++) await sleep(1000);
-    }
-    if (!(await httpOk("http://localhost:11434/"))) {
-      log("Note: Ollama isn't running. Local models need it — install from https://ollama.com");
-      log("      then pull the default model:  ollama pull hf.co/mradermacher/leads-mistral-7b-v1-GGUF");
-      log("      (Or just pick a cloud model in the sidebar.)");
-    }
-  }
+  // 4) Wait only for the FRONTEND (the cached production build) — that comes up
+  //    in ~a second. Do NOT block on the backend or Ollama: the backend is
+  //    already spawned and keeps importing its heavy deps (langchain/torch) in
+  //    the background while the window is already on screen. The app shows a
+  //    "starting the local engine" indicator until the backend answers. This is
+  //    what makes Evidence Engine appear fast instead of waiting on imports.
+  const ok = await waitHealthy([APP_URL], 60);
+  if (!ok) { log("Frontend did not come up in time."); cleanup(1); return; }
 
   // 5) open in its own window and wait; closing it shuts everything down
+  clearStaleProfileLock();   // recover from any previous unclean exit
+  markProfileCleanExit();    // never restore a stray empty window on launch
   const browser = findChrome();
   if (browser) {
     log("Opening Evidence Engine — CLOSE THE APP WINDOW to shut everything down.");
     const win = spawn(browser, [
-      `--app=${APP_URL}`,
-      `--user-data-dir=${path.join(os.homedir(), ".evidence-engine-appwin")}`,
+      `--app=${APP_LAUNCH_URL}`,
+      `--user-data-dir=${APP_PROFILE}`,
+      `--remote-debugging-port=${DEBUG_PORT}`,
       "--no-first-run", "--no-default-browser-check",
+      "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
     ], { stdio: "ignore" });
-    const openedAt = Date.now();
-    win.on("exit", () => {
-      // If Chrome exits almost immediately it didn't own the window — it handed
-      // the URL off to an Evidence Engine window that's ALREADY open (same
-      // profile). Tearing the servers down here would break that live window,
-      // which is the "it won't open" bug. So only shut down on a real close.
-      if (Date.now() - openedAt < 4000) {
-        log("An Evidence Engine window is already open.");
-        if (started.length === 0) process.exit(0);   // another launcher owns the servers
-        keepAlive();                                  // we own them; idle until closed/Ctrl-C
-      } else {
-        cleanup(0);
-      }
-    });
-    win.on("error", () => { openDefaultBrowser(APP_URL); keepAlive(); });
+    win.on("error", () => { openDefaultBrowser(APP_LAUNCH_URL); keepAlive(); });
+    if (IS_WIN) {
+      // Windows: rely on the child's exit (handoff-aware), as before.
+      const openedAt = Date.now();
+      win.on("exit", () => {
+        if (Date.now() - openedAt < 4000) {
+          log("An Evidence Engine window is already open.");
+          if (started.length === 0) process.exit(0);
+          keepAlive();
+        } else {
+          cleanup(0);
+        }
+      });
+    } else {
+      // macOS/Linux: Chrome can let our spawned child exit immediately after
+      // handing the URL to another process, so we cannot trust its exit event.
+      // Stay alive and drive shutdown off whether the profile's window is still
+      // open. This is what makes closing the window reliably free everything so
+      // a reopen works without killing processes by hand.
+      keepAlive();
+      monitorWindow();
+    }
   } else {
-    openDefaultBrowser(APP_URL);
+    openDefaultBrowser(APP_LAUNCH_URL);
     keepAlive();
+  }
+
+  // 6) Warm up the backend + Ollama in the BACKGROUND. The window is already
+  //    open, so none of this delays first paint; the UI reflects progress via
+  //    its own /api/health poll.
+  warmUp();
+}
+
+// Background warm-up (runs after the window is already open). The backend is
+// already spawned; wait for it to finish importing, then install/start Ollama
+// and pull the default screening model. Nothing here blocks the app window.
+async function warmUp() {
+  // Backend is already starting; give it time to finish importing heavy deps.
+  for (let i = 0; i < 180 && !(await httpOk(`http://localhost:${BACKEND_PORT}/api/health`)); i++) await sleep(1000);
+
+  // Ollama powers the default local (private) screening model. Fully automatic:
+  // install it if missing, start it, and pull the default model in the background.
+  let ollamaBin = findOllama();
+  if (!(await httpOk(OLLAMA_URL))) {
+    if (!ollamaBin) ollamaBin = installOllama();
+    if (ollamaBin) {
+      log("Starting Ollama (local AI models)...");
+      const o = spawn(ollamaBin, ["serve"], { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
+      started.push(o);
+      for (let i = 0; i < 20 && !(await httpOk(OLLAMA_URL)); i++) await sleep(1000);
+    }
+  }
+  if (ollamaBin && (await httpOk(OLLAMA_URL))) {
+    await ensureModel(ollamaBin);
+  } else {
+    log("Note: couldn't set up Ollama automatically (offline?). Local models need it —");
+    log("      install from https://ollama.com, or pick a cloud model in the sidebar.");
   }
 }
 

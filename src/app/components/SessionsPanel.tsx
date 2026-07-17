@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useStore, SESSION_STORAGE_KEY } from "../lib/store";
 import { useAuth } from "../lib/auth";
+import { useBackendReady } from "../lib/backendReady";
+import { FRESH_LAUNCH } from "../lib/launchFlags";
 import { listSessions, loadSession, saveSession, deleteSession, SessionMeta } from "../lib/sessions";
 import { AIService } from "../lib/mockServices";
 import { Card } from "./ui/card";
@@ -18,6 +20,7 @@ type SyncStatus = "idle" | "saving" | "synced" | "error";
 export function SessionsPanel() {
   const s = useStore();
   const { user } = useAuth();
+  const backendReady = useBackendReady();
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [busy, setBusy] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
@@ -56,15 +59,21 @@ export function SessionsPanel() {
       }
     }
   }
-  useEffect(() => { refresh(); }, [user?.id]);
+  // Wait for the backend to finish starting before hitting it, so a cold start
+  // doesn't spuriously fail (and trip the "backend unreachable" toast).
+  useEffect(() => { if (backendReady) refresh(); }, [user?.id, backendReady]);
 
   // On a fresh page load, silently restore the last active session so a browser
   // refresh keeps the user's work (and tab) in place. Runs once when auth is
   // ready, and only if nothing is already loaded — never clobbers active work.
   const restoredRef = useRef(false);
   useEffect(() => {
-    if (!user || restoredRef.current) return;
+    // Wait for the backend: attempting the restore before it's up would fail and
+    // clear SESSION_STORAGE_KEY below, permanently losing the auto-restore.
+    if (!user || !backendReady || restoredRef.current) return;
     restoredRef.current = true;
+    // Fresh app launch → start new; don't auto-load the last session.
+    if (FRESH_LAUNCH) return;
     let savedId: string | null = null;
     try { savedId = localStorage.getItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
     if (!savedId) return;
@@ -91,7 +100,7 @@ export function SessionsPanel() {
         try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
       }
     })();
-  }, [user?.id]);
+  }, [user?.id, backendReady]);
 
   async function onLoad(id: string) {
     setBusy(true);
@@ -144,6 +153,7 @@ export function SessionsPanel() {
   // ---------------------------------------------------------------------------
   useEffect(() => {
     if (!user) return;
+    if (!backendReady) return;   // don't try to save before the backend is up
     if (s.history.length === 0) return;
 
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
@@ -204,6 +214,7 @@ export function SessionsPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     user?.id,
+    backendReady,
     s.history,
     s.pico,
     s.inclusion,
