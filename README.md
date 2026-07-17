@@ -28,9 +28,9 @@ winget install OpenJS.NodeJS Python.Python.3.12
 
 Or download the installers directly: [Node.js (LTS)](https://nodejs.org/en/download) · [Python 3](https://www.python.org/downloads/).
 
-> Optional: [Google Chrome](https://www.google.com/chrome/) (for a clean app
-> window; otherwise it opens in your default browser) and
-> [Ollama](https://ollama.com) (only for local, offline AI models).
+> Optional: [Google Chrome](https://www.google.com/chrome/) for a clean app
+> window (otherwise it opens in your default browser). You do **not** need to
+> install Ollama — the app sets up the local AI model automatically on first run.
 
 ### 2. Get the app
 
@@ -66,13 +66,15 @@ Because the app isn't from the App Store, macOS may block the first open.
 
 ## AI models
 
-- **Local (default, private):** install [Ollama](https://ollama.com) and the app
-  uses **LEADS-Mistral-7B** for screening. Nothing leaves your computer.
+- **Local (default, private):** on first launch the app auto-installs
+  [Ollama](https://ollama.com) and downloads **LEADS-Mistral-7B** (~4 GB) for
+  screening. Nothing leaves your computer; no manual setup.
 - **Cloud (optional):** pick Claude / GPT / Gemini in the sidebar. These need an
   API key in `Backend/.env` (copy from `Backend/.env.example`):
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
-- **Sign-in / cross-device sessions (optional):** set `VITE_SUPABASE_PROJECT_ID`
-  and `VITE_SUPABASE_ANON_KEY` in `.env.local`. The app works fully without it.
+- **Sessions & reviewers:** saved automatically to a local database
+  (`~/.evidence-engine/evidence.db`) by the backend. No account or cloud service.
+  Add reviewer profiles from the top-right menu for local dual-review projects.
 
 ---
 
@@ -83,7 +85,7 @@ Because the app isn't from the App Store, macOS may block the first open.
 | `Backend/` | FastAPI server (port 8000). Local LEADS screening pipeline + cloud-LLM routing, streamed progress, server-side cancel. |
 | `src/`, `index.html`, `vite.config.ts` | React + Vite frontend (shadcn UI), served as a production build by the launcher. |
 | `launch.mjs`, `launch.command`, `launch.bat` | Cross-platform launcher: starts backend + frontend, opens the app window, and shuts down on close. |
-| `supabase/`, `utils/` | Optional auth + session storage. |
+| `Backend/store.py` | Local SQLite persistence for sessions + multi-reviewer projects (replaces the former cloud backend). |
 
 Screening defaults to **LEADS-Mistral-7B** (chosen from a separate benchmark:
 recall 1.000, specificity 0.676, MCC +0.260, WSS@95 0.61 on van_Dis_2020).
@@ -111,4 +113,5 @@ Type-check: `npm run typecheck`.
 
 Evidence Engine runs entirely on your computer. Database searches go directly to
 the public APIs (PubMed, Europe PMC, etc.). With the default local model, paper
-text is never sent to any third party. Cloud models and Supabase are opt-in.
+text is never sent to any third party. Sessions and reviewer data stay in a
+local SQLite database on your machine. Cloud models are opt-in.

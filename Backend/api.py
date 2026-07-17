@@ -60,6 +60,12 @@ from bs4 import BeautifulSoup
 
 app = FastAPI(title="Evidence Engine API", version="0.1.0")
 
+# Local persistence (sessions + multi-reviewer projects), backed by SQLite.
+# Replaces the former Supabase edge function so the app stays fully local.
+from store import router as store_router  # noqa: E402
+
+app.include_router(store_router)
+
 
 # ---------------------------------------------------------------------------
 # Server-side cancellation registry
