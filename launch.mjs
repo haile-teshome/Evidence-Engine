@@ -92,6 +92,24 @@ function venvHasDeps() {
   return dep.status === 0;
 }
 
+// Create Backend/.env on first run so the user never has to. No API keys are
+// required for the default local model; the only useful value is a real contact
+// email for NCBI/PubMed + Unpaywall, which we auto-fill from git if available.
+function ensureBackendEnv() {
+  const envPath = path.join(BACKEND_DIR, ".env");
+  const examplePath = path.join(BACKEND_DIR, ".env.example");
+  if (fs.existsSync(envPath) || !fs.existsSync(examplePath)) return;
+  try {
+    let content = fs.readFileSync(examplePath, "utf8");
+    const gitEmail = (spawnSync("git", ["config", "user.email"], { encoding: "utf8" }).stdout || "").trim();
+    if (gitEmail && /^ENTREZ_EMAIL=/m.test(content)) {
+      content = content.replace(/^ENTREZ_EMAIL=.*$/m, `ENTREZ_EMAIL=${gitEmail}`);
+    }
+    fs.writeFileSync(envPath, content);
+    log("Created Backend/.env (no API keys needed — the default model runs locally).");
+  } catch { /* ignore — the backend falls back to built-in defaults */ }
+}
+
 // Ensure a working, isolated backend interpreter. Returns the python path to run
 // the backend with, or null if we couldn't build one.
 function ensureBackendPython() {
@@ -400,6 +418,7 @@ async function main() {
   // 2) backend — run from an isolated venv so it always uses a working Python
   //    with correctly-built deps, regardless of what `python3` resolves to when
   //    launched from Finder/Explorer (which often finds an old system Python).
+  ensureBackendEnv();
   if (await httpOk(`http://localhost:${BACKEND_PORT}/docs`)) {
     log(`Backend already running on :${BACKEND_PORT}`);
   } else {
