@@ -1,9 +1,10 @@
 import { useMemo, useState } from "react";
 import { useStore } from "../lib/store";
 import {
-  DataAggregator, Deduplicator, QualityService,
+  QualityService, Paper,
   QualityReport, QualityOverride, RoBDomain, RoBJudgment,
 } from "../lib/mockServices";
+import { effectiveAbstractDecision, effectiveFullTextDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -114,59 +115,62 @@ export function QualityPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
 
-  async function runFetchAndAssess() {
-    if (!s.query) { toast.error("Define a query on the Home page first."); return; }
+  // Papers to appraise: the ones that PASSED screening. Risk-of-bias is only
+  // meaningful for studies you're actually including — prefer full-text includes,
+  // otherwise fall back to abstract includes.
+  function includedPapers(): { papers: Paper[]; stage: "full-text" | "abstract" } {
+    const toPaper = (r: any): Paper => ({ id: r.paper_id, source: r.Source, title: r.Title, abstract: r.Abstract, url: r.URL });
+    if (s.fullTextResults) {
+      const inc = s.fullTextResults.filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include");
+      if (inc.length) return { papers: inc.map(toPaper), stage: "full-text" };
+    }
+    if (s.results) {
+      const inc = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
+      if (inc.length) return { papers: inc.map(toPaper), stage: "abstract" };
+    }
+    return { papers: [], stage: "abstract" };
+  }
+
+  async function runAssess() {
+    const { papers, stage } = includedPapers();
+    if (papers.length === 0) {
+      toast.error("No included papers yet — run Abstract or Full-Text screening first.");
+      return;
+    }
     const { abort } = s.startTask("quality-assess", [{ id: "qa", label: "Quality assessment", status: "running" }]);
-    s.updateTask("quality-assess", { detail: "Fetching papers from databases…" });
     const signal = abort.signal;
     try {
-      // Full planning corpus: each source's own query, up to its planning yield.
-      const { papers: all, truncated } = await DataAggregator.fetchForScreening(
-        s.sources,
-        s.perDbQueries,
-        s.unifiedSearchQuery || s.query,
-        s.simulation,
-        s.pico,
-        { signal, elsevierToken: s.elsevierToken, ezproxyConnected: s.ezproxyConnected },
-      );
-      if (signal.aborted) { s.updateTask("quality-assess", { status: "canceled" }); return; }
-      if (truncated.length > 0) {
-        toast.info(`Very large result set — capped ${truncated.join(", ")} for assessment.`);
-      }
-      s.setRawPapers(all);
-
-      s.updateTask("quality-assess", { detail: "Deduplicating…" });
-      const { unique, duplicates } = Deduplicator.run(all);
-      s.setUniquePapers(unique);
-      s.setDuplicatesCount(duplicates.length);
-
       const reports: QualityReport[] = [];
-      s.updateTask("quality-assess", { progress: { done: 0, total: unique.length } });
-      for (let i = 0; i < unique.length; i++) {
+      s.updateTask("quality-assess", { progress: { done: 0, total: papers.length }, detail: `Appraising ${papers.length} included papers…` });
+      for (let i = 0; i < papers.length; i++) {
         if (signal.aborted) break;
+        const p = papers[i];
         s.updateTask("quality-assess", {
-          progress: { done: i, total: unique.length, label: unique[i].title.slice(0, 80) },
-          detail: unique[i].title.slice(0, 80),
+          progress: { done: i, total: papers.length, label: p.title.slice(0, 80) },
+          detail: p.title.slice(0, 80),
         });
         try {
-          reports.push(await QualityService.assessPaper(unique[i], signal));
+          // Full text (when acquired) yields far better risk-of-bias judgments
+          // than the abstract alone — the backend uses it when provided.
+          const fullText = s.fullTexts[p.id]?.text || undefined;
+          reports.push(await QualityService.assessPaper(p, signal, { fullText }));
         } catch (e: any) {
           if (signal.aborted) break;
           console.error(`quality-assess ${i + 1} failed:`, e?.message);
         }
-        s.updateTask("quality-assess", { progress: { done: i + 1, total: unique.length } });
+        s.updateTask("quality-assess", { progress: { done: i + 1, total: papers.length } });
       }
       s.setQualityReports(reports);
       s.setExcludedByQuality(new Set());
-      // Fresh assessment invalidates previous overrides — those referred to
-      // domain judgments from the old run.
+      // Fresh assessment invalidates previous overrides.
       s.setQualityOverrides([]);
       if (signal.aborted) {
         s.updateTask("quality-assess", { status: "canceled" });
-        toast.info(`Canceled — ${reports.length} of ${unique.length} assessed`);
+        toast.info(`Canceled — ${reports.length} of ${papers.length} assessed`);
       } else {
         s.updateTask("quality-assess", { status: "done" });
-        toast.success(`Assessed ${reports.length} unique papers (${duplicates.length} duplicates removed).`);
+        const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
+        toast.success(`Appraised ${reports.length} included papers (${stage})${withFT ? ` — ${withFT} using full text` : ""}.`);
       }
     } catch (e: any) {
       s.updateTask("quality-assess", { status: "error", detail: e?.message });
@@ -243,9 +247,22 @@ export function QualityPage() {
         <>
           <Alert>
             <AlertDescription>
-              Risk-of-bias appraisal per study design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Reviewer overrides are audit-logged.
+              Risk-of-bias appraisal of your <strong>included</strong> papers, with a rubric matched to each study
+              design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Uses the acquired full text where available for more reliable
+              judgments; reviewer overrides are audit-logged.
             </AlertDescription>
           </Alert>
+          {(() => {
+            const { papers, stage } = includedPapers();
+            const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
+            return papers.length === 0 ? (
+              <Alert><AlertDescription>No included papers yet — run Abstract or Full-Text screening first, then come back to appraise risk of bias.</AlertDescription></Alert>
+            ) : (
+              <div className="text-xs text-muted-foreground px-1">
+                {papers.length} included paper{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text acquired yet — abstract-only appraisal"}
+              </div>
+            );
+          })()}
           {task && task.status === "running" && (
             <TaskProgressCard
               task={task}
@@ -253,8 +270,8 @@ export function QualityPage() {
               onCancel={() => s.cancelTask("quality-assess")}
             />
           )}
-          <Button onClick={runFetchAndAssess} disabled={running} size="lg" className="w-full">
-            <Search className="size-4 mr-2" />{running ? "Working..." : "Fetch, Deduplicate & Appraise Risk of Bias"}
+          <Button onClick={runAssess} disabled={running || includedPapers().papers.length === 0} size="lg" className="w-full">
+            <ShieldCheck className="size-4 mr-2" />{running ? "Appraising…" : "Appraise Risk of Bias on Included Papers"}
           </Button>
         </>
       )}
@@ -262,11 +279,11 @@ export function QualityPage() {
       {reports && summaryCounts && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-            <Stat label="Fetched" value={s.rawPapers?.length ?? 0} icon={<Search className="size-4" />} />
-            <Stat label="Duplicates" value={s.duplicatesCount} icon={<Copy className="size-4" />} />
-            <Stat label="Unique" value={s.uniquePapers?.length ?? 0} />
+            <Stat label="Appraised" value={reports.length} icon={<ShieldCheck className="size-4" />} />
             <Stat label="Low RoB" value={summaryCounts.low} variant="success" />
-            <Stat label="Some / High" value={summaryCounts.some + summaryCounts.high} variant="warn" />
+            <Stat label="Some concerns" value={summaryCounts.some} variant="warn" />
+            <Stat label="High RoB" value={summaryCounts.high} variant="warn" icon={<AlertTriangle className="size-4" />} />
+            <Stat label="No information" value={summaryCounts.no_info} />
             <Stat label="Carrying Forward" value={kept} variant="info" />
           </div>
 
@@ -410,7 +427,7 @@ export function QualityPage() {
           </Card>
 
           <div className="grid grid-cols-2 gap-2">
-            <Button variant="outline" onClick={runFetchAndAssess} disabled={running}>Re-run Appraisal</Button>
+            <Button variant="outline" onClick={runAssess} disabled={running}>Re-run Appraisal</Button>
             <Button onClick={proceedToScreening}>
               <ArrowRight className="size-4 mr-2" />Proceed to Abstract Screening ({kept})
             </Button>
