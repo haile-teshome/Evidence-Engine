@@ -1,8 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../lib/store";
 import {
   QualityService, Paper,
-  QualityReport, QualityOverride, RoBDomain, RoBJudgment,
+  QualityReport, QualityOverride, RoBDomain, RoBJudgment, Instrument,
 } from "../lib/mockServices";
 import { effectiveAbstractDecision, effectiveFullTextDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
@@ -17,7 +17,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import {
   Copy, ShieldCheck, AlertTriangle, ArrowRight, Search,
-  Pencil, History, RotateCcw, FileDown, Plus, Trash2,
+  Pencil, History, RotateCcw, FileDown, Plus, Trash2, Loader2,
 } from "lucide-react";
 import {
   gradeCertainty, GRADE_DOWNGRADE_DOMAINS, GRADE_UPGRADE_FACTORS, GradeOutcome,
@@ -135,6 +135,39 @@ export function QualityPage() {
   const [excludeRule, setExcludeRule] = useState<"none" | "any_high" | "two_or_more_high">("none");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
+  // Available appraisal instruments (for the "choose framework" selector). The
+  // backend routes one by study design, but the reviewer can override per paper.
+  const [instruments, setInstruments] = useState<Instrument[]>([]);
+  const [reassessingId, setReassessingId] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    QualityService.listInstruments()
+      .then(list => { if (alive) setInstruments(list); })
+      .catch(() => { /* selector just won't render options; auto-routing still works */ });
+    return () => { alive = false; };
+  }, []);
+
+  // Re-appraise ONE paper with a reviewer-chosen instrument (framework override).
+  async function reassessOne(report: QualityReport, instrumentId: string) {
+    const paper: Paper = { id: report.paper_id, source: report.source, title: report.title, abstract: report.abstract, url: report.url };
+    setReassessingId(report.paper_id);
+    try {
+      const fullText = s.fullTexts[report.paper_id]?.text || undefined;
+      const fresh = await QualityService.assessPaper(paper, undefined, {
+        fullText, instrumentId, studyDesign: report.study_design,
+      });
+      s.setQualityReports((s.qualityReports || []).map(r => r.paper_id === report.paper_id ? fresh : r));
+      // A new instrument means new domains — old overrides for this paper no longer apply.
+      s.setQualityOverrides(s.qualityOverrides.filter(o => o.paper_id !== report.paper_id));
+      applyExcludeRule(excludeRule);
+      const inst = instruments.find(i => i.id === instrumentId);
+      toast.success(`Re-appraised with ${inst?.short_name || instrumentId}.`);
+    } catch (e: any) {
+      toast.error(e?.message || "Re-appraisal failed");
+    } finally {
+      setReassessingId(null);
+    }
+  }
 
   // Papers to appraise: the ones that PASSED screening. Risk-of-bias is only
   // meaningful for studies you're actually including — prefer full-text includes,
@@ -429,6 +462,9 @@ export function QualityPage() {
                     overrides={overrides}
                     excluded={s.excludedByQuality.has(selected.paper_id)}
                     paperOverrides={overrides.filter(o => o.paper_id === selected.paper_id)}
+                    instruments={instruments}
+                    reassessing={reassessingId === selected.paper_id}
+                    onReassess={(instrumentId) => reassessOne(selected, instrumentId)}
                     onToggleExclude={() => toggleExclude(selected.paper_id)}
                     onOverride={(o) => {
                       s.addQualityOverride(o);
@@ -474,6 +510,9 @@ function PaperDetail({
   excluded,
   overrides,
   paperOverrides,
+  instruments,
+  reassessing,
+  onReassess,
   onToggleExclude,
   onOverride,
   onRevertDomain,
@@ -482,11 +521,17 @@ function PaperDetail({
   excluded: boolean;
   overrides: QualityOverride[];
   paperOverrides: QualityOverride[];
+  instruments: Instrument[];
+  reassessing: boolean;
+  onReassess: (instrumentId: string) => void;
   onToggleExclude: () => void;
   onOverride: (o: QualityOverride) => void;
   onRevertDomain: (domainId: string) => void;
 }) {
   const overall = recomputeOverall(report, overrides);
+  const currentInstrumentId = report.instrument_id
+    || instruments.find(i => i.short_name === report.rubric)?.id
+    || "";
 
   return (
     <>
@@ -504,7 +549,13 @@ function PaperDetail({
             <div className="flex flex-wrap items-center gap-2 text-xs mt-2">
               <OverallBadge judgment={overall.judgment} />
               <Badge variant="outline">{report.study_design || "Other"}</Badge>
-              <Badge variant="outline">{report.rubric}</Badge>
+              <FrameworkSelector
+                instruments={instruments}
+                currentId={currentInstrumentId}
+                fallbackLabel={report.rubric}
+                reassessing={reassessing}
+                onChange={onReassess}
+              />
               <Badge variant="outline">{report.source}</Badge>
               {!report.used_full_text && (
                 <Badge variant="outline" className="bg-amber-50 text-amber-700 border-amber-200">
@@ -536,6 +587,58 @@ function PaperDetail({
         )}
       </div>
     </>
+  );
+}
+
+// Lets the reviewer override the auto-routed appraisal framework for one paper.
+// The backend still defaults by study design; this re-runs with a chosen tool.
+const AXIS_LABEL: Record<string, string> = {
+  internal_validity: "Risk of bias / internal validity",
+  reporting: "Reporting completeness",
+  certainty: "Certainty of evidence",
+};
+
+function FrameworkSelector({
+  instruments,
+  currentId,
+  fallbackLabel,
+  reassessing,
+  onChange,
+}: {
+  instruments: Instrument[];
+  currentId: string;
+  fallbackLabel: string;
+  reassessing: boolean;
+  onChange: (instrumentId: string) => void;
+}) {
+  // No instrument list yet (backend not reached) → show the plain badge.
+  if (instruments.length === 0) {
+    return <Badge variant="outline">{fallbackLabel}</Badge>;
+  }
+  const axes = ["internal_validity", "reporting", "certainty"].filter(
+    ax => instruments.some(i => i.axis === ax),
+  );
+  return (
+    <div className="inline-flex items-center gap-1">
+      <Select value={currentId} onValueChange={(v) => { if (v && v !== currentId) onChange(v); }} disabled={reassessing}>
+        <SelectTrigger className="h-6 px-2 py-0 text-xs w-auto gap-1 border-dashed" title="Appraisal framework — reviewer can override the auto-routed choice">
+          {reassessing ? <Loader2 className="size-3 animate-spin" /> : null}
+          <SelectValue placeholder={fallbackLabel} />
+        </SelectTrigger>
+        <SelectContent>
+          {axes.map(ax => (
+            <div key={ax}>
+              <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{AXIS_LABEL[ax]}</div>
+              {instruments.filter(i => i.axis === ax).map(i => (
+                <SelectItem key={i.id} value={i.id} disabled={i.scaffold}>
+                  {i.short_name}{i.scaffold ? " (coming soon)" : i.legacy ? " (legacy)" : ""}
+                </SelectItem>
+              ))}
+            </div>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
   );
 }
 

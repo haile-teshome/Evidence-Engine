@@ -210,6 +210,19 @@ async function postJSON<T = any>(path: string, body: any, signal?: AbortSignal):
   return json as T;
 }
 
+async function getJSON<T = any>(path: string, signal?: AbortSignal): Promise<T> {
+  const res = await fetch(`${apiConfig.baseUrl}${path}`, { method: "GET", signal });
+  const text = await res.text();
+  let json: any = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* non-json */ }
+  if (!res.ok) {
+    const msg = json?.detail || json?.error || text || `Request failed (${res.status})`;
+    console.error(`API ${path} failed:`, msg);
+    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+  }
+  return json as T;
+}
+
 // ---------------------------------------------------------------------------
 // AIService
 // ---------------------------------------------------------------------------
@@ -489,11 +502,32 @@ export const AIService = {
 // QualityService
 // ---------------------------------------------------------------------------
 
+// A quality-appraisal instrument as described by the backend (`GET /api/instruments`).
+export type InstrumentSignal = { id: string; text: string; options: string[]; labels: Record<string, string>; concern: string };
+export type InstrumentDomain = { id: string; name: string; signals: InstrumentSignal[] };
+export type Instrument = {
+  id: string;
+  name: string;
+  short_name: string;
+  axis: "internal_validity" | "reporting" | "certainty";
+  scale: string[];
+  reference: string;
+  applies_to: string[];
+  scaffold: boolean;
+  legacy: boolean;
+  domains: InstrumentDomain[];
+};
+
 export const QualityService = {
+  async listInstruments(signal?: AbortSignal): Promise<Instrument[]> {
+    const r = await getJSON<{ instruments: Instrument[] }>("/instruments", signal);
+    return r.instruments || [];
+  },
+
   async assessPaper(
     paper: Paper,
     signal?: AbortSignal,
-    opts: { fullText?: string; rubricOverride?: string } = {},
+    opts: { fullText?: string; rubricOverride?: string; studyDesign?: string; instrumentId?: string } = {},
   ): Promise<QualityReport> {
     return postJSON<QualityReport>(
       "/quality/assess",
@@ -501,6 +535,8 @@ export const QualityService = {
         paper,
         full_text: opts.fullText,
         rubric_override: opts.rubricOverride,
+        study_design: opts.studyDesign,
+        instrument_id: opts.instrumentId,
         model: apiConfig.model,
       },
       signal,

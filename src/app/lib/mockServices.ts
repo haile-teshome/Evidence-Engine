@@ -29,6 +29,7 @@ export type {
   FullTextResult,
   QualityIssue,
   QualityReport, SignalAnswer, GradeOutcome,
+  Instrument, InstrumentDomain, InstrumentSignal,
   QualityOverride,
   RoBJudgment,
   RoBDomain,
