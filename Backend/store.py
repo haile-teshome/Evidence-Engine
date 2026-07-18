@@ -659,3 +659,68 @@ def post_adjudication(pid: str, body: AdjudicationCreate, request: Request):
     }
     kv_set(key, rec)
     return {"adjudication": rec}
+
+
+# ---------------------------------------------------------------------------
+# Dual independent risk-of-bias assessment (scaffold)
+# ---------------------------------------------------------------------------
+# Reuses the multi-reviewer project model: each reviewer stores a per-paper RoB
+# assessment (instrument + per-domain judgments); conflicts are flagged where two
+# reviewers disagree on a domain. Mirrors the screening decisions/conflicts flow;
+# the appraisal UI wiring lands in a later pass.
+
+class RobAssessmentCreate(BaseModel):
+    paper_id: Optional[str] = None
+    instrument_id: Optional[str] = None
+    domains: Optional[dict] = None          # {domain_id: judgment}
+    overall: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@router.post("/projects/{pid}/rob-assessments")
+def post_rob_assessment(pid: str, body: RobAssessmentCreate, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead", "reviewer", "adjudicator"])
+    if not body.paper_id or not body.instrument_id:
+        raise HTTPException(status_code=400, detail="paper_id and instrument_id required")
+    key = f"rob_assessment:{pid}:{body.paper_id}:{uid}"
+    existing = kv_get(key)
+    now = _now()
+    rec = {
+        "paper_id": body.paper_id, "reviewer_user_id": uid,
+        "instrument_id": body.instrument_id,
+        "domains": body.domains or {}, "overall": body.overall,
+        "notes": body.notes or "", "assessed_at": now,
+        "created_at": (existing or {}).get("created_at") or now,
+    }
+    kv_set(key, rec)
+    return {"assessment": rec}
+
+
+@router.get("/projects/{pid}/rob-assessments")
+def get_rob_assessments(pid: str, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ROLES)
+    return {"assessments": kv_get_by_prefix(f"rob_assessment:{pid}:")}
+
+
+@router.get("/projects/{pid}/rob-conflicts")
+def get_rob_conflicts(pid: str, request: Request):
+    """Flag papers where two reviewers disagree on any domain judgment."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead", "adjudicator"])
+    by_paper: dict = {}
+    for a in kv_get_by_prefix(f"rob_assessment:{pid}:"):
+        by_paper.setdefault(a["paper_id"], []).append(a)
+    conflicts = []
+    for paper_id, assessments in by_paper.items():
+        if len(assessments) < 2:
+            continue
+        domain_ids = set().union(*[set((a.get("domains") or {}).keys()) for a in assessments])
+        disagreements = [
+            did for did in domain_ids
+            if len({(a.get("domains") or {}).get(did) for a in assessments}) > 1
+        ]
+        if disagreements:
+            conflicts.append({"paper_id": paper_id, "domains": disagreements, "assessments": assessments})
+    return {"conflicts": conflicts}
