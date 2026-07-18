@@ -456,7 +456,7 @@ export const AIService = {
     }));
   },
 
-  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{ status: "found" | "missing"; text?: string; reason?: string; source?: string }> {
+  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{ status: "found" | "missing"; text?: string; reason?: string; source?: string; pdf_key?: string }> {
     return postJSON("/fulltext/fetch", {
       Title: paper.Title, URL: paper.URL, Source: paper.Source, paper_id: paper.paper_id || null,
     }, signal);

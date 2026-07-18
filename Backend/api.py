@@ -2498,6 +2498,56 @@ def _fetch_epmc_fulltext_text(paper_id: str) -> Optional[str]:
 
 # ---- endpoint --------------------------------------------------------------
 
+from pathlib import Path as _Path
+from fastapi.responses import Response as _Response
+
+# Acquired PDFs are cached on disk so the UI can display the actual file (not just
+# extracted text). Keyed by the caller's paper_id, served from /api/fulltext/pdf.
+_PDF_CACHE_DIR = _Path(os.path.expanduser("~")) / ".evidence-engine" / "pdfcache"
+
+
+def _pdf_cache_key(paper_id: Optional[str], url: Optional[str]) -> str:
+    base = (paper_id or url or "").strip()
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", base)[:80].strip("_.")
+    return safe or hashlib.md5((url or paper_id or secrets.token_hex(8)).encode()).hexdigest()
+
+
+def _cache_pdf(paper_id: Optional[str], url: Optional[str], pdf: bytes) -> Optional[str]:
+    if not pdf:
+        return None
+    try:
+        _PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        key = _pdf_cache_key(paper_id, url)
+        (_PDF_CACHE_DIR / f"{key}.pdf").write_bytes(pdf)
+        return key
+    except Exception as e:
+        print(f"[cache_pdf] {e}")
+        return None
+
+
+def _found(text: str, source: str, paper_id: Optional[str] = None,
+           url: Optional[str] = None, pdf: Optional[bytes] = None) -> dict:
+    resp = {"status": "found", "text": text, "source": source}
+    key = _cache_pdf(paper_id, url, pdf) if pdf else None
+    if key:
+        resp["pdf_key"] = key
+    return resp
+
+
+@app.get("/api/fulltext/pdf/{key}")
+def fulltext_pdf(key: str):
+    """Serve a cached acquired PDF for inline display in the UI."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key)[:80]
+    path = _PDF_CACHE_DIR / f"{safe}.pdf"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="PDF not cached")
+    return _Response(
+        content=path.read_bytes(),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{safe}.pdf"'},
+    )
+
+
 @app.post("/api/fulltext/fetch")
 def fulltext_fetch(req: FullTextRequest):
     """Strategy ladder, in order of decreasing reliability:
@@ -2544,7 +2594,7 @@ def fulltext_fetch(req: FullTextRequest):
             text = _extract_text_from_pdf(pdf)
             if text:
                 print(f"[fulltext_fetch] {debug_label} tier2 PMC PDF ({pmcid}) -> {len(text)} chars")
-                return {"status": "found", "text": text, "source": f"PMC PDF ({pmcid})"}
+                return _found(text, f"PMC PDF ({pmcid})", req.paper_id, req.URL, pdf)
 
     # Tier 3 — Unpaywall via DOI. Prefer the caller-supplied DOI, then the
     # one mined from URL, then the one returned by the EuPMC metadata lookup.
@@ -2557,7 +2607,7 @@ def fulltext_fetch(req: FullTextRequest):
             if text:
                 host = src_url.split("/", 3)[2] if "://" in src_url else src_url
                 print(f"[fulltext_fetch] {debug_label} tier3 Unpaywall PDF ({host}) -> {len(text)} chars")
-                return {"status": "found", "text": text, "source": f"Unpaywall PDF ({host})"}
+                return _found(text, f"Unpaywall PDF ({host})", req.paper_id, req.URL, pdf)
 
     # Tier 4 — arXiv PDF.
     if (req.Source or "").lower() == "arxiv" or "arxiv.org" in (req.URL or "").lower():
@@ -2568,7 +2618,7 @@ def fulltext_fetch(req: FullTextRequest):
                 text = _extract_text_from_pdf(pdf)
                 if text:
                     print(f"[fulltext_fetch] {debug_label} tier4 arXiv PDF ({arxiv_id}) -> {len(text)} chars")
-                    return {"status": "found", "text": text, "source": f"arXiv PDF ({arxiv_id})"}
+                    return _found(text, f"arXiv PDF ({arxiv_id})", req.paper_id, req.URL, pdf)
 
     # Tier 5 — HTML scrape, but only on hosts that might actually carry
     # real article content. Abstract landing pages are skipped because they
@@ -2585,7 +2635,7 @@ def fulltext_fetch(req: FullTextRequest):
                     text = _extract_text_from_pdf(r.content)
                     if text:
                         print(f"[fulltext_fetch] {debug_label} tier5 publisher PDF ({host}) -> {len(text)} chars")
-                        return {"status": "found", "text": text, "source": f"Publisher PDF ({host})"}
+                        return _found(text, f"Publisher PDF ({host})", req.paper_id, req.URL, r.content)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.content, "html.parser")
                     for s in soup(["script", "style", "nav", "footer", "header"]):

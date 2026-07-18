@@ -24,6 +24,9 @@ export type FullTextRecord = {
   status: "found" | "missing" | "pending";
   text?: string;
   reason?: string;
+  /** Path to the acquired PDF cached by the backend (relative to the API base),
+   *  when the full text came from a real PDF source. Absent for XML/HTML tiers. */
+  pdf_url?: string;
   /** Where the full text was retrieved from on this fetch: e.g.
    *  "Europe PMC (XML)", "PMC PDF (PMC1234567)", "Unpaywall PDF (nature.com)",
    *  "arXiv PDF (2304.12345)", "HTML scrape (publisher.com)". Different from
