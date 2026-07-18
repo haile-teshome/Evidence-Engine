@@ -99,7 +99,7 @@ export function AbstractPage() {
           s.unifiedSearchQuery || s.query,
           s.simulation,
           s.pico,
-          { signal, elsevierToken: s.elsevierToken, ezproxyConnected: s.ezproxyConnected },
+          { signal },
         );
         if (signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
         if (truncated.length > 0) {

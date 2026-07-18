@@ -214,16 +214,6 @@ type Ctx = {
   // PRISMA
   prisma: PrismaCounts; setPrisma: React.Dispatch<React.SetStateAction<PrismaCounts>>;
 
-  // Elsevier institutional access.
-  // EZProxy mode (primary — no registration needed): after the user clicks
-  // "Connect via UCSF" and completes MyAccess, the browser holds a live
-  // proxy.library.ucsf.edu session cookie.  The frontend fetches Embase/
-  // Scopus directly through the proxied URL and merges with backend results.
-  ezproxyConnected: boolean; setEzproxyConnected: (v: boolean) => void;
-  // OAuth mode (optional upgrade): set when ELSEVIER_OAUTH_CLIENT_ID is
-  // configured and the user completes the OAuth popup flow.
-  elsevierToken: string; setElsevierToken: (v: string) => void;
-
   // Session persistence
   currentSessionId: string | null; setCurrentSessionId: (v: string | null) => void;
   currentSessionTitle: string; setCurrentSessionTitle: (v: string) => void;
@@ -413,8 +403,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     } catch { /* ignore */ }
   }, [currentSessionId]);
 
-  const [ezproxyConnected, setEzproxyConnected] = useState(false);
-  const [elsevierToken, setElsevierToken] = useState("");
 
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null);
   const [currentProjectName, setCurrentProjectName] = useState<string>("");
@@ -669,8 +657,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,
     currentSessionId, setCurrentSessionId, currentSessionTitle, setCurrentSessionTitle,
-    ezproxyConnected, setEzproxyConnected,
-    elsevierToken, setElsevierToken,
     currentProjectId, setCurrentProjectId,
     currentProjectName, setCurrentProjectName,
     currentProjectRole, setCurrentProjectRole,

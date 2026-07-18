@@ -6,7 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
 import { Badge } from "./ui/badge";
-import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, Link, Link2Off, PenLine } from "lucide-react";
+import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, PenLine } from "lucide-react";
 import { ALL_SOURCES } from "../lib/mockServices";
 import { useStore, PageId } from "../lib/store";
 import { SessionsPanel } from "./SessionsPanel";
@@ -92,21 +92,9 @@ export function Sidebar() {
     s.setSources(s.sources.includes(src) ? s.sources.filter(x => x !== src) : [...s.sources, src]);
   };
 
-  // Databases that need an institutional connection (EZProxy) or an Elsevier
-  // token to return results. They stay hidden until a connection exists, so the
-  // list only shows sources that actually work.
-  const GATED_SOURCES = ["Scopus", "Embase"];
-  const institutionConnected = s.ezproxyConnected || !!s.elsevierToken;
-  const visibleSources = ALL_SOURCES.filter(
-    src => !GATED_SOURCES.includes(src) || institutionConnected,
-  );
-
-  const disconnectInstitution = () => {
-    s.setEzproxyConnected(false);
-    s.setElsevierToken("");
-    // Drop the now-unavailable databases so they don't linger as hidden-active.
-    s.setSources(s.sources.filter(x => !GATED_SOURCES.includes(x)));
-  };
+  // Only open-access sources are offered, so every listed database works without
+  // any institutional login or subscription.
+  const visibleSources = ALL_SOURCES;
 
   return (
     <aside className="w-72 shrink-0 border-r bg-muted/30 overflow-y-auto h-screen sticky top-0">
@@ -215,56 +203,6 @@ export function Sidebar() {
               default, and the rerank endpoint auto-detects the natural
               relevance break from the score distribution itself. See
               `_auto_relevance_cutoff` in Backend/api.py. */}
-          <div className="mt-3 pt-3 border-t">
-              {institutionConnected ? (
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-emerald-600 flex items-center gap-1">
-                    <Link className="size-3" />
-                    {s.elsevierToken ? "Elsevier connected" : "UCSF Library connected"}
-                  </span>
-                  <button
-                    className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
-                    onClick={disconnectInstitution}
-                    title="Disconnect"
-                  >
-                    <Link2Off className="size-3" />Disconnect
-                  </button>
-                </div>
-              ) : (
-                <>
-                <p className="text-[11px] text-muted-foreground mb-2 leading-snug">
-                  Connect your institution to unlock Scopus and Embase.
-                </p>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full text-xs"
-                  onClick={() => {
-                    const backendOrigin = `${window.location.protocol}//${window.location.hostname}:8000`;
-                    const popup = window.open(
-                      `${backendOrigin}/api/auth/ezproxy/start`,
-                      "ucsf_auth",
-                      "width=560,height=680,left=200,top=100",
-                    );
-                    const handler = (e: MessageEvent) => {
-                      if (e.data?.type === "ezproxy_connected") {
-                        window.removeEventListener("message", handler);
-                        s.setEzproxyConnected(true);
-                        popup?.close();
-                      } else if (e.data?.type === "elsevier_oauth") {
-                        window.removeEventListener("message", handler);
-                        if (e.data.token) s.setElsevierToken(e.data.token);
-                        popup?.close();
-                      }
-                    };
-                    window.addEventListener("message", handler);
-                  }}
-                >
-                  <Link className="size-3 mr-1.5" />Connect via UCSF Library
-                </Button>
-                </>
-              )}
-            </div>
         </Card>
 
         <Card className="p-3">
