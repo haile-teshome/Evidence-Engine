@@ -127,6 +127,7 @@ export type QualityReport = {
   overall_judgment: RoBJudgment;
   overall_rationale: string;
   used_full_text: boolean;
+  assessed_at?: string;        // ISO-8601, stamped client-side when saved (for the saved-appraisals list)
 };
 
 // GRADE certainty for one OUTCOME (outcome-level, not study-level).

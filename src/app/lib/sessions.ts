@@ -16,6 +16,7 @@ export type SessionData = {
   uniquePapers: any[] | null;
   duplicatesCount: number;
   qualityReports: any[] | null;
+  qualityArchive?: any[];
   excludedByQuality: string[];
   rerankThreshold?: number;
   rerankResults?: any | null;

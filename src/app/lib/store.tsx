@@ -141,6 +141,10 @@ type Ctx = {
   uniquePapers: Paper[] | null; setUniquePapers: (v: Paper[] | null) => void;
   duplicatesCount: number; setDuplicatesCount: (v: number) => void;
   qualityReports: QualityReport[] | null; setQualityReports: (v: QualityReport[] | null) => void;
+  // Saved alternate appraisals: prior runs kept when a paper is re-appraised with a
+  // different instrument. Invariant: at most one entry per (paper_id, instrument_id),
+  // and none duplicating the active report in qualityReports.
+  qualityArchive: QualityReport[]; setQualityArchive: React.Dispatch<React.SetStateAction<QualityReport[]>>;
   excludedByQuality: Set<string>; setExcludedByQuality: React.Dispatch<React.SetStateAction<Set<string>>>;
 
   // Reviewer overrides on screening decisions. Keyed by paper_id; value is
@@ -323,6 +327,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [uniquePapers, setUniquePapers] = useState<Paper[] | null>(null);
   const [duplicatesCount, setDuplicatesCount] = useState(0);
   const [qualityReports, setQualityReports] = useState<QualityReport[] | null>(null);
+  const [qualityArchive, setQualityArchive] = useState<QualityReport[]>([]);
   const [excludedByQuality, setExcludedByQuality] = useState<Set<string>>(new Set());
   const [qualityOverrides, setQualityOverrides] = useState<QualityOverride[]>([]);
   const [gradeOutcomes, setGradeOutcomes] = useState<GradeOutcome[]>([]);
@@ -474,7 +479,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const snapshot = () => ({
     history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
     sources, numPerSource, model,
-    rawPapers, uniquePapers, duplicatesCount, qualityReports,
+    rawPapers, uniquePapers, duplicatesCount, qualityReports, qualityArchive,
     excludedByQuality: Array.from(excludedByQuality),
     qualityOverrides,
     gradeOutcomes,
@@ -529,6 +534,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setUniquePapers(prev => pick(d.uniquePapers, prev));
     setDuplicatesCount(d.duplicatesCount ?? 0);
     setQualityReports(prev => pick(d.qualityReports, prev));
+    setQualityArchive(prev => pick(d.qualityArchive, prev, []) ?? []);
     setExcludedByQuality(new Set(d.excludedByQuality || []));
     setQualityOverrides(Array.isArray(d.qualityOverrides) ? d.qualityOverrides : []);
     setGradeOutcomes(prev => pick(d.gradeOutcomes, prev, []) ?? []);
@@ -591,7 +597,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(t);
   }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
       sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
-      qualityReports, excludedByQuality, qualityOverrides, gradeOutcomes, abstractOverrides,
+      qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
       snowballResults, snowballScreened, extractedPapers, prisma,
       simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
@@ -623,7 +629,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setInclusion([]); setExclusion([]); setQuery(""); setUnifiedSearchQuery(""); setPerDbQueries({});
     setSimulation(null); setDbTestResults(null); setAgenticTrace(null); setAgenticSummary(null);
     setRawPapers(null); setUniquePapers(null); setDuplicatesCount(0);
-    setQualityReports(null); setExcludedByQuality(new Set()); setQualityOverrides([]); setGradeOutcomes([]);
+    setQualityReports(null); setQualityArchive([]); setExcludedByQuality(new Set()); setQualityOverrides([]); setGradeOutcomes([]);
     setAbstractOverrides({}); setFullTextOverrides({});
     setRerankThreshold(-0.2); setRerankResults(null);
     setMetaOutcome(""); setMetaMeasure(""); setMetaTau2Method("DL");
@@ -646,7 +652,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
     simulationRuns, addSimulationRun, clearSimulationRuns,
     rawPapers, setRawPapers, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
-    qualityReports, setQualityReports, excludedByQuality, setExcludedByQuality,
+    qualityReports, setQualityReports, qualityArchive, setQualityArchive, excludedByQuality, setExcludedByQuality,
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
     gradeOutcomes, setGradeOutcomes,
     abstractOverrides, setAbstractOverride, clearAbstractOverride, setAbstractOverrides,
