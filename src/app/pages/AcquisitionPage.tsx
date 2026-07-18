@@ -4,6 +4,7 @@ import { useState } from "react";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { useStore, FullTextRecord } from "../lib/store";
 import { AIService } from "../lib/mockServices";
+import { apiConfig } from "../lib/apiClient";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -218,13 +219,14 @@ export function AcquisitionPage() {
         });
         s.setFullTexts(prev => ({ ...prev, [p.paper_id]: { paper_id: p.paper_id, title: p.Title, url: p.URL, source: p.Source, status: "pending" } }));
         try {
-          const res = await AIService.fetchFullText({ Title: p.Title, URL: p.URL, Source: p.Source }, signal);
+          const res = await AIService.fetchFullText({ Title: p.Title, URL: p.URL, Source: p.Source, paper_id: p.paper_id }, signal);
           s.setFullTexts(prev => ({
             ...prev,
             [p.paper_id]: {
               paper_id: p.paper_id, title: p.Title, url: p.URL, source: p.Source,
               status: res.status, text: res.text, reason: res.reason,
               retrieved_via: res.source,
+              pdf_url: res.pdf_key ? `${apiConfig.baseUrl}/fulltext/pdf/${encodeURIComponent(res.pdf_key)}` : undefined,
             },
           }));
           if (res.status === "found") found++;
@@ -421,7 +423,7 @@ export function AcquisitionPage() {
 
               <div className="flex-1 overflow-hidden flex flex-col min-h-0">
                 {selected.status === "found" && selected.text ? (
-                  <FullTextViewer text={selected.text} url={selected.url} pdfUrl={pdfUrls[selected.paper_id]} />
+                  <FullTextViewer text={selected.text} url={selected.url} pdfUrl={pdfUrls[selected.paper_id] || selected.pdf_url} />
                 ) : selectedPaper ? (
                   <div className="flex-1 overflow-auto">
                     <DropZone
