@@ -1,4 +1,7 @@
 import { useState } from "react";
+// Bundle the pdf.js worker so PDF text extraction works offline (pdf.js v5 removed
+// `disableWorker` — a real worker URL must be set on GlobalWorkerOptions).
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { useStore, FullTextRecord } from "../lib/store";
 import { AIService } from "../lib/mockServices";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
@@ -29,8 +32,8 @@ async function extractFileText(file: File): Promise<string> {
   if (file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf") {
     const buf = await file.arrayBuffer();
     const pdfjs: any = await import("pdfjs-dist");
-    if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = "";
-    const doc = await pdfjs.getDocument({ data: buf, disableWorker: true, isEvalSupported: false }).promise;
+    pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+    const doc = await pdfjs.getDocument({ data: buf, isEvalSupported: false }).promise;
     const pages: string[] = [];
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
