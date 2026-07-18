@@ -223,6 +223,7 @@ export function SessionsPanel() {
     s.rawPapers,
     s.uniquePapers,
     s.qualityReports,
+    s.qualityArchive,
     s.results,
     s.fullTextResults,
     s.snowballResults,

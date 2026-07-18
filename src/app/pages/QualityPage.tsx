@@ -147,7 +147,20 @@ export function QualityPage() {
     return () => { alive = false; };
   }, []);
 
+  // Archive `outgoing` (keep at most one saved entry per (paper, instrument)) so a
+  // reviewer never loses a prior appraisal when switching frameworks.
+  function archiveReport(outgoing: QualityReport | undefined, incomingInstrumentId?: string) {
+    if (!outgoing || !outgoing.instrument_id) return;
+    if (outgoing.instrument_id === incomingInstrumentId) return;   // same tool re-run — nothing to keep
+    s.setQualityArchive(prev => [
+      outgoing,
+      ...prev.filter(a => !(a.paper_id === outgoing.paper_id
+        && (a.instrument_id === outgoing.instrument_id || a.instrument_id === incomingInstrumentId))),
+    ]);
+  }
+
   // Re-appraise ONE paper with a reviewer-chosen instrument (framework override).
+  // The previous appraisal is saved (not discarded), so both remain available.
   async function reassessOne(report: QualityReport, instrumentId: string) {
     const paper: Paper = { id: report.paper_id, source: report.source, title: report.title, abstract: report.abstract, url: report.url };
     setReassessingId(report.paper_id);
@@ -156,6 +169,8 @@ export function QualityPage() {
       const fresh = await QualityService.assessPaper(paper, undefined, {
         fullText, instrumentId, studyDesign: report.study_design,
       });
+      fresh.assessed_at = new Date().toISOString();
+      archiveReport(report, fresh.instrument_id);
       s.setQualityReports((s.qualityReports || []).map(r => r.paper_id === report.paper_id ? fresh : r));
       // A new instrument means new domains — old overrides for this paper no longer apply.
       s.setQualityOverrides(s.qualityOverrides.filter(o => o.paper_id !== report.paper_id));
@@ -167,6 +182,29 @@ export function QualityPage() {
     } finally {
       setReassessingId(null);
     }
+  }
+
+  // Make a saved appraisal the active one (swapping the current active into the archive).
+  function activateArchived(archived: QualityReport) {
+    const pid = archived.paper_id;
+    const current = (s.qualityReports || []).find(r => r.paper_id === pid);
+    // Remove the one we're activating; archive the outgoing current in its place.
+    s.setQualityArchive(prev => {
+      const withoutTarget = prev.filter(a => !(a.paper_id === pid && a.instrument_id === archived.instrument_id));
+      if (current && current.instrument_id && current.instrument_id !== archived.instrument_id) {
+        return [current, ...withoutTarget.filter(a => !(a.paper_id === pid && a.instrument_id === current.instrument_id))];
+      }
+      return withoutTarget;
+    });
+    s.setQualityReports((s.qualityReports || []).map(r => r.paper_id === pid ? archived : r));
+    s.setQualityOverrides(s.qualityOverrides.filter(o => o.paper_id !== pid));
+    applyExcludeRule(excludeRule);
+    toast.success(`Switched to ${archived.instrument || archived.rubric} appraisal.`);
+  }
+
+  function deleteArchived(archived: QualityReport) {
+    s.setQualityArchive(prev => prev.filter(a => !(a.paper_id === archived.paper_id && a.instrument_id === archived.instrument_id)));
+    toast.info("Saved appraisal removed.");
   }
 
   // Papers to appraise: the ones that PASSED screening. Risk-of-bias is only
@@ -464,7 +502,10 @@ export function QualityPage() {
                     paperOverrides={overrides.filter(o => o.paper_id === selected.paper_id)}
                     instruments={instruments}
                     reassessing={reassessingId === selected.paper_id}
+                    archived={s.qualityArchive.filter(a => a.paper_id === selected.paper_id)}
                     onReassess={(instrumentId) => reassessOne(selected, instrumentId)}
+                    onActivateArchived={activateArchived}
+                    onDeleteArchived={deleteArchived}
                     onToggleExclude={() => toggleExclude(selected.paper_id)}
                     onOverride={(o) => {
                       s.addQualityOverride(o);
@@ -512,7 +553,10 @@ function PaperDetail({
   paperOverrides,
   instruments,
   reassessing,
+  archived,
   onReassess,
+  onActivateArchived,
+  onDeleteArchived,
   onToggleExclude,
   onOverride,
   onRevertDomain,
@@ -523,7 +567,10 @@ function PaperDetail({
   paperOverrides: QualityOverride[];
   instruments: Instrument[];
   reassessing: boolean;
+  archived: QualityReport[];
   onReassess: (instrumentId: string) => void;
+  onActivateArchived: (r: QualityReport) => void;
+  onDeleteArchived: (r: QualityReport) => void;
   onToggleExclude: () => void;
   onOverride: (o: QualityOverride) => void;
   onRevertDomain: (domainId: string) => void;
@@ -574,6 +621,14 @@ function PaperDetail({
           Overall: <span className="not-italic font-medium">{overall.judgment}</span>
           {" — "}{overall.rationale}
         </div>
+        {archived.length > 0 && (
+          <SavedAppraisals
+            active={report}
+            archived={archived}
+            onActivate={onActivateArchived}
+            onDelete={onDeleteArchived}
+          />
+        )}
       </div>
 
       <div className="flex-1 overflow-auto p-4 space-y-3">
@@ -638,6 +693,51 @@ function FrameworkSelector({
           ))}
         </SelectContent>
       </Select>
+    </div>
+  );
+}
+
+// Prior appraisals kept when a paper is re-appraised under a different framework.
+// The active one drives the analysis; saved ones can be viewed (made active) or removed.
+function SavedAppraisals({
+  active,
+  archived,
+  onActivate,
+  onDelete,
+}: {
+  active: QualityReport;
+  archived: QualityReport[];
+  onActivate: (r: QualityReport) => void;
+  onDelete: (r: QualityReport) => void;
+}) {
+  const fmt = (iso?: string) => {
+    if (!iso) return "";
+    try { return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); }
+    catch { return ""; }
+  };
+  return (
+    <div className="rounded-md border bg-muted/40 p-2 space-y-1.5">
+      <div className="text-[11px] font-medium text-muted-foreground">Saved appraisals ({archived.length + 1})</div>
+      <div className="flex flex-wrap gap-1.5">
+        <span className="inline-flex items-center gap-1.5 rounded border border-primary/40 bg-primary/10 px-2 py-1 text-xs">
+          <span className="font-medium">{active.instrument || active.rubric}</span>
+          <Badge variant="outline" className={`${judgmentDotClass(active.overall_judgment)} h-4 px-1 text-[10px]`}>{active.overall_judgment}</Badge>
+          <span className="text-[10px] text-muted-foreground">active</span>
+        </span>
+        {archived.map(a => (
+          <span key={`${a.paper_id}:${a.instrument_id}`}
+            className="group inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-background">
+            <button className="font-medium hover:underline" title="Make this the active appraisal" onClick={() => onActivate(a)}>
+              {a.instrument || a.rubric}
+            </button>
+            <Badge variant="outline" className={`${judgmentDotClass(a.overall_judgment)} h-4 px-1 text-[10px]`}>{a.overall_judgment}</Badge>
+            {a.assessed_at && <span className="text-[10px] text-muted-foreground">{fmt(a.assessed_at)}</span>}
+            <button className="text-muted-foreground hover:text-destructive" title="Remove this saved appraisal" onClick={() => onDelete(a)}>
+              <Trash2 className="size-3" />
+            </button>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
