@@ -17,8 +17,11 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import {
   Copy, ShieldCheck, AlertTriangle, ArrowRight, Search,
-  Pencil, History, RotateCcw,
+  Pencil, History, RotateCcw, FileDown, Plus, Trash2,
 } from "lucide-react";
+import {
+  gradeCertainty, GRADE_DOWNGRADE_DOMAINS, GRADE_UPGRADE_FACTORS, GradeOutcome,
+} from "../lib/apiClient";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -39,15 +42,35 @@ function judgmentClass(j: RoBJudgment): string {
   }
 }
 
+// Generic severity tier for ANY instrument's ordinal judgment (case-insensitive),
+// so the same colours work across RoB 2 / ROBINS-I / QUADAS-2 / PROBAST.
+const _SEV: Record<string, number> = {
+  "low": 0,
+  "some concerns": 1, "unclear": 1,
+  "moderate": 2,
+  "high": 3, "serious": 3,
+  "critical": 4,
+};
+function sevRank(j: string): number {
+  const v = _SEV[(j || "").toLowerCase()];
+  return v === undefined ? -1 : v;   // -1 = no information / not applicable
+}
 function judgmentDotClass(j: RoBJudgment): string {
-  switch (j) {
-    case "Low": return "bg-emerald-500";
-    case "Some Concerns": return "bg-amber-500";
-    case "High": return "bg-rose-500";
-    case "No information": return "bg-slate-300";
-    case "Not applicable": return "bg-slate-200";
-    default: return "bg-slate-200";
-  }
+  const r = sevRank(j);
+  if (r < 0) return "bg-slate-300";
+  if (r === 0) return "bg-emerald-500";
+  if (r <= 2) return "bg-amber-500";
+  if (r === 3) return "bg-rose-500";
+  return "bg-rose-700";              // critical
+}
+
+// Colour for a signalling-question answer (Y/PY/PN/N/NI) — a neutral indicator
+// of the answer itself, independent of per-signal polarity.
+function answerClass(a: string): string {
+  const v = (a || "").toUpperCase();
+  if (v === "Y" || v === "PY") return "bg-emerald-100 text-emerald-700 border-emerald-200";
+  if (v === "N" || v === "PN") return "bg-amber-100 text-amber-700 border-amber-200";
+  return "bg-slate-100 text-slate-600 border-slate-200";
 }
 
 function shortDomainLabel(name: string): string {
@@ -82,26 +105,24 @@ function effectiveJudgment(
   return o ? o.new_judgment : domain.judgment;
 }
 
-/** Recompute the overall judgment using EFFECTIVE per-domain judgments. */
+/** Overall judgment. With NO reviewer overrides this is the backend's precise
+ *  instrument roll-up; once a domain is overridden we recompute generically as
+ *  the worst (highest-severity) effective domain judgment. */
 function recomputeOverall(
   report: QualityReport,
   overrides: QualityOverride[],
 ): { judgment: RoBJudgment; rationale: string } {
-  const effective = report.domains.map(d => effectiveJudgment(report.paper_id, d, overrides));
-  if (effective.length === 0) return { judgment: "No information", rationale: "No domains assessed." };
-  if (effective.every(j => j === "No information"))
-    return { judgment: "No information", rationale: "All domains lacked sufficient information for an appraisal." };
-  if (effective.some(j => j === "High")) {
-    const n = effective.filter(j => j === "High").length;
-    return { judgment: "High", rationale: `${n} domain(s) judged High risk of bias.` };
+  const hasOverride = report.domains.some(d => latestOverride(report.paper_id, d.id, overrides));
+  if (!hasOverride) {
+    return { judgment: report.overall_judgment, rationale: report.overall_rationale };
   }
-  if (effective.some(j => j === "Some Concerns")) {
-    const n = effective.filter(j => j === "Some Concerns").length;
-    return { judgment: "Some Concerns", rationale: `${n} domain(s) raised some concerns.` };
-  }
-  if (effective.every(j => j === "Low"))
-    return { judgment: "Low", rationale: "All domains judged Low risk of bias." };
-  return { judgment: "Some Concerns", rationale: "Mixed domain judgments without any High risk." };
+  const eff = report.domains.map(d => effectiveJudgment(report.paper_id, d, overrides));
+  const rated = eff.filter(j => sevRank(j) >= 0);
+  if (rated.length === 0) return { judgment: "No information", rationale: "All domains lacked sufficient information." };
+  let worst = rated[0];
+  for (const j of rated) if (sevRank(j) > sevRank(worst)) worst = j;
+  const n = rated.filter(j => j === worst).length;
+  return { judgment: worst, rationale: `${n} domain(s) judged ${worst} (after reviewer edits).` };
 }
 
 // ---- page -----------------------------------------------------------------
@@ -218,13 +239,14 @@ export function QualityPage() {
   // Summary stats use effective overall judgments.
   const summaryCounts = useMemo(() => {
     if (!reports) return null;
+    // Tier by severity so every instrument's scale rolls into the same buckets.
     let low = 0, some = 0, high = 0, no_info = 0;
     for (const r of reports) {
-      const j = recomputeOverall(r, overrides).judgment;
-      if (j === "Low") low++;
-      else if (j === "Some Concerns") some++;
-      else if (j === "High") high++;
-      else if (j === "No information") no_info++;
+      const rank = sevRank(recomputeOverall(r, overrides).judgment);
+      if (rank < 0) no_info++;
+      else if (rank === 0) low++;
+      else if (rank <= 2) some++;    // some concerns / unclear / moderate
+      else high++;                    // high / serious / critical
     }
     return { low, some, high, no_info };
   }, [reports, overrides]);
@@ -426,10 +448,17 @@ export function QualityPage() {
             </div>
           </Card>
 
-          <div className="grid grid-cols-2 gap-2">
+          <RobvisSummary reports={reports} overrides={overrides} />
+
+          <GradePanel />
+
+          <div className="grid grid-cols-3 gap-2">
             <Button variant="outline" onClick={runAssess} disabled={running}>Re-run Appraisal</Button>
-            <Button onClick={proceedToScreening}>
-              <ArrowRight className="size-4 mr-2" />Proceed to Abstract Screening ({kept})
+            <Button variant="outline" onClick={() => exportAssessments(reports, overrides)}>
+              <FileDown className="size-4 mr-2" />Export (CSV + JSON)
+            </Button>
+            <Button variant="outline" onClick={() => s.setPage("prisma")}>
+              <ArrowRight className="size-4 mr-2" />Continue to Diagramming
             </Button>
           </div>
         </>
@@ -582,6 +611,30 @@ function DomainList({
                   <span className="not-italic text-muted-foreground ml-2">— {d.section}</span>
                 )}
               </div>
+            )}
+            {d.signals && d.signals.length > 0 && (
+              <details className="mt-2 group">
+                <summary className="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
+                  {d.signals.length} signalling question{d.signals.length === 1 ? "" : "s"} → judgment
+                </summary>
+                <div className="mt-1.5 space-y-1.5">
+                  {d.signals.map(sig => (
+                    <div key={sig.id} className="text-xs">
+                      <div className="flex items-start gap-1.5">
+                        <span className={`shrink-0 mt-0.5 px-1 py-px rounded border text-[10px] font-mono font-semibold ${answerClass(sig.answer)}`} title={sig.rationale}>
+                          {sig.answer}
+                        </span>
+                        <span className="text-foreground/80 leading-snug"><span className="font-mono text-muted-foreground">{sig.id}</span> {sig.text}</span>
+                      </div>
+                      {sig.quote && (
+                        <div className="italic text-muted-foreground pl-6 mt-0.5 break-words">
+                          "{sig.quote}"{sig.section && <span className="ml-1 not-italic">— {sig.section}</span>}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
             )}
           </div>
         );
@@ -770,3 +823,208 @@ function AuditLogPanel({
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// robvis-style traffic-light summary, generated from the stored per-domain
+// judgments. Papers are grouped by instrument (each tool has its own domains).
+// ---------------------------------------------------------------------------
+function RobvisSummary({ reports, overrides }: { reports: QualityReport[]; overrides: QualityOverride[] }) {
+  const byInstrument = new Map<string, QualityReport[]>();
+  for (const r of reports) {
+    const key = r.instrument || r.rubric || "Appraisal";
+    (byInstrument.get(key) ?? byInstrument.set(key, []).get(key)!).push(r);
+  }
+  return (
+    <Card className="p-4 space-y-4">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="size-4 text-primary" />
+        <h3 className="font-medium">Risk-of-bias summary (traffic light)</h3>
+      </div>
+      {[...byInstrument.entries()].map(([inst, rs]) => {
+        const domains = rs[0]?.domains ?? [];
+        return (
+          <div key={inst} className="space-y-1.5 overflow-x-auto">
+            <div className="text-xs font-medium text-muted-foreground">{inst} · {rs.length} paper{rs.length === 1 ? "" : "s"}</div>
+            <table className="text-xs border-separate border-spacing-0.5">
+              <thead>
+                <tr>
+                  <th className="text-left font-normal text-muted-foreground pr-2 max-w-[16rem]">Study</th>
+                  {domains.map((d, i) => (
+                    <th key={d.id} className="px-1 font-normal text-muted-foreground" title={d.name}>D{i + 1}</th>
+                  ))}
+                  <th className="px-1 font-normal text-muted-foreground">Overall</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rs.map(r => {
+                  const overall = recomputeOverall(r, overrides).judgment;
+                  return (
+                    <tr key={r.paper_id}>
+                      <td className="pr-2 truncate max-w-[16rem] align-middle" title={r.title}>{r.title}</td>
+                      {r.domains.map(d => {
+                        const j = effectiveJudgment(r.paper_id, d, overrides);
+                        return (
+                          <td key={d.id} className="text-center">
+                            <span title={`${d.name}: ${j}`} className={`inline-block size-4 rounded-full ${judgmentDotClass(j)}`} />
+                          </td>
+                        );
+                      })}
+                      <td className="text-center">
+                        <span title={`Overall: ${overall}`} className={`inline-block size-4 rounded-full ring-1 ring-foreground/20 ${judgmentDotClass(overall)}`} />
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })}
+      <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground pt-1 border-t">
+        {[["Low", "bg-emerald-500"], ["Some concerns / Unclear / Moderate", "bg-amber-500"], ["High / Serious", "bg-rose-500"], ["Critical", "bg-rose-700"], ["No information", "bg-slate-300"]].map(([l, c]) => (
+          <span key={l} className="flex items-center gap-1"><span className={`inline-block size-2.5 rounded-full ${c}`} />{l}</span>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// GRADE — certainty of the body of evidence, per user-defined OUTCOME. This axis
+// is outcome-level (not study-level); certainty rolls up deterministically from
+// the downgrade/upgrade selections (mirrors Backend /api/grade).
+// ---------------------------------------------------------------------------
+const GRADE_DOMAIN_LABELS: Record<string, string> = {
+  risk_of_bias: "Risk of bias", inconsistency: "Inconsistency", indirectness: "Indirectness",
+  imprecision: "Imprecision", publication_bias: "Publication bias",
+};
+const GRADE_UPGRADE_LABELS: Record<string, string> = {
+  large_effect: "Large effect", dose_response: "Dose-response", plausible_confounding: "Plausible confounding",
+};
+function gradeCertaintyClass(c: string): string {
+  return c === "High" ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+    : c === "Moderate" ? "bg-lime-100 text-lime-700 border-lime-200"
+    : c === "Low" ? "bg-amber-100 text-amber-700 border-amber-200"
+    : "bg-rose-100 text-rose-700 border-rose-200";
+}
+
+function GradePanel() {
+  const s = useStore();
+  const outcomes = s.gradeOutcomes;
+  const [name, setName] = useState("");
+
+  function add() {
+    const o = name.trim();
+    if (!o) return;
+    s.setGradeOutcomes(prev => [...prev, {
+      id: Date.now().toString(36), outcome: o, starting: "randomized",
+      downgrades: {}, upgrades: {},
+    }]);
+    setName("");
+  }
+  function update(id: string, patch: Partial<GradeOutcome>) {
+    s.setGradeOutcomes(prev => prev.map(o => o.id === id ? { ...o, ...patch } : o));
+  }
+
+  return (
+    <Card className="p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <ShieldCheck className="size-4 text-primary" />
+        <h3 className="font-medium">Certainty of evidence — GRADE (per outcome)</h3>
+        <span className="text-xs text-muted-foreground">Outcome-level, separate from study risk of bias.</span>
+      </div>
+      <div className="flex gap-2">
+        <Input value={name} onChange={e => setName(e.target.value)} placeholder="Add an outcome, e.g. All-cause mortality"
+          onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); add(); } }} className="h-8 text-sm" />
+        <Button size="sm" onClick={add} disabled={!name.trim()}><Plus className="size-3.5 mr-1" />Add outcome</Button>
+      </div>
+      {outcomes.length === 0 && <div className="text-xs text-muted-foreground">No outcomes yet — add the outcomes you'll rate.</div>}
+      <div className="space-y-3">
+        {outcomes.map(o => {
+          const certainty = gradeCertainty(o);
+          return (
+            <div key={o.id} className="rounded border p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-medium text-sm">{o.outcome}</div>
+                <div className="flex items-center gap-2">
+                  <span className={`px-2 py-0.5 rounded border text-xs font-medium ${gradeCertaintyClass(certainty)}`}>{certainty} certainty</span>
+                  <button onClick={() => s.setGradeOutcomes(prev => prev.filter(x => x.id !== o.id))} title="Remove outcome" className="text-muted-foreground hover:text-rose-600"><Trash2 className="size-3.5" /></button>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-muted-foreground">Starting certainty:</span>
+                {(["randomized", "observational"] as const).map(st => (
+                  <Button key={st} size="sm" variant={o.starting === st ? "default" : "outline"} className="h-6 px-2 text-xs"
+                    onClick={() => update(o.id, { starting: st })}>{st === "randomized" ? "Randomized (High)" : "Observational (Low)"}</Button>
+                ))}
+              </div>
+              <div className="grid md:grid-cols-2 gap-x-6 gap-y-1">
+                <div>
+                  <div className="text-[11px] font-medium text-muted-foreground mb-1">Downgrade</div>
+                  {GRADE_DOWNGRADE_DOMAINS.map(k => (
+                    <div key={k} className="flex items-center justify-between text-xs py-0.5">
+                      <span>{GRADE_DOMAIN_LABELS[k]}</span>
+                      <div className="flex gap-0.5">
+                        {[0, -1, -2].map(v => (
+                          <button key={v} onClick={() => update(o.id, { downgrades: { ...o.downgrades, [k]: v } })}
+                            className={`w-8 h-6 rounded border text-[11px] ${(o.downgrades[k] || 0) === v ? "bg-primary text-primary-foreground border-primary" : "bg-card hover:bg-muted"}`}>
+                            {v === 0 ? "0" : v}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                {o.starting === "observational" && (
+                  <div>
+                    <div className="text-[11px] font-medium text-muted-foreground mb-1">Upgrade (observational)</div>
+                    {GRADE_UPGRADE_FACTORS.map(k => (
+                      <div key={k} className="flex items-center justify-between text-xs py-0.5">
+                        <span>{GRADE_UPGRADE_LABELS[k]}</span>
+                        <div className="flex gap-0.5">
+                          {[0, 1, 2].map(v => (
+                            <button key={v} onClick={() => update(o.id, { upgrades: { ...o.upgrades, [k]: v } })}
+                              className={`w-8 h-6 rounded border text-[11px] ${(o.upgrades[k] || 0) === v ? "bg-primary text-primary-foreground border-primary" : "bg-card hover:bg-muted"}`}>
+                              {v === 0 ? "0" : `+${v}`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+// ---- export ---------------------------------------------------------------
+function _dl(name: string, content: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function exportAssessments(reports: QualityReport[], overrides: QualityOverride[]) {
+  // JSON: full assessments incl. signalling answers + overrides.
+  _dl("quality_assessments.json", JSON.stringify({ reports, overrides }, null, 2), "application/json");
+  // CSV: one row per (paper, domain) with the effective judgment.
+  const esc = (x: any) => `"${String(x ?? "").replace(/"/g, '""')}"`;
+  const rows = [["paper_id", "title", "instrument", "study_design", "domain", "judgment", "overridden", "supporting_quote", "section", "overall"].join(",")];
+  for (const r of reports) {
+    const overall = recomputeOverall(r, overrides).judgment;
+    for (const d of r.domains) {
+      const j = effectiveJudgment(r.paper_id, d, overrides);
+      const overridden = !!latestOverride(r.paper_id, d.id, overrides);
+      rows.push([r.paper_id, r.title, r.instrument || r.rubric, r.study_design, d.name, j, overridden, d.supporting_quote, d.section, overall].map(esc).join(","));
+    }
+  }
+  _dl("quality_assessments.csv", rows.join("\n"), "text/csv");
+  toast.success(`Exported ${reports.length} appraisals (CSV + JSON).`);
+}

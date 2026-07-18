@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
-import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride } from "./mockServices";
+import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride, GradeOutcome } from "./mockServices";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method } from "./apiClient";
 import { FRESH_LAUNCH } from "./launchFlags";
 
@@ -163,6 +163,7 @@ type Ctx = {
   addQualityOverride: (o: QualityOverride) => void;
   clearQualityOverrides: (paperId?: string) => void;
   setQualityOverrides: (v: QualityOverride[]) => void;
+  gradeOutcomes: GradeOutcome[]; setGradeOutcomes: React.Dispatch<React.SetStateAction<GradeOutcome[]>>;
 
   // Relevance reranking — LEADS-scored papers from the home-analysis pipeline.
   // Threshold is user-tunable in the sidebar; rerankResults holds the full
@@ -324,6 +325,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [qualityReports, setQualityReports] = useState<QualityReport[] | null>(null);
   const [excludedByQuality, setExcludedByQuality] = useState<Set<string>>(new Set());
   const [qualityOverrides, setQualityOverrides] = useState<QualityOverride[]>([]);
+  const [gradeOutcomes, setGradeOutcomes] = useState<GradeOutcome[]>([]);
 
   const [abstractOverrides, setAbstractOverrides] = useState<Record<string, "INCLUDE" | "EXCLUDE">>({});
   const setAbstractOverride = (paperId: string, decision: "INCLUDE" | "EXCLUDE") => {
@@ -475,6 +477,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     rawPapers, uniquePapers, duplicatesCount, qualityReports,
     excludedByQuality: Array.from(excludedByQuality),
     qualityOverrides,
+    gradeOutcomes,
     abstractOverrides,
     fullTextOverrides,
     rerankThreshold, rerankResults,
@@ -528,6 +531,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setQualityReports(prev => pick(d.qualityReports, prev));
     setExcludedByQuality(new Set(d.excludedByQuality || []));
     setQualityOverrides(Array.isArray(d.qualityOverrides) ? d.qualityOverrides : []);
+    setGradeOutcomes(prev => pick(d.gradeOutcomes, prev, []) ?? []);
     setAbstractOverrides(d.abstractOverrides && typeof d.abstractOverrides === "object" ? d.abstractOverrides : {});
     setFullTextOverrides(d.fullTextOverrides && typeof d.fullTextOverrides === "object" ? d.fullTextOverrides : {});
     if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
@@ -587,7 +591,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(t);
   }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
       sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
-      qualityReports, excludedByQuality, qualityOverrides, abstractOverrides,
+      qualityReports, excludedByQuality, qualityOverrides, gradeOutcomes, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
       snowballResults, snowballScreened, extractedPapers, prisma,
       simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
@@ -619,7 +623,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setInclusion([]); setExclusion([]); setQuery(""); setUnifiedSearchQuery(""); setPerDbQueries({});
     setSimulation(null); setDbTestResults(null); setAgenticTrace(null); setAgenticSummary(null);
     setRawPapers(null); setUniquePapers(null); setDuplicatesCount(0);
-    setQualityReports(null); setExcludedByQuality(new Set()); setQualityOverrides([]);
+    setQualityReports(null); setExcludedByQuality(new Set()); setQualityOverrides([]); setGradeOutcomes([]);
     setAbstractOverrides({}); setFullTextOverrides({});
     setRerankThreshold(-0.2); setRerankResults(null);
     setMetaOutcome(""); setMetaMeasure(""); setMetaTau2Method("DL");
@@ -644,6 +648,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     rawPapers, setRawPapers, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
     qualityReports, setQualityReports, excludedByQuality, setExcludedByQuality,
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
+    gradeOutcomes, setGradeOutcomes,
     abstractOverrides, setAbstractOverride, clearAbstractOverride, setAbstractOverrides,
     fullTextOverrides, setFullTextOverride, clearFullTextOverride, setFullTextOverrides,
     rerankThreshold, setRerankThreshold, rerankResults, setRerankResults,

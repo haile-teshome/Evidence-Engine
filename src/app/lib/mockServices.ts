@@ -28,7 +28,7 @@ export type {
   CriterionEvidence,
   FullTextResult,
   QualityIssue,
-  QualityReport,
+  QualityReport, SignalAnswer, GradeOutcome,
   QualityOverride,
   RoBJudgment,
   RoBDomain,

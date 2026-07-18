@@ -25,6 +25,7 @@ export type SessionData = {
   snowballScreened: any[] | null;
   extractedPapers: any[] | null;
   textExtractions: any[];
+  gradeOutcomes?: any[];
   // Search-planning outputs.
   simulation?: Record<string, number> | null;
   simulationRuns?: any[];

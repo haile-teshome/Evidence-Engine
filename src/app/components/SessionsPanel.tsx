@@ -229,6 +229,7 @@ export function SessionsPanel() {
     s.snowballScreened,
     s.extractedPapers,
     s.textExtractions,
+    s.gradeOutcomes,
     // Search-planning outputs (per-database queries + optimization runs).
     s.perDbQueries,
     s.unifiedSearchQuery,
