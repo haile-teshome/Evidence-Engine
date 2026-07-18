@@ -139,6 +139,8 @@ export function QualityPage() {
   // backend routes one by study design, but the reviewer can override per paper.
   const [instruments, setInstruments] = useState<Instrument[]>([]);
   const [reassessingId, setReassessingId] = useState<string | null>(null);
+  // Global framework applied to every paper on Re-run ("__auto" = match by design).
+  const [bulkInstrument, setBulkInstrument] = useState<string>("__auto");
   useEffect(() => {
     let alive = true;
     QualityService.listInstruments()
@@ -223,17 +225,23 @@ export function QualityPage() {
     return { papers: [], stage: "abstract" };
   }
 
-  async function runAssess() {
+  // Appraise all included papers. With `forceInstrumentId` every paper is assessed
+  // with that one tool (a global framework override); otherwise each is auto-routed
+  // by study design. Any prior appraisal replaced by a *different* instrument is
+  // saved to the archive so results are never lost.
+  async function runAssess(forceInstrumentId?: string) {
     const { papers, stage } = includedPapers();
     if (papers.length === 0) {
       toast.error("No included papers yet — run Abstract or Full-Text screening first.");
       return;
     }
+    const priorById = new Map((s.qualityReports || []).map(r => [r.paper_id, r]));
+    const forcedName = forceInstrumentId ? (instruments.find(i => i.id === forceInstrumentId)?.short_name || forceInstrumentId) : "";
     const { abort } = s.startTask("quality-assess", [{ id: "qa", label: "Quality assessment", status: "running" }]);
     const signal = abort.signal;
     try {
       const reports: QualityReport[] = [];
-      s.updateTask("quality-assess", { progress: { done: 0, total: papers.length }, detail: `Appraising ${papers.length} included papers…` });
+      s.updateTask("quality-assess", { progress: { done: 0, total: papers.length }, detail: `Appraising ${papers.length} included papers${forcedName ? ` with ${forcedName}` : ""}…` });
       for (let i = 0; i < papers.length; i++) {
         if (signal.aborted) break;
         const p = papers[i];
@@ -245,12 +253,32 @@ export function QualityPage() {
           // Full text (when acquired) yields far better risk-of-bias judgments
           // than the abstract alone — the backend uses it when provided.
           const fullText = s.fullTexts[p.id]?.text || undefined;
-          reports.push(await QualityService.assessPaper(p, signal, { fullText }));
+          const fresh = await QualityService.assessPaper(p, signal, {
+            fullText,
+            instrumentId: forceInstrumentId,
+            studyDesign: priorById.get(p.id)?.study_design,
+          });
+          fresh.assessed_at = new Date().toISOString();
+          reports.push(fresh);
         } catch (e: any) {
           if (signal.aborted) break;
           console.error(`quality-assess ${i + 1} failed:`, e?.message);
         }
         s.updateTask("quality-assess", { progress: { done: i + 1, total: papers.length } });
+      }
+      // Save each outgoing appraisal that a different instrument is replacing.
+      if (priorById.size > 0) {
+        s.setQualityArchive(prev => {
+          let next = [...prev];
+          for (const fresh of reports) {
+            const prior = priorById.get(fresh.paper_id);
+            if (prior && prior.instrument_id && fresh.instrument_id && prior.instrument_id !== fresh.instrument_id) {
+              next = next.filter(a => !(a.paper_id === prior.paper_id && (a.instrument_id === prior.instrument_id || a.instrument_id === fresh.instrument_id)));
+              next = [prior, ...next];
+            }
+          }
+          return next;
+        });
       }
       s.setQualityReports(reports);
       s.setExcludedByQuality(new Set());
@@ -262,7 +290,7 @@ export function QualityPage() {
       } else {
         s.updateTask("quality-assess", { status: "done" });
         const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
-        toast.success(`Appraised ${reports.length} included papers (${stage})${withFT ? ` — ${withFT} using full text` : ""}.`);
+        toast.success(`Appraised ${reports.length} included papers${forcedName ? ` with ${forcedName}` : ` (${stage})`}${withFT ? ` — ${withFT} using full text` : ""}.`);
       }
     } catch (e: any) {
       s.updateTask("quality-assess", { status: "error", detail: e?.message });
@@ -363,7 +391,7 @@ export function QualityPage() {
               onCancel={() => s.cancelTask("quality-assess")}
             />
           )}
-          <Button onClick={runAssess} disabled={running || includedPapers().papers.length === 0} size="lg" className="w-full">
+          <Button onClick={() => runAssess()} disabled={running || includedPapers().papers.length === 0} size="lg" className="w-full">
             <ShieldCheck className="size-4 mr-2" />{running ? "Appraising…" : "Appraise Risk of Bias on Included Papers"}
           </Button>
         </>
@@ -404,6 +432,46 @@ export function QualityPage() {
                     {label}
                   </Button>
                 ))}
+              </div>
+            </div>
+
+            {/* Global framework: apply one tool to every paper, or auto-match by design. */}
+            <div className="mt-3 pt-3 border-t flex flex-col md:flex-row md:items-center justify-between gap-2">
+              <div>
+                <div className="text-sm font-medium">Appraisal framework</div>
+                <div className="text-xs text-muted-foreground">
+                  Re-run all included papers with one instrument, or auto-match each to its study design.
+                  Prior appraisals are saved per paper.
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
+                  <SelectTrigger className="h-9 w-[240px] text-xs">
+                    <SelectValue placeholder="Auto — match by design" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__auto">Auto — match each paper's design</SelectItem>
+                    {["internal_validity", "reporting", "certainty"]
+                      .filter(ax => instruments.some(i => i.axis === ax))
+                      .map(ax => (
+                        <div key={ax}>
+                          <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{AXIS_LABEL[ax]}</div>
+                          {instruments.filter(i => i.axis === ax).map(i => (
+                            <SelectItem key={i.id} value={i.id}>
+                              {i.short_name}{i.legacy ? " (legacy)" : ""}
+                            </SelectItem>
+                          ))}
+                        </div>
+                      ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  size="sm"
+                  onClick={() => runAssess(bulkInstrument !== "__auto" ? bulkInstrument : undefined)}
+                  disabled={running}
+                >
+                  <RotateCcw className="size-4 mr-2" />{running ? "Re-running…" : "Re-run"}
+                </Button>
               </div>
             </div>
             {overrides.length > 0 && (
@@ -530,7 +598,7 @@ export function QualityPage() {
           <GradePanel />
 
           <div className="grid grid-cols-3 gap-2">
-            <Button variant="outline" onClick={runAssess} disabled={running}>Re-run Appraisal</Button>
+            <Button variant="outline" onClick={() => runAssess()} disabled={running}>Re-run Appraisal</Button>
             <Button variant="outline" onClick={() => exportAssessments(reports, overrides)}>
               <FileDown className="size-4 mr-2" />Export (CSV + JSON)
             </Button>
