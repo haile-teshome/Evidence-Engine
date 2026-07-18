@@ -296,8 +296,8 @@ export function SimulationPage() {
     setTesting(src);
     try {
       const q = s.perDbQueries[src] || s.unifiedSearchQuery;
-      const yieldRes = await DataAggregator.simulateYield(q, [src], undefined, s.elsevierToken, s.ezproxyConnected);
-      const { papers } = await DataAggregator.fetchAll(q, [src], s.pico, 25, undefined, s.elsevierToken, s.ezproxyConnected);
+      const yieldRes = await DataAggregator.simulateYield(q, [src]);
+      const { papers } = await DataAggregator.fetchAll(q, [src], s.pico, 25);
       s.setDbTestResults(prev => ({
         ...(prev || {}),
         [src]: { query: q, total_found: yieldRes[src] || 0, papers: papers.slice(0, 25).map(p => ({ title: p.title, url: p.url })) },
@@ -312,7 +312,7 @@ export function SimulationPage() {
     for (const src of apiSources) {
       const q = (s.perDbQueries[src] || s.unifiedSearchQuery || "").trim();
       if (!q) { out[src] = 0; continue; }
-      const r = await DataAggregator.simulateYield(q, [src], undefined, s.elsevierToken, s.ezproxyConnected);
+      const r = await DataAggregator.simulateYield(q, [src]);
       out[src] = r[src] || 0;
     }
     s.setSimulation(out);
@@ -417,7 +417,7 @@ export function SimulationPage() {
             <Textarea value={s.unifiedSearchQuery} onChange={e => updateUnified(e.target.value)} rows={3} className="font-mono text-sm mt-1 min-h-[5.5rem] max-h-40 overflow-auto" />
           </div>
           <div className="flex flex-col gap-2 w-44 shrink-0 pt-5">
-            <Button variant="outline" onClick={adaptToDatabases} disabled={adapting || optRunning} className="w-full justify-start" title="Convert the base query into each database's native syntax (PubMed tags, Scopus TITLE-ABS-KEY, Embase :ti,ab, arXiv abs:, …)">
+            <Button variant="outline" onClick={adaptToDatabases} disabled={adapting || optRunning} className="w-full justify-start" title="Convert the base query into each database's native syntax (PubMed tags, Europe PMC, Semantic Scholar, arXiv abs:, …)">
               {adapting ? <Loader2 className="size-4 mr-2 animate-spin" /> : <Wand2 className="size-4 mr-2" />}Adapt to databases
             </Button>
             <Button variant="outline" onClick={runAiOptimize} disabled={optRunning} className="w-full justify-start">

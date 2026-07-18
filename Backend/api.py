@@ -934,133 +934,6 @@ Return ONLY a JSON object with these exact keys:
 
 
 # ---------------------------------------------------------------------------
-# Elsevier institutional access — EZProxy + optional OAuth upgrade
-# ---------------------------------------------------------------------------
-# PRIMARY (no registration needed): EZProxy SSO
-#   The user clicks "Connect via UCSF", a popup opens the library proxy login
-#   page, they authenticate via MyAccess, and EZProxy redirects back here.
-#   After that the browser holds a live EZProxy session cookie for
-#   proxy.library.ucsf.edu, so all subsequent browser-side fetches to
-#   *.proxy.library.ucsf.edu carry institutional access automatically.
-#   The frontend makes Elsevier API calls directly from the browser through
-#   the proxied URL and merges them with the backend results.
-#
-# OPTIONAL UPGRADE: Elsevier OAuth 2.0
-#   If ELSEVIER_OAUTH_CLIENT_ID is set, the authorize/callback endpoints
-#   below also handle PKCE-based OAuth so a Bearer token can be used on
-#   backend-side requests instead.  Leave blank to use EZProxy only.
-
-_UCSF_EZPROXY_LOGIN = "https://proxy.library.ucsf.edu/login"
-
-_oauth_states: Dict[str, str] = {}  # state → code_verifier (for OAuth upgrade path)
-
-
-@app.get("/api/auth/ezproxy/start")
-def ezproxy_start():
-    """Redirect the browser to the UCSF EZProxy login, targeting our callback."""
-    callback = _urlparse.quote(f"{Config.APP_BASE_URL}/api/auth/ezproxy/callback", safe="")
-    return RedirectResponse(url=f"{_UCSF_EZPROXY_LOGIN}?url={callback}")
-
-
-@app.get("/api/auth/ezproxy/callback")
-def ezproxy_callback():
-    """EZProxy redirects here after MyAccess SSO.
-    The browser now holds a live proxy.library.ucsf.edu session cookie.
-    We just close the popup and tell the parent window we're connected.
-    """
-    return HTMLResponse("""<!DOCTYPE html>
-<html><head><title>UCSF Library — Connected</title></head>
-<body style="font-family:sans-serif;padding:2rem;background:#f8fafc">
-  <h3 style="color:#16a34a">&#10003; Connected to UCSF Library</h3>
-  <p style="color:#475569">You can close this window. Embase and Scopus are now accessible.</p>
-  <script>
-    window.opener?.postMessage({type: 'ezproxy_connected'}, '*');
-    setTimeout(() => window.close(), 800);
-  </script>
-</body></html>""")
-
-
-# Optional OAuth upgrade — only active when ELSEVIER_OAUTH_CLIENT_ID is set.
-
-_ELSEVIER_AUTH_URL = "https://id.elsevier.com/as/authorization.oauth2"
-_ELSEVIER_TOKEN_URL = "https://id.elsevier.com/as/token.oauth2"
-
-
-@app.get("/api/auth/elsevier/status")
-def elsevier_status():
-    return {"oauth_configured": bool(Config.ELSEVIER_OAUTH_CLIENT_ID)}
-
-
-@app.get("/api/auth/elsevier/authorize")
-def elsevier_authorize():
-    if not Config.ELSEVIER_OAUTH_CLIENT_ID:
-        return HTMLResponse(
-            "<p style='font-family:sans-serif;padding:2rem'>"
-            "ELSEVIER_OAUTH_CLIENT_ID is not set — using EZProxy mode instead. "
-            "This endpoint is only needed if you want backend-side Bearer-token access.</p>",
-            status_code=503,
-        )
-    state = secrets.token_urlsafe(16)
-    code_verifier = secrets.token_urlsafe(48)
-    digest = hashlib.sha256(code_verifier.encode()).digest()
-    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-    _oauth_states[state] = code_verifier
-    redirect_uri = f"{Config.APP_BASE_URL}/api/auth/elsevier/callback"
-    params = {
-        "client_id": Config.ELSEVIER_OAUTH_CLIENT_ID,
-        "redirect_uri": redirect_uri,
-        "response_type": "code",
-        "scope": "openid",
-        "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    return RedirectResponse(url=_ELSEVIER_AUTH_URL + "?" + _urlparse.urlencode(params))
-
-
-@app.get("/api/auth/elsevier/callback")
-def elsevier_callback(code: str = "", state: str = "", error: str = ""):
-    if error:
-        return HTMLResponse(
-            f"<script>window.opener?.postMessage({{type:'elsevier_oauth',error:{_json.dumps(error)}}}, '*');window.close();</script>"
-        )
-    code_verifier = _oauth_states.pop(state, None)
-    if not code_verifier:
-        return HTMLResponse(
-            "<script>window.opener?.postMessage({type:'elsevier_oauth',error:'invalid_state'}, '*');window.close();</script>",
-            status_code=400,
-        )
-    redirect_uri = f"{Config.APP_BASE_URL}/api/auth/elsevier/callback"
-    try:
-        resp = requests.post(_ELSEVIER_TOKEN_URL, data={
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "client_id": Config.ELSEVIER_OAUTH_CLIENT_ID,
-            "client_secret": Config.ELSEVIER_OAUTH_CLIENT_SECRET,
-            "code_verifier": code_verifier,
-        }, timeout=15)
-        access_token = resp.json().get("access_token", "")
-    except Exception as e:
-        return HTMLResponse(
-            f"<script>window.opener?.postMessage({{type:'elsevier_oauth',error:'token_exchange_failed'}}, '*');window.close();</script>",
-            status_code=500,
-        )
-    if not access_token:
-        return HTMLResponse(
-            "<script>window.opener?.postMessage({type:'elsevier_oauth',error:'no_token'}, '*');window.close();</script>",
-            status_code=400,
-        )
-    return HTMLResponse(f"""<!DOCTYPE html>
-<html><head><title>Connected</title></head><body>
-<p style="font-family:sans-serif;padding:2rem;color:#16a34a">&#10003; Connected to Elsevier</p>
-<script>
-  window.opener?.postMessage({{type: 'elsevier_oauth', token: {_json.dumps(access_token)}}}, '*');
-  setTimeout(() => window.close(), 800);
-</script></body></html>""")
-
-
-# ---------------------------------------------------------------------------
 # Search / data aggregation
 # ---------------------------------------------------------------------------
 
@@ -1070,14 +943,13 @@ class FetchAllRequest(BaseModel):
     sources: List[str]
     max_per_source: int = 10
     limit: Optional[int] = None
-    elsevier_token: str = ""
 
 
 @app.post("/api/papers/fetch")
 def papers_fetch(req: FetchAllRequest):
     papers, counts = DataAggregator.fetch_all(
         req.query, req.sources, max_per_source=req.max_per_source,
-        uploaded_files=None, limit=req.limit, elsevier_token=req.elsevier_token,
+        uploaded_files=None, limit=req.limit,
     )
     return {
         "papers": [_paper_to_dict(p) for p in papers],
@@ -1088,12 +960,11 @@ def papers_fetch(req: FetchAllRequest):
 class SimulateYieldRequest(BaseModel):
     query: str
     sources: List[str]
-    elsevier_token: str = ""
 
 
 @app.post("/api/simulation/yield")
 def simulation_yield(req: SimulateYieldRequest):
-    counts = DataAggregator.simulate_yield(req.query, req.sources, elsevier_token=req.elsevier_token)
+    counts = DataAggregator.simulate_yield(req.query, req.sources)
     return {"counts": counts}
 
 
@@ -1114,8 +985,6 @@ _ENGINE_SYNTAX_RULES = {
     "medRxiv": "Preprint server with NO Boolean field search. Provide a short, focused keyword phrase of the 3-6 most important terms only.",
     "DOAJ": "DOAJ Elasticsearch query-string syntax. Fields bibjson.title:\"..\", bibjson.abstract:\"..\". Boolean AND/OR in caps, quotes for phrases. Drop PubMed brackets.",
     "CORE": "CORE query syntax. Fields title:\"..\", abstract:\"..\", yearPublished:>=2017. Boolean AND/OR/NOT, quotes for phrases. Drop PubMed brackets.",
-    "Scopus": "Scopus syntax. Wrap free-text in TITLE-ABS-KEY( .. ); use TITLE( ) for title-only. Boolean AND/OR/AND NOT. Dates via PUBYEAR > 2016, language via LANGUAGE(english). Drop PubMed brackets.",
-    "Embase": "Embase (Emtree) syntax. Free-text as 'term':ti,ab ; Emtree explosion as 'term'/exp. Boolean AND/OR/NOT. Dates [2017-2026]/py, language 'english':la. Lowercase terms. Drop PubMed brackets.",
 }
 
 
@@ -2555,7 +2424,9 @@ def fulltext_fetch(req: FullTextRequest):
       2. PMC PDF                       (parsed with pypdf)
       3. Unpaywall OA PDF              (any source, parsed with pypdf)
       4. arXiv PDF                     (for arXiv papers, parsed with pypdf)
-      5. HTML scrape                   (last resort; skips useless landing pages)
+      5. Direct open-access PDF link   (only when the record URL is itself a PDF)
+    Only open-access sources are used: structured EuPMC/PMC content, the Unpaywall
+    OA resolver, arXiv, and direct PDF links.
     Returns `source` describing which tier supplied the text so the UI can
     show e.g. "PMC PDF (PMC1234567)" instead of just "Europe PMC".
     """
@@ -2620,32 +2491,20 @@ def fulltext_fetch(req: FullTextRequest):
                     print(f"[fulltext_fetch] {debug_label} tier4 arXiv PDF ({arxiv_id}) -> {len(text)} chars")
                     return _found(text, f"arXiv PDF ({arxiv_id})", req.paper_id, req.URL, pdf)
 
-    # Tier 5 — HTML scrape, but only on hosts that might actually carry
-    # real article content. Abstract landing pages are skipped because they
-    # don't include the body text we'd need.
-    if req.URL and req.URL.startswith("http"):
+    # Tier 5 — direct PDF link, only when the record's own URL is itself a PDF.
+    if req.URL and req.URL.startswith("http") and req.URL.lower().split("?", 1)[0].rstrip("/").endswith(".pdf"):
         host = req.URL.split("/", 3)[2].lower() if "://" in req.URL else ""
-        skip_hosts = {"pubmed.ncbi.nlm.nih.gov", "europepmc.org", "www.ncbi.nlm.nih.gov"}
-        if host and host not in skip_hosts:
-            try:
-                r = requests.get(req.URL, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-                ct = (r.headers.get("content-type") or "").lower()
-                if r.status_code == 200 and "pdf" in ct:
-                    # Some publisher landing pages redirect to a PDF directly.
-                    text = _extract_text_from_pdf(r.content)
-                    if text:
-                        print(f"[fulltext_fetch] {debug_label} tier5 publisher PDF ({host}) -> {len(text)} chars")
-                        return _found(text, f"Publisher PDF ({host})", req.paper_id, req.URL, r.content)
-                if r.status_code == 200:
-                    soup = BeautifulSoup(r.content, "html.parser")
-                    for s in soup(["script", "style", "nav", "footer", "header"]):
-                        s.decompose()
-                    text = soup.get_text(separator="\n", strip=True)
-                    if text and len(text) > 500:
-                        print(f"[fulltext_fetch] {debug_label} tier5 HTML scrape ({host}) -> {len(text)} chars")
-                        return {"status": "found", "text": text[:50000], "source": f"HTML scrape ({host})"}
-            except Exception as e:
-                print(f"[fulltext_fetch html] {e}")
+        try:
+            ua = f"EvidenceEngine/1.0 (mailto:{Config.ENTREZ_EMAIL})" if getattr(Config, "ENTREZ_EMAIL", "") else "EvidenceEngine/1.0"
+            r = requests.get(req.URL, timeout=25, allow_redirects=True, headers={"User-Agent": ua})
+            ct = (r.headers.get("content-type") or "").lower()
+            if r.status_code == 200 and ("pdf" in ct or r.content[:5] == b"%PDF-"):
+                text = _extract_text_from_pdf(r.content)
+                if text:
+                    print(f"[fulltext_fetch] {debug_label} tier5 direct OA PDF ({host}) -> {len(text)} chars")
+                    return _found(text, f"Open-access PDF ({host})", req.paper_id, req.URL, r.content)
+        except Exception as e:
+            print(f"[fulltext_fetch pdf] {e}")
 
     print(f"[fulltext_fetch] {debug_label} -> no full text "
           f"(pid={pid or '-'}, doi={doi or '-'}, source={req.Source}, url_host="
@@ -3055,32 +2914,6 @@ def _classify_table(rows: List[List[str]], hint: str) -> str:
     return hint or "General"
 
 
-def _extract_html_tables(url: str, extraction_type: str) -> List[Dict[str, Any]]:
-    try:
-        r = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code != 200:
-            return []
-        soup = BeautifulSoup(r.content, "html.parser")
-        out = []
-        for i, t in enumerate(soup.find_all("table")):
-            rows = []
-            for tr in t.find_all("tr"):
-                cells = [c.get_text(strip=True) for c in tr.find_all(["td", "th"])]
-                if cells:
-                    rows.append(cells)
-            if rows:
-                out.append({
-                    "title": f"Table {i + 1}",
-                    "type": _classify_table(rows, extraction_type or ""),
-                    "data": rows,
-                    "caption": "",
-                })
-        return out
-    except Exception as e:
-        print(f"[extract_html_tables] {e}")
-        return []
-
-
 def _lookup_pmc_metadata(pmid: str) -> Dict[str, Optional[str]]:
     """Resolve a PubMed PMID to PMC ID + DOI via the EuPMC search endpoint.
 
@@ -3214,21 +3047,9 @@ def extract_tables(req: ExtractTablesRequest):
             tables.extend(tier1)
             print(f"[extract_tables] {pid} tier1 (EuPMC XML) -> {len(tier1)} tables")
 
-    # Tier 2: HTML scrape — but only for URLs that are likely to render real
-    # tables, not search/abstract landing pages. Skip pubmed.ncbi.nlm.nih.gov
-    # and europepmc.org pages because those don't include the article's tables.
-    if not tables and req.URL and req.URL.startswith("http"):
-        host = req.URL.split("/", 3)[2].lower() if "://" in req.URL else ""
-        skip_hosts = {"pubmed.ncbi.nlm.nih.gov", "europepmc.org", "www.ncbi.nlm.nih.gov"}
-        if host not in skip_hosts:
-            tier2 = _extract_html_tables(req.URL, req.extraction_type or "")
-            if tier2:
-                tables.extend(tier2)
-                print(f"[extract_tables] {pid or req.URL[:60]} tier2 (HTML) -> {len(tier2)} tables")
-
-    # Tier 3: LLM fallback over title + abstract + caller-supplied full text.
-    # The caller-supplied content is what makes this tier useful — passing
-    # only the title here was the original bug.
+    # Tier 2: LLM fallback over title + abstract + caller-supplied full text.
+    # The caller-supplied content (the open-access full text acquired earlier) is
+    # what makes this tier useful — passing only the title here was the original bug.
     if not tables:
         try:
             seed_parts: List[str] = [req.Title.strip()]

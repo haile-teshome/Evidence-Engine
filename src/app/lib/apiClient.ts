@@ -188,8 +188,6 @@ const SOURCES_POOL = [
   "medRxiv",
   "DOAJ",
   "CORE",
-  "Scopus",
-  "Embase",
   "Local PDFs",
 ];
 
@@ -568,146 +566,18 @@ export type RerankResult = {
   model_used: string;
 };
 
-// ---------------------------------------------------------------------------
-// EZProxy browser-side Elsevier fetch
-// ---------------------------------------------------------------------------
-// After the user authenticates through UCSF's EZProxy, their browser holds a
-// live session cookie for proxy.library.ucsf.edu.  These fetches route through
-// that proxy so the browser sends the cookie automatically — no API key or
-// institutional token required.  Results are merged with backend-fetched papers
-// inside fetchAll/simulateYield below.
-
-const EZPROXY_ELSEVIER = "https://api.elsevier.com.proxy.library.ucsf.edu";
-
-async function _ezproxyElsevierFetch(
-  query: string,
-  sources: string[],
-  maxPerSource: number,
-): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
-  const papers: Paper[] = [];
-  const sourceCounts: Record<string, number> = {};
-  const clean = query.replace(/\[[^\]]+\]/g, "").trim() || query;
-
-  const tasks: Promise<void>[] = [];
-
-  if (sources.includes("Scopus")) {
-    tasks.push((async () => {
-      try {
-        const url = `${EZPROXY_ELSEVIER}/content/search/scopus?` +
-          `query=${encodeURIComponent(`TITLE-ABS-KEY(${clean})`)}&count=${maxPerSource}` +
-          `&field=dc:title,dc:description,prism:doi,dc:identifier,prism:url`;
-        const resp = await fetch(url, { credentials: "include" });
-        if (!resp.ok) { sourceCounts["Scopus"] = 0; return; }
-        const data = await resp.json();
-        const entries: any[] = (data["search-results"]?.entry) || [];
-        for (const e of entries) {
-          const doi = (e["prism:doi"] || "").trim();
-          papers.push({
-            id: e["dc:identifier"] || doi || "",
-            source: "Scopus",
-            title: (e["dc:title"] || "").trim(),
-            abstract: (e["dc:description"] || "").trim(),
-            url: e["prism:url"] || (doi ? `https://doi.org/${doi}` : ""),
-          });
-        }
-        sourceCounts["Scopus"] = entries.length;
-      } catch { sourceCounts["Scopus"] = 0; }
-    })());
-  }
-
-  if (sources.includes("Embase")) {
-    tasks.push((async () => {
-      try {
-        const url = `${EZPROXY_ELSEVIER}/content/search/embase?` +
-          `query=${encodeURIComponent(clean)}&count=${maxPerSource}` +
-          `&field=dc:title,dc:description,prism:doi,dc:identifier,prism:url`;
-        const resp = await fetch(url, { credentials: "include" });
-        if (!resp.ok) { sourceCounts["Embase"] = 0; return; }
-        const data = await resp.json();
-        const entries: any[] = (data["search-results"]?.entry) || [];
-        for (const e of entries) {
-          const doi = (e["prism:doi"] || "").trim();
-          papers.push({
-            id: e["dc:identifier"] || doi || "",
-            source: "Embase",
-            title: (e["dc:title"] || "").trim(),
-            abstract: (e["dc:description"] || "").trim(),
-            url: e["prism:url"] || (doi ? `https://doi.org/${doi}` : ""),
-          });
-        }
-        sourceCounts["Embase"] = entries.length;
-      } catch { sourceCounts["Embase"] = 0; }
-    })());
-  }
-
-  await Promise.all(tasks);
-  return { papers, sourceCounts };
-}
-
-async function _ezproxyElsevierCount(
-  query: string,
-  sources: string[],
-): Promise<Record<string, number>> {
-  const counts: Record<string, number> = {};
-  const clean = query.replace(/\[[^\]]+\]/g, "").trim() || query;
-
-  const tasks: Promise<void>[] = [];
-
-  if (sources.includes("Scopus")) {
-    tasks.push((async () => {
-      try {
-        const url = `${EZPROXY_ELSEVIER}/content/search/scopus?` +
-          `query=${encodeURIComponent(`TITLE-ABS-KEY(${clean})`)}&count=1&field=dc:identifier`;
-        const resp = await fetch(url, { credentials: "include" });
-        if (!resp.ok) { counts["Scopus"] = 0; return; }
-        const data = await resp.json();
-        counts["Scopus"] = parseInt(data["search-results"]?.["opensearch:totalResults"] || "0", 10) || 0;
-      } catch { counts["Scopus"] = 0; }
-    })());
-  }
-
-  if (sources.includes("Embase")) {
-    tasks.push((async () => {
-      try {
-        const url = `${EZPROXY_ELSEVIER}/content/search/embase?` +
-          `query=${encodeURIComponent(clean)}&count=1&field=dc:identifier`;
-        const resp = await fetch(url, { credentials: "include" });
-        if (!resp.ok) { counts["Embase"] = 0; return; }
-        const data = await resp.json();
-        counts["Embase"] = parseInt(data["search-results"]?.["opensearch:totalResults"] || "0", 10) || 0;
-      } catch { counts["Embase"] = 0; }
-    })());
-  }
-
-  await Promise.all(tasks);
-  return counts;
-}
-
 export const DataAggregator = {
   // `maxPerSource` is a download budget, NOT a relevance cap. The downstream
   // rerank stage auto-detects the relevance break — anything that fetched
   // matters only insofar as LEADS can score it. Default raised to 50 so the
   // candidate pool is broad enough to find the natural break without missing
   // relevant papers from a single source.
-  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 50, signal?: AbortSignal, elsevierToken = "", ezproxyConnected = false): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
-    // When EZProxy is active the browser-side fetch handles Scopus/Embase;
-    // remove them from the backend request to avoid double-fetching.
-    const elsevierSources = ["Scopus", "Embase"];
-    const backendSources = ezproxyConnected ? sources.filter(s => !elsevierSources.includes(s)) : sources;
-
-    const result = await postJSON<{ papers: Paper[]; sourceCounts: Record<string, number> }>(
+  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 50, signal?: AbortSignal): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
+    return postJSON<{ papers: Paper[]; sourceCounts: Record<string, number> }>(
       "/papers/fetch",
-      { query, sources: backendSources, max_per_source: maxPerSource, elsevier_token: elsevierToken },
+      { query, sources, max_per_source: maxPerSource },
       signal,
     );
-
-    if (ezproxyConnected) {
-      const els = await _ezproxyElsevierFetch(query, sources, maxPerSource);
-      result.papers.push(...els.papers);
-      Object.assign(result.sourceCounts, els.sourceCounts);
-    }
-
-    return result;
   },
 
   // Fetch the FULL planning corpus for screening: for each source use its
@@ -721,7 +591,7 @@ export const DataAggregator = {
     baseQuery: string,
     yields: Record<string, number> | null,
     pico: Pico,
-    opts: { cap?: number; signal?: AbortSignal; elsevierToken?: string; ezproxyConnected?: boolean } = {},
+    opts: { cap?: number; signal?: AbortSignal } = {},
   ): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; truncated: string[] }> {
     const cap = opts.cap ?? 2000;
     const papers: Paper[] = [];
@@ -734,26 +604,16 @@ export const DataAggregator = {
       const planned = yields?.[src];
       const budget = planned && planned > 0 ? Math.min(planned, cap) : cap;
       if (planned && planned > cap) truncated.push(`${src} (${planned.toLocaleString()} → ${cap.toLocaleString()})`);
-      const res = await DataAggregator.fetchAll(q, [src], pico, budget, opts.signal, opts.elsevierToken, opts.ezproxyConnected);
+      const res = await DataAggregator.fetchAll(q, [src], pico, budget, opts.signal);
       papers.push(...res.papers);
       Object.assign(sourceCounts, res.sourceCounts);
     }
     return { papers, sourceCounts, truncated };
   },
 
-  async simulateYield(query: string, sources: string[], signal?: AbortSignal, elsevierToken = "", ezproxyConnected = false): Promise<Record<string, number>> {
-    const elsevierSources = ["Scopus", "Embase"];
-    const backendSources = ezproxyConnected ? sources.filter(s => !elsevierSources.includes(s)) : sources;
-
-    const r = await postJSON<{ counts: Record<string, number> }>("/simulation/yield", { query, sources: backendSources, elsevier_token: elsevierToken }, signal);
-    const counts = r.counts || {};
-
-    if (ezproxyConnected) {
-      const els = await _ezproxyElsevierCount(query, sources);
-      Object.assign(counts, els);
-    }
-
-    return counts;
+  async simulateYield(query: string, sources: string[], signal?: AbortSignal): Promise<Record<string, number>> {
+    const r = await postJSON<{ counts: Record<string, number> }>("/simulation/yield", { query, sources }, signal);
+    return r.counts || {};
   },
 
   // Score fetched papers for relevance against PICO using LEADS-native.

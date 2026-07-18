@@ -781,7 +781,7 @@ export function HomePage() {
 
       // 2. Fetch a wider sample of papers so the relevance filter has room to pick from.
       const fetched = await runStage("papers", signal, sig =>
-        DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig, s.elsevierToken, s.ezproxyConnected)
+        DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig)
       );
       const papers = fetched?.papers || [];
       if (fetched) {
