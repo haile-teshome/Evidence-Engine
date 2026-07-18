@@ -77,20 +77,37 @@ export type QualityIssue = {
   evidence?: string;
 };
 
+// Union of every instrument's ordinal domain/overall judgment (RoB 2, ROBINS-I,
+// QUADAS-2/PROBAST, …). The generic renderer colours by severity tier, so adding
+// a value here is all that's needed for a new scale.
 export type RoBJudgment =
   | "Low"
-  | "Some Concerns"
+  | "Some Concerns" | "Some concerns"
   | "High"
+  | "Moderate" | "Serious" | "Critical"     // ROBINS-I / ROBINS-E
+  | "Unclear"                                 // QUADAS-2 / PROBAST
   | "No information"
   | "Not applicable";
+
+// One signalling question's answer within a domain (the LLM answers these; code
+// rolls them up to the domain judgment).
+export type SignalAnswer = {
+  id: string;
+  text: string;
+  answer: string;          // "Y" | "PY" | "PN" | "N" | "NI"
+  quote: string;
+  section: string;
+  rationale: string;
+};
 
 export type RoBDomain = {
   id: string;
   name: string;
-  judgment: RoBJudgment;
+  judgment: RoBJudgment;   // instrument-specific ordinal (widened union)
   rationale: string;
   supporting_quote: string;
-  section: string;        // "Methods" | "Results" | "Discussion" | "Abstract" | "Other" | ""
+  section: string;         // "Methods" | "Results" | "Discussion" | "Abstract" | "Other" | ""
+  signals?: SignalAnswer[];  // present for the new instrument engine; absent on legacy reports
 };
 
 export type QualityReport = {
@@ -99,13 +116,42 @@ export type QualityReport = {
   source: string;
   url: string;
   abstract: string;
-  study_design: string;        // detected design label
-  rubric: string;              // "RoB 2" | "ROBINS-I" | "JBI cross-sectional" | "JBI qualitative" | "AMSTAR 2"
+  study_design: string;        // detected/captured design label
+  rubric: string;              // legacy alias; equals the instrument short name
+  instrument_id?: string;      // e.g. "rob2" | "robins_i" | "quadas_2" | "probast_ai"
+  instrument?: string;         // short name, e.g. "RoB 2"
+  axis?: "internal_validity" | "reporting" | "certainty";
+  scale?: string[];            // ordinal judgment scale for this instrument
+  reference?: string;
   domains: RoBDomain[];
   overall_judgment: RoBJudgment;
   overall_rationale: string;
   used_full_text: boolean;
 };
+
+// GRADE certainty for one OUTCOME (outcome-level, not study-level).
+export type GradeOutcome = {
+  id: string;
+  outcome: string;
+  starting: "randomized" | "observational";
+  downgrades: Record<string, number>;   // domain -> 0 | -1 | -2
+  upgrades: Record<string, number>;      // factor -> 0 | +1 | +2 (observational only)
+  notes?: Record<string, string>;
+};
+
+export const GRADE_DOWNGRADE_DOMAINS = ["risk_of_bias", "inconsistency", "indirectness", "imprecision", "publication_bias"] as const;
+export const GRADE_UPGRADE_FACTORS = ["large_effect", "dose_response", "plausible_confounding"] as const;
+const GRADE_ORDER = ["Very low", "Low", "Moderate", "High"];
+
+// Client-side mirror of the backend GRADE roll-up (Backend/instruments.grade_certainty)
+// for instant interactivity; the two must agree.
+export function gradeCertainty(o: GradeOutcome): string {
+  const start = o.starting === "randomized" ? 3 : 1;
+  const down = GRADE_DOWNGRADE_DOMAINS.reduce((a, k) => a + Math.max(-2, Math.min(0, o.downgrades[k] || 0)), 0);
+  const up = o.starting === "randomized" ? 0
+    : GRADE_UPGRADE_FACTORS.reduce((a, k) => a + Math.max(0, Math.min(2, o.upgrades[k] || 0)), 0);
+  return GRADE_ORDER[Math.max(0, Math.min(3, start + down + up))];
+}
 
 // Reviewer override on an AI-generated domain judgment. Captured for the
 // audit log so every change has a timestamp, original value, and rationale.
