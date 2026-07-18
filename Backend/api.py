@@ -3019,16 +3019,85 @@ def _extract_epmc_tables(paper_id: str, extraction_type: str) -> List[Dict[str, 
         return []
 
 
+def _read_cached_pdf(paper_id: Optional[str], url: Optional[str]) -> Optional[bytes]:
+    """Read the open-access PDF cached during full-text acquisition, if present."""
+    try:
+        path = _PDF_CACHE_DIR / f"{_pdf_cache_key(paper_id, url)}.pdf"
+        if path.exists():
+            return path.read_bytes()
+    except Exception as e:
+        print(f"[read_cached_pdf] {e}")
+    return None
+
+
+def _table_is_real(rows: List[List[str]]) -> bool:
+    """Filter out prose mis-detected as a table: require >=2 rows, >=2 columns,
+    and at least half the cells populated."""
+    if len(rows) < 2:
+        return False
+    ncol = max((len(r) for r in rows), default=0)
+    if ncol < 2:
+        return False
+    cells = sum(len(r) for r in rows)
+    filled = sum(1 for r in rows for c in r if c)
+    return cells > 0 and filled >= 0.5 * cells
+
+
+def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str, Any]]:
+    """Deterministically extract tables from a PDF with pdfplumber — no LLM, so
+    the same PDF always yields the same tables (reproducible for a review).
+
+    Tries ruling-line detection first (precise, for bordered tables); on pages
+    with no bordered tables it falls back to text-alignment detection so
+    borderless journal tables are still captured. Both strategies are
+    deterministic; a density filter drops prose mis-read as a table."""
+    if not pdf_bytes:
+        return []
+    text_settings = {
+        "vertical_strategy": "text", "horizontal_strategy": "text",
+        "snap_tolerance": 4, "join_tolerance": 4, "min_words_vertical": 2,
+    }
+    try:
+        import io
+        import pdfplumber
+        out: List[Dict[str, Any]] = []
+        idx = 0
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                found = page.extract_tables() or []
+                if not found:
+                    try:
+                        found = page.extract_tables(text_settings) or []
+                    except Exception:
+                        found = []
+                for t in found:
+                    rows = [
+                        [(c or "").strip() for c in row]
+                        for row in t if any((c or "").strip() for c in row)
+                    ]
+                    if _table_is_real(rows):
+                        idx += 1
+                        out.append({
+                            "title": f"Table {idx}",
+                            "type": _classify_table(rows, extraction_type or ""),
+                            "data": rows,
+                            "caption": "",
+                        })
+        return out
+    except Exception as e:
+        print(f"[extract_pdf_tables] {e}")
+        return []
+
+
 @app.post("/api/extract/tables")
 def extract_tables(req: ExtractTablesRequest):
-    """Three-tier table extraction:
+    """Table extraction, deterministic first:
       1. Europe PMC JATS fullTextXML — open-access full-text, structured tables.
-      2. HTML scrape of the supplied URL — works for journal landing pages
-         that include rendered tables. Skipped for PubMed/EuPMC abstract URLs
-         since those pages don't contain the article's tables.
-      3. LLM extraction over title + abstract + (optional) caller-supplied
-         full text. The caller's abstract/full_text fields are the difference
-         between this tier finding anything and finding nothing.
+      2. Deterministic parse of the acquired open-access PDF (pdfplumber). The
+         full-text step caches the PDF; the same PDF always yields the same tables.
+      3. LLM extraction over title + abstract + caller-supplied full text — a
+         non-deterministic fallback, used only when no structured OA source exists.
+    Tiers 1 and 2 are deterministic and reproducible; tier 3 is a last resort.
     """
     pid = req.paper_id or ""
     if not pid and req.URL:
@@ -3047,9 +3116,20 @@ def extract_tables(req: ExtractTablesRequest):
             tables.extend(tier1)
             print(f"[extract_tables] {pid} tier1 (EuPMC XML) -> {len(tier1)} tables")
 
-    # Tier 2: LLM fallback over title + abstract + caller-supplied full text.
-    # The caller-supplied content (the open-access full text acquired earlier) is
-    # what makes this tier useful — passing only the title here was the original bug.
+    # Tier 2: deterministic table parse from the acquired open-access PDF. The
+    # full-text acquisition step caches the PDF; pdfplumber reads its tables with
+    # no LLM, so results are reproducible.
+    if not tables:
+        pdf_bytes = _read_cached_pdf(req.paper_id, req.URL)
+        if pdf_bytes:
+            tier2 = _extract_pdf_tables(pdf_bytes, req.extraction_type or "")
+            if tier2:
+                tables.extend(tier2)
+                print(f"[extract_tables] {pid or 'no-id'} tier2 (OA PDF, deterministic) -> {len(tier2)} tables")
+
+    # Tier 3: LLM fallback over title + abstract + caller-supplied full text.
+    # Non-deterministic; used only when neither the JATS XML nor a cached OA PDF
+    # produced tables. The caller-supplied content is what makes it useful.
     if not tables:
         try:
             seed_parts: List[str] = [req.Title.strip()]
