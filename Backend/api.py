@@ -49,6 +49,7 @@ from leads_screening import (
     resolve_model_name,
     screen_paper_leads,
 )
+import instruments as _inst
 
 import requests
 from bs4 import BeautifulSoup
@@ -3216,7 +3217,9 @@ def extract_tables(req: ExtractTablesRequest):
 class QualityRequest(BaseModel):
     paper: PaperIn
     full_text: Optional[str] = None     # if available; falls back to abstract
-    rubric_override: Optional[str] = None  # force a specific rubric ("RoB 2", "ROBINS-I", ...)
+    rubric_override: Optional[str] = None  # legacy: force a rubric ("RoB 2", ...)
+    study_design: Optional[str] = None  # captured at extraction; routes the instrument
+    instrument_id: Optional[str] = None  # explicit override (else routed by design)
     model: Optional[str] = None
 
 
@@ -3630,47 +3633,154 @@ def _aggregate_overall(domains: List[Dict[str, Any]]) -> Tuple[str, str]:
     return "Some Concerns", "Mixed domain judgments without any High risk."
 
 
+@app.get("/api/instruments")
+def list_instruments():
+    """Serve the instrument definitions (domains + signalling questions) so the
+    frontend can render any tool generically. Backend is the single source of truth."""
+    return {"instruments": [_inst.public_instrument(i) for i in _inst.INSTRUMENTS.values()]}
+
+
+def _answer_signals(paper: PaperIn, text: str, inst: dict, model_name: str) -> Dict[str, Dict[str, dict]]:
+    """Have the LLM ANSWER each signalling question (Y/PY/PN/N/NI) with a supporting
+    quote — it never judges domains. Returns {domain_id: {signal_id: {answer, quote,
+    section, rationale}}}. Roll-up to domain/overall judgments is done in code."""
+    from langchain_core.messages import HumanMessage
+    out: Dict[str, Dict[str, dict]] = {d["id"]: {} for d in inst["domains"]}
+    model = AIService.get_model(model_name)
+    if not model or not inst["domains"]:
+        return out
+
+    sig_lines = []
+    for d in inst["domains"]:
+        sig_lines.append(f'Domain "{d["id"]}" — {d["name"]}:')
+        for s in d["signals"]:
+            sig_lines.append(f'  - {s["id"]}: {s["text"]}')
+    prompt = f"""You are a systematic-review methodologist applying the {inst['short_name']} tool.
+Answer EACH signalling question below based ONLY on what the paper states. Use exactly one of:
+"Y" (yes), "PY" (probably yes), "PN" (probably no), "N" (no), "NI" (no information).
+Do not judge the domain — only answer the signalling questions and give a short exact quote.
+
+PAPER TITLE: {paper.title or "(untitled)"}
+PAPER TEXT:
+{text[:14000]}
+
+SIGNALLING QUESTIONS:
+{chr(10).join(sig_lines)}
+
+Return ONLY JSON: {{"answers":[{{"signal_id":"1.1","answer":"Y|PY|PN|N|NI","quote":"<=200 chars exact quote or empty","section":"Methods|Results|Discussion|Abstract|Other|","rationale":"one sentence"}}, ...]}}"""
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+        sig_to_domain = {s["id"]: d["id"] for d in inst["domains"] for s in d["signals"]}
+        for it in (data.get("answers") or []):
+            if not isinstance(it, dict):
+                continue
+            sid = str(it.get("signal_id") or "").strip()
+            did = sig_to_domain.get(sid)
+            if not did:
+                continue
+            ans = str(it.get("answer") or "NI").strip().upper()
+            if ans not in _inst.YN:
+                ans = "NI"
+            out[did][sid] = {
+                "answer": ans,
+                "quote": str(it.get("quote") or "").strip()[:250],
+                "section": str(it.get("section") or "").strip()[:30],
+                "rationale": str(it.get("rationale") or "").strip()[:400],
+            }
+    except Exception as e:
+        print(f"[quality] signalling error: {e}")
+    return out
+
+
 @app.post("/api/quality/assess")
 def quality_assess(req: QualityRequest):
-    """Risk-of-bias appraisal using rubric appropriate to the detected study design.
+    """Instrument-driven risk-of-bias appraisal.
 
-    Pipeline:
-      1. Detect study design from title + (full_text or abstract).
-      2. Pick rubric: RCT → RoB 2, observational → ROBINS-I, cross-sectional →
-         JBI, qualitative → JBI qualitative, SR/MA → AMSTAR 2 (override
-         honoured if provided).
-      3. Appraise each rubric domain via batched LLM call returning structured
-         JSON with judgment, rationale, supporting_quote, section.
-      4. Aggregate to an overall judgment per Cochrane rules.
-
-    The legacy `score`/`rating`/`issues`/`highlightedAbstract` fields have
-    been removed — the response shape is now centred on domain-level RoB
-    judgments, which is what reviewers actually need.
+      1. Study design (from request, else detected) routes the instrument
+         (RCT → RoB 2, NRSI → ROBINS-I, DTA → QUADAS-2, prediction/AI → PROBAST+AI, …).
+      2. The LLM ANSWERS the instrument's signalling questions with evidence.
+      3. Deterministic code rolls signalling answers up to per-domain judgments and
+         an overall judgment (never a single holistic score).
     """
     paper = req.paper
     abs_text = paper.abstract or ""
     full_text = (req.full_text or "").strip() or abs_text
-
     model_name = resolve_for_thinking(req.model)
 
-    design, _ = _detect_study_design(paper, full_text, model_name)
-    rubric_name, domains_spec = _resolve_rubric(design, req.rubric_override)
-    domain_results = _appraise_domains(paper, full_text, rubric_name, domains_spec, model_name)
-    overall_judgment, overall_rationale = _aggregate_overall(domain_results)
-    used_full_text = bool(req.full_text and len(req.full_text) > len(abs_text))
+    design = (req.study_design or "").strip()
+    if not design:
+        design, _ = _detect_study_design(paper, full_text, model_name)
+
+    instrument_id = req.instrument_id or _inst.instrument_for_design(design)
+    if instrument_id not in _inst.INSTRUMENTS:
+        instrument_id = _inst.instrument_for_design(design)
+    inst = _inst.INSTRUMENTS[instrument_id]
+
+    signals = _answer_signals(paper, full_text, inst, model_name)
+    rolled = _inst.roll_up(instrument_id, {d: {s: v["answer"] for s, v in sig.items()} for d, sig in signals.items()})
+    judg_by_domain = {d["id"]: d["judgment"] for d in rolled["domains"]}
+
+    domains_out = []
+    for d in inst["domains"]:
+        sig_answers = signals.get(d["id"], {})
+        sigs = [
+            {**{"id": s["id"], "text": s["text"]}, **sig_answers.get(s["id"], {"answer": "NI", "quote": "", "section": "", "rationale": ""})}
+            for s in d["signals"]
+        ]
+        # Domain-level rationale/quote synthesised from the signalling answers, so
+        # existing UI (which reads domain.rationale/supporting_quote) keeps working
+        # while the richer `signals` array powers the new generic renderer.
+        rationale = "; ".join(x["rationale"] for x in sigs if x.get("rationale"))[:600]
+        quoted = next((x for x in sigs if x.get("quote")), None)
+        domains_out.append({
+            "id": d["id"], "name": d["name"],
+            "judgment": judg_by_domain.get(d["id"], inst["scale"][-1]),
+            "rationale": rationale,
+            "supporting_quote": quoted["quote"] if quoted else "",
+            "section": quoted["section"] if quoted else "",
+            "signals": sigs,
+        })
 
     return {
-        "paper_id": paper.id,
-        "title": paper.title,
-        "source": paper.source,
-        "url": paper.url,
+        "paper_id": paper.id, "title": paper.title, "source": paper.source, "url": paper.url,
         "abstract": abs_text,
         "study_design": design,
-        "rubric": rubric_name,
-        "domains": domain_results,
-        "overall_judgment": overall_judgment,
-        "overall_rationale": overall_rationale,
-        "used_full_text": used_full_text,
+        "instrument_id": instrument_id,
+        "instrument": inst["short_name"],
+        "axis": inst["axis"],
+        "scale": inst["scale"],
+        "reference": inst.get("reference", ""),
+        "domains": domains_out,
+        "overall_judgment": rolled["overall"],
+        "overall_rationale": f"{inst['short_name']} roll-up of {len(domains_out)} domains.",
+        "used_full_text": bool(req.full_text and len(req.full_text) > len(abs_text)),
+        # Legacy alias so older frontends keep working.
+        "rubric": inst["short_name"],
+    }
+
+
+class GradeOutcomeRequest(BaseModel):
+    outcome: str
+    starting: str = "randomized"                 # "randomized" | "observational"
+    downgrades: Dict[str, int] = {}              # domain -> 0/-1/-2
+    upgrades: Dict[str, int] = {}                # factor -> 0/+1/+2 (observational only)
+    notes: Optional[Dict[str, str]] = None
+
+
+@app.post("/api/grade")
+def grade_outcome(req: GradeOutcomeRequest):
+    """Deterministic GRADE certainty for one OUTCOME (outcome-level, not study-level)."""
+    res = _inst.grade_certainty(req.starting, req.downgrades or {}, req.upgrades or {})
+    return {
+        "outcome": req.outcome,
+        "starting": req.starting,
+        "downgrade_domains": _inst.GRADE_DOWNGRADE,
+        "upgrade_factors": _inst.GRADE_UPGRADE,
+        "downgrades": req.downgrades or {},
+        "upgrades": req.upgrades or {},
+        "certainty": res["certainty"],
+        "start_certainty": res["start"],
     }
 
 
