@@ -46,6 +46,11 @@ def _sig(sid: str, text: str, concern: str = "no", crit: bool = False) -> Dict[s
     return {"id": sid, "text": text, "options": YN, "labels": YN_LABEL, "concern": concern, "crit": crit}
 
 
+def _d(did: str, name: str, *signals: Dict[str, Any]) -> Dict[str, Any]:
+    """A domain: id, human name, and its signalling questions."""
+    return {"id": did, "name": name, "signals": list(signals)}
+
+
 def _is_concern(sig: Dict[str, Any], a: Optional[str]) -> bool:
     return _yes(a) if sig.get("concern") == "yes" else _no(a)
 
@@ -440,29 +445,268 @@ NOS = {
 }
 
 
-def _scaffold(iid, name, short, axis, scale, applies=None, ref=""):
-    return {"id": iid, "name": name, "short_name": short, "axis": axis, "scale": scale,
-            "reference": ref, "applies_to": applies or [], "domains": [], "scaffold": True,
+def _lhu_instrument(iid, name, short, axis, ref, applies, domains, legacy=False):
+    return {"id": iid, "name": name, "short_name": short, "axis": axis, "scale": SCALE_LHU,
+            "reference": ref, "applies_to": applies, "domains": domains, "legacy": legacy,
             "_domain_fn": "lhu_domain", "_overall_fn": "lhu_overall"}
 
 
-SCAFFOLDS = [
-    _scaffold("quadas_c", "QUADAS-C — comparative diagnostic accuracy", "QUADAS-C", "internal_validity", SCALE_LHU, ["comparative diagnostic"]),
-    _scaffold("quips", "QUIPS — prognostic factor studies", "QUIPS", "internal_validity", SCALE_LHU, ["prognostic factor"]),
-    _scaffold("jbi_caseseries", "JBI — case series", "JBI case series", "internal_validity", SCALE_LHU, ["case series"]),
-    _scaffold("jbi_casereport", "JBI — case report", "JBI case report", "internal_validity", SCALE_LHU, ["case report"]),
-    _scaffold("jbi_qualitative", "JBI — qualitative research", "JBI qualitative", "internal_validity", SCALE_LHU, ["qualitative"]),
-    _scaffold("jbi_economic", "JBI — economic evaluations", "JBI economic", "internal_validity", SCALE_LHU, ["economic"]),
-    _scaffold("robis", "ROBIS — risk of bias in systematic reviews", "ROBIS", "internal_validity", SCALE_LHU, ["systematic review"]),
-    _scaffold("tripod_ai", "TRIPOD+AI — reporting of prediction models", "TRIPOD+AI", "reporting", SCALE_LHU, ["prediction model", "ai model"]),
-    _scaffold("consort_ai", "CONSORT-AI — reporting of AI trials", "CONSORT-AI", "reporting", SCALE_LHU, ["rct", "ai model"]),
-    _scaffold("spirit_ai", "SPIRIT-AI — reporting of AI trial protocols", "SPIRIT-AI", "reporting", SCALE_LHU, ["protocol", "ai model"]),
-    _scaffold("quadas_ai", "QUADAS-AI — reporting of AI diagnostic accuracy", "QUADAS-AI", "reporting", SCALE_LHU, ["diagnostic", "ai model"]),
-    _scaffold("claim", "CLAIM — checklist for AI in medical imaging", "CLAIM", "reporting", SCALE_LHU, ["imaging", "ai model"]),
-]
+QUADAS_C = _lhu_instrument(
+    "quadas_c", "QUADAS-C — comparative diagnostic accuracy", "QUADAS-C", "internal_validity",
+    "Yang B et al. Ann Intern Med 2021;174:1592", ["comparative diagnostic", "comparative accuracy"],
+    [
+        _d("d1", "Patient selection",
+           _sig("1.1", "Was a single group of patients recruited who received all index tests being compared?", "no"),
+           _sig("1.2", "Was a case-control design avoided?", "no"),
+           _sig("1.3", "Did the study avoid inappropriate exclusions?", "no")),
+        _d("d2", "Index tests",
+           _sig("2.1", "Were the results of each index test interpreted without knowledge of the results of the other index test(s)?", "no"),
+           _sig("2.2", "Were the index test results interpreted without knowledge of the reference standard?", "no"),
+           _sig("2.3", "Were thresholds pre-specified for all index tests being compared?", "no"),
+           _sig("2.4", "Were the index tests conducted in the same patients (paired), or in randomized/comparable groups?", "no")),
+        _d("d3", "Reference standard",
+           _sig("3.1", "Is the reference standard likely to correctly classify the target condition?", "no"),
+           _sig("3.2", "Were the reference-standard results interpreted without knowledge of any index test?", "no")),
+        _d("d4", "Flow and timing",
+           _sig("4.1", "Did all patients receive the same reference standard regardless of index-test results?", "no"),
+           _sig("4.2", "Were all patients assessed by every index test being compared?", "no"),
+           _sig("4.3", "Were all patients included in the comparative analysis?", "no")),
+    ])
+
+QUIPS = _lhu_instrument(
+    "quips", "QUIPS — prognostic factor studies", "QUIPS", "internal_validity",
+    "Hayden JA et al. Ann Intern Med 2013;158:280", ["prognostic factor", "prognosis", "prognostic"],
+    [
+        _d("d1", "Study participation",
+           _sig("1.1", "Was the source population adequately described and the sampling frame appropriate?", "no"),
+           _sig("1.2", "Were the inclusion and exclusion criteria adequately described?", "no"),
+           _sig("1.3", "Was there adequate participation of eligible people in the study?", "no")),
+        _d("d2", "Study attrition",
+           _sig("2.1", "Was the proportion of participants completing the study adequate?", "no"),
+           _sig("2.2", "Were attempts made to collect information on participants lost to follow-up?", "no"),
+           _sig("2.3", "Were reasons for, and characteristics of, loss to follow-up described?", "no")),
+        _d("d3", "Prognostic factor measurement",
+           _sig("3.1", "Was the prognostic factor measured in a valid and reliable way?", "no"),
+           _sig("3.2", "Were the method and setting of measurement the same for all participants?", "no"),
+           _sig("3.3", "Was the proportion of data on the prognostic factor complete enough to be adequate?", "no")),
+        _d("d4", "Outcome measurement",
+           _sig("4.1", "Was the outcome measured in a valid and reliable way?", "no"),
+           _sig("4.2", "Were the method and setting of outcome measurement the same for all participants?", "no")),
+        _d("d5", "Study confounding",
+           _sig("5.1", "Were the important potential confounders measured?", "no"),
+           _sig("5.2", "Were the confounders accounted for in the study design or analysis?", "no")),
+        _d("d6", "Statistical analysis and reporting",
+           _sig("6.1", "Was the statistical analysis appropriate and reported in sufficient detail?", "no"),
+           _sig("6.2", "Was selective reporting of results avoided?", "no")),
+    ])
+
+ROBIS = _lhu_instrument(
+    "robis", "ROBIS — risk of bias in systematic reviews", "ROBIS", "internal_validity",
+    "Whiting P et al. J Clin Epidemiol 2016;69:225", ["systematic review", "meta-analysis"],
+    [
+        _d("d1", "Study eligibility criteria",
+           _sig("1.1", "Did the review adhere to pre-defined objectives and eligibility criteria?", "no"),
+           _sig("1.2", "Were the eligibility criteria appropriate for the review question?", "no"),
+           _sig("1.3", "Were the eligibility criteria unambiguous and applied consistently?", "no")),
+        _d("d2", "Identification and selection of studies",
+           _sig("2.1", "Did the search include an appropriate range of databases and electronic sources?", "no"),
+           _sig("2.2", "Were additional methods (reference lists, experts, grey literature) used to identify studies?", "no"),
+           _sig("2.3", "Were restrictions based on date, language, or publication status avoided or justified?", "no"),
+           _sig("2.4", "Were efforts made to minimise errors in study selection (e.g. duplicate screening)?", "no")),
+        _d("d3", "Data collection and study appraisal",
+           _sig("3.1", "Were efforts made to minimise errors in data collection (e.g. duplicate extraction)?", "no"),
+           _sig("3.2", "Were sufficient study characteristics collected for the review's purpose?", "no"),
+           _sig("3.3", "Was risk of bias in included studies formally assessed using appropriate criteria?", "no")),
+        _d("d4", "Synthesis and findings",
+           _sig("4.1", "Did the synthesis include all studies that it should?", "no"),
+           _sig("4.2", "Were all pre-defined analyses followed, or departures explained?", "no"),
+           _sig("4.3", "Was the synthesis appropriate given the nature and similarity of the included studies?", "no"),
+           _sig("4.4", "Were biases in the primary studies minimal or addressed in the synthesis?", "no"),
+           _sig("4.5", "Were the findings robust (e.g. assessed with sensitivity analyses)?", "no")),
+    ])
+
+JBI_CASESERIES = _lhu_instrument(
+    "jbi_caseseries", "JBI — case series", "JBI case series", "internal_validity",
+    "JBI Critical Appraisal Checklist for Case Series", ["case series"],
+    [
+        _d("d1", "Inclusion and sampling",
+           _sig("1.1", "Were there clear criteria for inclusion in the case series?", "no"),
+           _sig("1.2", "Was there consecutive inclusion of participants?", "no"),
+           _sig("1.3", "Was there complete inclusion of participants?", "no")),
+        _d("d2", "Condition measurement",
+           _sig("2.1", "Was the condition measured in a standard, reliable way for all participants?", "no"),
+           _sig("2.2", "Were valid methods used for identification of the condition for all participants?", "no")),
+        _d("d3", "Reporting",
+           _sig("3.1", "Was there clear reporting of the demographics of the participants?", "no"),
+           _sig("3.2", "Was there clear reporting of clinical information of the participants?", "no"),
+           _sig("3.3", "Were the outcomes or follow-up results of cases clearly reported?", "no"),
+           _sig("3.4", "Was there clear reporting of the presenting site(s)/clinic(s) demographic information?", "no")),
+        _d("d4", "Analysis",
+           _sig("4.1", "Was statistical analysis appropriate?", "no")),
+    ])
+
+JBI_CASEREPORT = _lhu_instrument(
+    "jbi_casereport", "JBI — case report", "JBI case report", "internal_validity",
+    "JBI Critical Appraisal Checklist for Case Reports", ["case report"],
+    [
+        _d("d1", "Patient description",
+           _sig("1.1", "Were the patient's demographic characteristics clearly described?", "no"),
+           _sig("1.2", "Was the patient's history clearly described and presented as a timeline?", "no"),
+           _sig("1.3", "Was the current clinical condition of the patient on presentation clearly described?", "no")),
+        _d("d2", "Diagnosis and intervention",
+           _sig("2.1", "Were diagnostic tests or assessment methods and the results clearly described?", "no"),
+           _sig("2.2", "Were the intervention(s) or treatment procedure(s) clearly described?", "no"),
+           _sig("2.3", "Was the post-intervention clinical condition clearly described?", "no")),
+        _d("d3", "Adverse events and lessons",
+           _sig("3.1", "Were adverse events or unanticipated events identified and described?", "no"),
+           _sig("3.2", "Does the case report provide takeaway lessons?", "no")),
+    ])
+
+JBI_QUALITATIVE = _lhu_instrument(
+    "jbi_qualitative", "JBI — qualitative research", "JBI qualitative", "internal_validity",
+    "JBI Critical Appraisal Checklist for Qualitative Research", ["qualitative"],
+    [
+        _d("d1", "Methodological congruity",
+           _sig("1.1", "Was there congruity between the stated philosophical perspective and the research methodology?", "no"),
+           _sig("1.2", "Was there congruity between the research methodology and the research question or objectives?", "no"),
+           _sig("1.3", "Was there congruity between the research methodology and the methods used to collect data?", "no"),
+           _sig("1.4", "Was there congruity between the research methodology and the representation and analysis of data?", "no"),
+           _sig("1.5", "Was there congruity between the research methodology and the interpretation of results?", "no")),
+        _d("d2", "Reflexivity",
+           _sig("2.1", "Is there a statement locating the researcher culturally or theoretically?", "no"),
+           _sig("2.2", "Is the influence of the researcher on the research, and vice versa, addressed?", "no")),
+        _d("d3", "Representation and ethics",
+           _sig("3.1", "Are participants, and their voices, adequately represented?", "no"),
+           _sig("3.2", "Was the research ethical according to current criteria, with evidence of ethics approval?", "no")),
+        _d("d4", "Conclusions",
+           _sig("4.1", "Do the conclusions drawn flow from the analysis or interpretation of the data?", "no")),
+    ])
+
+JBI_ECONOMIC = _lhu_instrument(
+    "jbi_economic", "JBI — economic evaluations", "JBI economic", "internal_validity",
+    "JBI Critical Appraisal Checklist for Economic Evaluations", ["economic", "cost-effectiveness", "cost effectiveness"],
+    [
+        _d("d1", "Question and alternatives",
+           _sig("1.1", "Is there a well-defined question?", "no"),
+           _sig("1.2", "Is there a comprehensive description of the alternatives?", "no")),
+        _d("d2", "Costs and outcomes measurement",
+           _sig("2.1", "Are all important and relevant costs and outcomes for each alternative identified?", "no"),
+           _sig("2.2", "Have costs and outcomes been measured accurately?", "no"),
+           _sig("2.3", "Have costs and outcomes been valued credibly?", "no"),
+           _sig("2.4", "Have costs and outcomes been adjusted for differential timing (discounting)?", "no")),
+        _d("d3", "Analysis",
+           _sig("3.1", "Was there an incremental analysis of costs and consequences?", "no"),
+           _sig("3.2", "Were sensitivity analyses conducted to investigate uncertainty in estimates?", "no")),
+        _d("d4", "Reporting and generalizability",
+           _sig("4.1", "Do the study results include all issues of concern to users?", "no"),
+           _sig("4.2", "Are the results generalizable to the setting of interest in the review?", "no")),
+    ])
+
+TRIPOD_AI = _lhu_instrument(
+    "tripod_ai", "TRIPOD+AI — reporting of prediction models", "TRIPOD+AI", "reporting",
+    "Collins GS et al. BMJ 2024;385:e078378", ["prediction model", "prognostic model", "ai model", "machine learning"],
+    [
+        _d("d1", "Title and abstract",
+           _sig("1.1", "Does the title identify the study as developing and/or validating a prediction model, naming the target population and outcome?", "no"),
+           _sig("1.2", "Does the abstract provide a structured summary of objectives, data, methods, results, and conclusions?", "no")),
+        _d("d2", "Methods",
+           _sig("2.1", "Are the source of data and study design described?", "no"),
+           _sig("2.2", "Are the eligibility criteria, setting, and timeframe described?", "no"),
+           _sig("2.3", "Are the predictors and outcome defined, including how and when they were measured?", "no"),
+           _sig("2.4", "Are sample size and the handling of missing data described?", "no"),
+           _sig("2.5", "Is the AI/ML approach, architecture, and training procedure described in enough detail to reproduce it?", "no"),
+           _sig("2.6", "Are model-building, tuning, and internal validation methods described?", "no")),
+        _d("d3", "Results",
+           _sig("3.1", "Are participant flow, characteristics, and the number of outcome events reported?", "no"),
+           _sig("3.2", "Is model performance reported with both discrimination and calibration, and measures of uncertainty?", "no"),
+           _sig("3.3", "Are performance results reported across relevant subgroups to allow fairness assessment?", "no")),
+        _d("d4", "Discussion and open science",
+           _sig("4.1", "Are limitations discussed (e.g. non-representative data, overfitting, potential bias)?", "no"),
+           _sig("4.2", "Are data, code, and model availability, funding, and conflicts of interest reported?", "no")),
+    ])
+
+CONSORT_AI = _lhu_instrument(
+    "consort_ai", "CONSORT-AI — reporting of AI trials", "CONSORT-AI", "reporting",
+    "Liu X et al. Nat Med 2020;26:1364", ["rct", "randomized controlled trial", "ai model"],
+    [
+        _d("d1", "Intervention description",
+           _sig("1.1", "Is the AI intervention described in enough detail to allow replication, including software and version?", "no"),
+           _sig("1.2", "Are the input data and how they were acquired, selected, and pre-processed described?", "no"),
+           _sig("1.3", "Are the outputs of the AI intervention and how they informed decisions described?", "no")),
+        _d("d2", "Human-AI interaction and handling",
+           _sig("2.1", "Is the level of human involvement in using the AI and acting on its outputs described?", "no"),
+           _sig("2.2", "Are the skills and training required of the intended users described?", "no"),
+           _sig("2.3", "Is the handling of poor-quality or unavailable input data described?", "no")),
+        _d("d3", "Analysis and errors",
+           _sig("3.1", "Were performance errors and failure cases analysed and reported?", "no"),
+           _sig("3.2", "Is the AI intervention's version, and any changes during the trial, reported?", "no"),
+           _sig("3.3", "Is there an access or availability statement for the AI intervention or code?", "no")),
+    ])
+
+SPIRIT_AI = _lhu_instrument(
+    "spirit_ai", "SPIRIT-AI — reporting of AI trial protocols", "SPIRIT-AI", "reporting",
+    "Cruz Rivera S et al. Nat Med 2020;26:1351", ["protocol", "ai model", "trial protocol"],
+    [
+        _d("d1", "Intervention and rationale",
+           _sig("1.1", "Does the protocol describe the AI intervention and its intended use in detail?", "no"),
+           _sig("1.2", "Does it state the intended clinical setting and how the AI integrates into the care pathway?", "no")),
+        _d("d2", "Input/output handling",
+           _sig("2.1", "Does it specify input-data requirements and handling of poor-quality or unavailable data?", "no"),
+           _sig("2.2", "Does it describe the output and how it will inform clinical decisions?", "no"),
+           _sig("2.3", "Does it describe the human-AI interaction and the requirements of users?", "no")),
+        _d("d3", "Analysis plan",
+           _sig("3.1", "Does it pre-specify analysis of performance errors and case failures?", "no"),
+           _sig("3.2", "Does it describe version control and plans for any updates to the AI during the trial?", "no")),
+    ])
+
+QUADAS_AI = _lhu_instrument(
+    "quadas_ai", "QUADAS-AI — AI diagnostic accuracy risk of bias", "QUADAS-AI", "internal_validity",
+    "Sounderajah V et al. Nat Med 2021;27:1663 (QUADAS-AI protocol)", ["diagnostic", "ai model", "machine learning imaging"],
+    [
+        _d("d1", "Data selection",
+           _sig("1.1", "Was the dataset representative of the intended clinical population and setting?", "no"),
+           _sig("1.2", "Was a case-control or non-consecutive sampling design avoided?", "no"),
+           _sig("1.3", "Were training and test data properly separated, avoiding data leakage?", "no")),
+        _d("d2", "Index test (AI model)",
+           _sig("2.1", "Was the AI model specification, architecture, and version reported?", "no"),
+           _sig("2.2", "Was the operating threshold pre-specified and fixed before evaluation?", "no"),
+           _sig("2.3", "Was the model applied and interpreted without knowledge of the reference standard?", "no")),
+        _d("d3", "Reference standard",
+           _sig("3.1", "Is the reference standard likely to correctly classify the target condition?", "no"),
+           _sig("3.2", "Was the reference standard established without knowledge of the AI output?", "no")),
+        _d("d4", "Flow and timing",
+           _sig("4.1", "Were all cases, including ambiguous or low-quality inputs, included in the analysis?", "no"),
+           _sig("4.2", "Was external or independent validation performed?", "no")),
+    ])
+
+CLAIM = _lhu_instrument(
+    "claim", "CLAIM — checklist for AI in medical imaging", "CLAIM", "reporting",
+    "Mongan J et al. Radiol Artif Intell 2020;2:e200029", ["imaging", "ai model", "radiology", "medical imaging"],
+    [
+        _d("d1", "Title and abstract",
+           _sig("1.1", "Do the title and abstract identify the study as involving AI/ML applied to medical images?", "no")),
+        _d("d2", "Methods — data",
+           _sig("2.1", "Are data sources, eligibility criteria, and how the ground truth (reference standard) was established described?", "no"),
+           _sig("2.2", "Are data pre-processing, de-identification, and train/validation/test partitions described?", "no"),
+           _sig("2.3", "Are measures to avoid data leakage between partitions described?", "no")),
+        _d("d3", "Methods — model",
+           _sig("3.1", "Is the model architecture, software, and training approach described sufficiently to reproduce it?", "no"),
+           _sig("3.2", "Are initialization, hyperparameters, and how the final model was selected reported?", "no")),
+        _d("d4", "Results and evaluation",
+           _sig("4.1", "Are performance metrics reported with confidence intervals or measures of uncertainty?", "no"),
+           _sig("4.2", "Was the model evaluated on an independent or external test set?", "no"),
+           _sig("4.3", "Are failure analyses and robustness assessments reported?", "no")),
+        _d("d5", "Discussion and availability",
+           _sig("5.1", "Are limitations, potential biases, and clinical applicability discussed?", "no"),
+           _sig("5.2", "Are data, code, or model availability statements provided?", "no")),
+    ])
 
 INSTRUMENTS: Dict[str, Dict[str, Any]] = {
-    i["id"]: i for i in [ROB2, ROBINS_I, ROBINS_E, QUADAS_2, PROBAST_AI, AMSTAR_2, JBI_XSECTIONAL, NOS, *SCAFFOLDS]
+    i["id"]: i for i in [
+        ROB2, ROBINS_I, ROBINS_E, QUADAS_2, QUADAS_C, QUADAS_AI, PROBAST_AI, QUIPS,
+        AMSTAR_2, ROBIS, JBI_XSECTIONAL, JBI_CASESERIES, JBI_CASEREPORT, JBI_QUALITATIVE, JBI_ECONOMIC,
+        NOS, TRIPOD_AI, CONSORT_AI, SPIRIT_AI, CLAIM,
+    ]
 }
 
 _ROLLUP = {
