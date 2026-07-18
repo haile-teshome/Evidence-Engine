@@ -26,6 +26,7 @@ google-generativeai
 pandas==2.2.2
 biopython>=1.85
 pypdf==4.3.1
+pdfplumber==0.11.4
 python-docx==1.1.2
 numpy==1.26.4
 
