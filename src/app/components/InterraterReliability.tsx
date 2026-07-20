@@ -326,19 +326,19 @@ export function InterraterReliability({ projectId }: { projectId: string }) {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatBlock
           label="Fleiss' κ"
-          value={Number.isFinite(fleiss.k) ? fleiss.k.toFixed(3) : "—"}
+          value={Number.isFinite(fleiss.k) ? fleiss.k.toFixed(3) : "N/A"}
           sublabel={`${fleiss.n_subjects} subjects, ${fleiss.n_raters} ratings`}
           badge={landisKochLabel(fleiss.k)}
         />
         <StatBlock
           label="Krippendorff's α"
-          value={Number.isFinite(alpha.alpha) ? alpha.alpha.toFixed(3) : "—"}
+          value={Number.isFinite(alpha.alpha) ? alpha.alpha.toFixed(3) : "N/A"}
           sublabel={`${alpha.n_pairable} pairable ratings`}
           badge={landisKochLabel(alpha.alpha)}
         />
         <StatBlock
           label="Mean Cohen's κ"
-          value={pairs.length > 0 ? meanFinite(pairs.map(p => p.k)).toFixed(3) : "—"}
+          value={pairs.length > 0 ? meanFinite(pairs.map(p => p.k)).toFixed(3) : "N/A"}
           sublabel={`${pairs.length} reviewer pairs`}
           badge={landisKochLabel(pairs.length > 0 ? meanFinite(pairs.map(p => p.k)) : NaN)}
         />
@@ -374,7 +374,7 @@ export function InterraterReliability({ projectId }: { projectId: string }) {
                     <td className="px-2 py-1.5 text-right tabular-nums">{p.n}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums">{p.agree}</td>
                     <td className="px-2 py-1.5 text-right tabular-nums font-medium">
-                      {Number.isFinite(p.k) ? p.k.toFixed(3) : "—"}
+                      {Number.isFinite(p.k) ? p.k.toFixed(3) : "N/A"}
                     </td>
                     <td className="px-2 py-1.5">
                       <Badge variant="outline" className={`text-[10px] ${lk.cls}`}>{lk.label}</Badge>
@@ -383,7 +383,7 @@ export function InterraterReliability({ projectId }: { projectId: string }) {
                 );
               })}
               {pairs.length === 0 && (
-                <tr><td colSpan={6} className="px-2 py-3 text-muted-foreground text-center">No pairwise data yet — reviewers need to decide on overlapping papers.</td></tr>
+                <tr><td colSpan={6} className="px-2 py-3 text-muted-foreground text-center">No pairwise data yet. Reviewers need to decide on overlapping papers.</td></tr>
               )}
             </tbody>
           </table>
@@ -531,15 +531,15 @@ function buildIrrSvg({
   out.push(`<rect width="${totalW}" height="${totalH}" fill="#ffffff"/>`);
 
   // Title + summary
-  out.push(`<text x="${PAD}" y="${PAD + 14}" font-size="14" font-weight="600">Inter-rater reliability — ${stage}</text>`);
-  out.push(`<text x="${PAD}" y="${PAD + 40}" font-size="11" fill="#475569">Fleiss' κ = ${Number.isFinite(fleiss.k) ? fleiss.k.toFixed(3) : "—"}   ·   Krippendorff's α = ${Number.isFinite(alpha.alpha) ? alpha.alpha.toFixed(3) : "—"}   ·   ${reviewerIds.length} reviewers   ·   ${papers.length} papers   ·   coverage ${(coverage * 100).toFixed(0)}%</text>`);
+  out.push(`<text x="${PAD}" y="${PAD + 14}" font-size="14" font-weight="600">Inter-rater reliability: ${stage}</text>`);
+  out.push(`<text x="${PAD}" y="${PAD + 40}" font-size="11" fill="#475569">Fleiss' κ = ${Number.isFinite(fleiss.k) ? fleiss.k.toFixed(3) : "N/A"}   ·   Krippendorff's α = ${Number.isFinite(alpha.alpha) ? alpha.alpha.toFixed(3) : "N/A"}   ·   ${reviewerIds.length} reviewers   ·   ${papers.length} papers   ·   coverage ${(coverage * 100).toFixed(0)}%</text>`);
 
   // Pairwise table inline
   let py = PAD + 60;
   out.push(`<text x="${PAD}" y="${py}" font-size="11" font-weight="600" fill="#0f172a">Pairwise Cohen's κ</text>`);
   py += 14;
   for (const p of pairs.slice(0, 8)) {
-    out.push(`<text x="${PAD}" y="${py}" font-size="10" fill="#334155">${escapeXml(p.a.slice(0, 8))}… × ${escapeXml(p.b.slice(0, 8))}…   κ = ${Number.isFinite(p.k) ? p.k.toFixed(3) : "—"}   (${p.agree}/${p.n} agree)</text>`);
+    out.push(`<text x="${PAD}" y="${py}" font-size="10" fill="#334155">${escapeXml(p.a.slice(0, 8))}… × ${escapeXml(p.b.slice(0, 8))}…   κ = ${Number.isFinite(p.k) ? p.k.toFixed(3) : "N/A"}   (${p.agree}/${p.n} agree)</text>`);
     py += 13;
   }
 

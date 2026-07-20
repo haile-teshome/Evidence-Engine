@@ -178,7 +178,7 @@ export function categoriseFullTextExclusion(
 // ---- aggregation ----------------------------------------------------------
 
 /** Same as bucketAbstractExclusions but groups the ScreenResult objects instead
- *  of counting them — so callers can show per-paper breakdowns in the PRISMA UI. */
+ *  of counting them, so callers can show per-paper breakdowns in the PRISMA UI. */
 export function bucketAbstractExclusionsByPaper(
   results: ScreenResult[] | null | undefined,
   overrides: Record<string, AbstractDecision> = {},

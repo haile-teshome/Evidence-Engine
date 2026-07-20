@@ -1,5 +1,5 @@
 // In-memory registry of uploaded-PDF blob URLs, keyed by paper id. Object URLs
-// can't be serialized/persisted, so they live only for the current session —
+// can't be serialized/persisted, so they live only for the current session,
 // enough for the in-app PDF viewer to render a study the user just uploaded.
 // Downstream tabs read text from `fullTexts`; this is only for the PDF preview.
 

@@ -1,6 +1,6 @@
 import { useState } from "react";
 // Bundle the pdf.js worker so PDF text extraction works offline (pdf.js v5 removed
-// `disableWorker` — a real worker URL must be set on GlobalWorkerOptions).
+// `disableWorker`, so a real worker URL must be set on GlobalWorkerOptions).
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { useStore, FullTextRecord } from "../lib/store";
 import { AIService } from "../lib/mockServices";
@@ -61,7 +61,7 @@ const HEADING_RE = /^\s*(?:\d+\.?\s+)?(abstract|background|introduction|objectiv
 function cleanCitations(t: string): string {
   return t
     // Collapse whitespace inside numeric citation groups: "[\n1\n,\n3 ]" → "[1,3]".
-    .replace(/\[[\s\d,;.–—-]*\d[\s\d,;.–—-]*\]/g, m => m.replace(/\s+/g, ""))
+    .replace(/\[[\s\d,;.–-]*\d[\s\d,;.–-]*\]/g, m => m.replace(/\s+/g, ""))
     .replace(/\s+([.,;:)])/g, "$1")   // no space before closing punctuation
     .replace(/\(\s+/g, "(")            // no space after opening paren
     .replace(/[ \t]{2,}/g, " ")
@@ -70,7 +70,7 @@ function cleanCitations(t: string): string {
 
 // Break an over-long reflowed paragraph into ~3-sentence chunks for readability.
 // Splits only between a sentence-ending mark and a capital/opening start, so it
-// never breaks on abbreviations like "U.S." — and is lossless (no text dropped).
+// never breaks on abbreviations like "U.S.", and is lossless (no text dropped).
 function splitLong(text: string): string[] {
   if (text.length <= 480) return [text];
   const sentences = text.split(/(?<=[.!?])\s+(?=[A-Z("'\[])/).map(x => x.trim()).filter(Boolean);
@@ -188,14 +188,14 @@ export function AcquisitionPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
   // Object URLs for PDFs uploaded this session, so the PDF tab can show the real
-  // file. Not persisted — web-fetched full texts keep only extracted text.
+  // file. Not persisted; web-fetched full texts keep only extracted text.
   const [pdfUrls, setPdfUrls] = useState<Record<string, string>>({});
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
 
   if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first to unlock full-text acquisition.</AlertDescription></Alert>;
-  // Honour reviewer overrides — papers the user marked Keep at abstract
+  // Honour reviewer overrides: papers the user marked Keep at abstract
   // screening get their full text fetched here even if the AI excluded them.
   const included = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
   if (included.length === 0) return <Alert><AlertDescription>No included papers from screening yet.</AlertDescription></Alert>;
@@ -427,7 +427,7 @@ export function AcquisitionPage() {
                 ) : selectedPaper ? (
                   <div className="flex-1 overflow-auto">
                     <DropZone
-                      reason={selected.status === "missing" ? (selected.reason || "Source did not return retrievable content.") : "Not fetched yet — click “Fetch all full texts”, or upload the file directly."}
+                      reason={selected.status === "missing" ? (selected.reason || "Source did not return retrievable content.") : "Not fetched yet. Click “Fetch all full texts”, or upload the file directly."}
                       warn={selected.status === "missing"}
                       onFile={f => uploadPdfFor(selectedPaper, f)}
                     />
@@ -458,7 +458,7 @@ export function AcquisitionPage() {
               onChange={e => { if (e.target.files?.length) onBulkFiles(Array.from(e.target.files)); e.currentTarget.value = ""; }} />
             <FileUp className="size-6 text-muted-foreground" />
             <div className="text-sm font-medium">Drop files here or click to select</div>
-            <div className="text-xs text-muted-foreground">PDF, TXT, or MD — multiple files supported</div>
+            <div className="text-xs text-muted-foreground">PDF, TXT, or MD (multiple files supported)</div>
           </label>
 
           {bulkRows.length > 0 && (
@@ -474,9 +474,9 @@ export function AcquisitionPage() {
                     value={row.matchId || NONE}
                     onValueChange={v => setBulkRows(rows => rows.map((r, j) => j === i ? { ...r, matchId: v === NONE ? "" : v } : r))}
                   >
-                    <SelectTrigger className="w-64 h-8 text-xs"><SelectValue placeholder="— choose study —" /></SelectTrigger>
+                    <SelectTrigger className="w-64 h-8 text-xs"><SelectValue placeholder="Choose a study" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={NONE}>— unmatched —</SelectItem>
+                      <SelectItem value={NONE}>Unmatched</SelectItem>
                       {included.map(p => (
                         <SelectItem key={p.paper_id} value={p.paper_id} className="text-xs">{p.Title.slice(0, 80)}</SelectItem>
                       ))}
@@ -523,7 +523,7 @@ function DropZone({ reason, warn, onFile }: { reason?: string; warn?: boolean; o
 }
 
 function MatchHint({ matched, score }: { matched: boolean; score: number }) {
-  if (!matched) return <div className="text-[11px] text-amber-700">No confident match — choose a study</div>;
+  if (!matched) return <div className="text-[11px] text-amber-700">No confident match. Choose a study.</div>;
   const strong = score >= 0.6;
   return (
     <div className={`text-[11px] ${strong ? "text-emerald-700" : "text-muted-foreground"}`}>

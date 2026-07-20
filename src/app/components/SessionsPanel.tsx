@@ -15,7 +15,7 @@ function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
-// Deterministic short summary of a research goal — strips conversational lead-ins
+// Deterministic short summary of a research goal. Strips conversational lead-ins
 // ("I want to know about the relationship between …") instead of slicing the
 // question verbatim. Mirrors the backend heuristic; used for the instant title
 // before the LLM's nicer one arrives.
@@ -103,7 +103,7 @@ export function SessionsPanel() {
     try {
       const items = await listSessions();
       setSessions(items);
-      // A successful list call means the backend is reachable — clear errors.
+      // A successful list call means the backend is reachable, so clear errors.
       if (syncStatus === "error") {
         setSyncStatus("idle");
         setSyncError(null);
@@ -127,7 +127,7 @@ export function SessionsPanel() {
 
   // On a fresh page load, silently restore the last active session so a browser
   // refresh keeps the user's work (and tab) in place. Runs once when auth is
-  // ready, and only if nothing is already loaded — never clobbers active work.
+  // ready, and only if nothing is already loaded. Never clobbers active work.
   const restoredRef = useRef(false);
   useEffect(() => {
     // Wait for the backend: attempting the restore before it's up would fail and
@@ -142,7 +142,7 @@ export function SessionsPanel() {
     // The local snapshot may already have restored this session, but localStorage
     // is capped (~5 MB) and silently drops the heaviest late-stage fields
     // (extractions, quality, snowball) when it overflows. The backend KV store has
-    // no such cap, so it's the authoritative, fuller copy — re-hydrate from it on
+    // no such cap, so it's the authoritative, fuller copy. Re-hydrate from it on
     // open. Guard against clobbering a DIFFERENT session or unsaved local work.
     if (s.currentSessionId && s.currentSessionId !== savedId) return;
     if (!s.currentSessionId && s.history.length > 0) return;
@@ -154,10 +154,10 @@ export function SessionsPanel() {
         s.hydrate(sess.data, false);
         s.setCurrentSessionId(sess.id);
         s.setCurrentSessionTitle(sess.title);
-        // Intentionally do NOT change the page — keep the tab restored from
+        // Intentionally do NOT change the page. Keep the tab restored from
         // storage so the refresh lands exactly where the user was.
       } catch (e: any) {
-        // Stale/inaccessible session id — clear it so we don't retry forever.
+        // Stale/inaccessible session id. Clear it so we don't retry forever.
         console.error("Auto-restore session failed:", e?.message);
         try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch { /* ignore */ }
       }

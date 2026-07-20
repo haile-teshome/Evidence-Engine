@@ -1,4 +1,4 @@
-// Inline conflicts panel — rendered inside the active project view on the
+// Inline conflicts panel, rendered inside the active project view on the
 // Projects page. Only meaningful when a project is open AND the viewer is
 // the lead or adjudicator (other roles would see other reviewers' decisions,
 // which would defeat blinding). When the user lacks the role we render a
@@ -55,7 +55,7 @@ export function ConflictsSection({ projectId }: { projectId: string }) {
         <Alert>
           <AlertTriangle className="size-4 inline mr-1" />
           <AlertDescription className="text-xs">
-            Conflicts are visible to the project lead, adjudicator, and viewers — not to reviewers (it would defeat blinding). Ask the lead to grant you the adjudicator role if you need to resolve conflicts.
+            Conflicts are visible to the project lead, adjudicator, and viewers, not to reviewers (that would defeat blinding). Ask the lead to grant you the adjudicator role if you need to resolve conflicts.
           </AlertDescription>
         </Alert>
       </Card>

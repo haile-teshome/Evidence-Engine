@@ -25,7 +25,7 @@ function deltaClass(d: number) {
 }
 
 function deltaLabel(d: number) {
-  return d === 0 ? "—" : `${d > 0 ? "+" : ""}${d.toLocaleString()}`;
+  return d === 0 ? "–" : `${d > 0 ? "+" : ""}${d.toLocaleString()}`;
 }
 
 // ── Comparison panel ──────────────────────────────────────────────────────────
@@ -214,7 +214,7 @@ export function SimulationPage() {
   const [testing, setTesting] = useState<string | null>(null);
   const [adapting, setAdapting] = useState(false);
 
-  // Compare state — tracks which two run IDs are selected (A then B).
+  // Compare state: tracks which two run IDs are selected (A then B).
   const [compareA, setCompareA] = useState<string | null>(null);
   const [compareB, setCompareB] = useState<string | null>(null);
   const [usedRunId, setUsedRunId] = useState<string | null>(null);
@@ -263,7 +263,7 @@ export function SimulationPage() {
     if (compareB === id) { setCompareB(null); return; }
     if (!compareA) { setCompareA(id); return; }
     if (!compareB) { setCompareB(id); return; }
-    // Both already set — replace B (cycle through)
+    // Both already set, replace B (cycle through)
     setCompareB(id);
   }
 
@@ -275,7 +275,7 @@ export function SimulationPage() {
     setUsedRunId(run.id);
     setCompareA(null);
     setCompareB(null);
-    toast.success(`Loaded ${run.label} — ${run.totalYield.toLocaleString()} papers`);
+    toast.success(`Loaded ${run.label}: ${run.totalYield.toLocaleString()} papers`);
   }
 
   // Does a run's queries still match what's currently in the editor?
@@ -352,7 +352,7 @@ export function SimulationPage() {
           });
           s.appendTaskLog(
             "ai-optimize",
-            `Iter ${iter} — ${source}: ${count.toLocaleString()} papers, relevance ${relevance.toFixed(2)} — ${reasoning || ""}`,
+            `Iter ${iter} · ${source}: ${count.toLocaleString()} papers, relevance ${relevance.toFixed(2)} · ${reasoning || ""}`,
           );
         },
         signal,
@@ -471,7 +471,7 @@ export function SimulationPage() {
                       {src}
                       {custom && <Badge variant="outline" className="text-[9px] px-1 py-0">custom</Badge>}
                     </span>
-                    <span className="text-sm font-semibold tabular-nums shrink-0">{y === null ? "—" : y.toLocaleString()}</span>
+                    <span className="text-sm font-semibold tabular-nums shrink-0">{y === null ? "–" : y.toLocaleString()}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="h-2 flex-1 rounded-full bg-muted overflow-hidden">
@@ -582,7 +582,7 @@ export function SimulationPage() {
         />
       </div>
 
-      {/* Comparison panel — shown when two runs are selected */}
+      {/* Comparison panel, shown when two runs are selected */}
       {runA && runB && (
         <ComparePanel
           a={runA}

@@ -65,7 +65,7 @@ export function ExtractionPage() {
       s.setExtractedPapers(out);
       if (signal.aborted) {
         s.updateTask("table-extract", { status: "canceled" });
-        toast.info(`Canceled — ${out.length} of ${passed.length} processed`);
+        toast.info(`Canceled: ${out.length} of ${passed.length} processed`);
       } else {
         s.updateTask("table-extract", { status: "done" });
         toast.success(`Tables extracted from ${out.length} papers`);
@@ -84,7 +84,7 @@ export function ExtractionPage() {
       const rows = s.extractedPapers.map(p => `"${p.Paper_Title}","${p.Source}",${p.Extracted_Tables.length}`).join("\n");
       download("all_extracted_tables_summary.csv", `Paper,Source,Tables\n${rows}`, "text/csv");
     } else {
-      // Excel Export — formatted XLSX with one worksheet per paper, all
+      // Excel Export: formatted XLSX with one worksheet per paper, all
       // tables stacked inside that worksheet.
       void downloadExtractedTablesXlsx(s.extractedPapers);
     }
@@ -114,7 +114,7 @@ export function ExtractionPage() {
               <Pill icon={FileText} title="Included papers available for extraction">{passed.length} included</Pill>
               {ep && <Pill icon={Table2} tone="green" title="Papers with extractable tables">{withTables} with tables</Pill>}
               {ep && withoutTables > 0 && (
-                <Pill icon={AlertTriangle} tone="amber" title="No extractable tables — paywalled, no tabular content, or PDF-only">{withoutTables} no tables</Pill>
+                <Pill icon={AlertTriangle} tone="amber" title="No extractable tables: paywalled, no tabular content, or PDF-only">{withoutTables} no tables</Pill>
               )}
             </div>
           </div>
@@ -395,7 +395,7 @@ function _safeSheetName(name: string, taken: Set<string>): string {
 
 async function downloadExtractedTablesXlsx(papers: ExtractedPaper[]) {
   if (!papers || papers.length === 0) {
-    toast.error("Nothing to export — run table extraction first.");
+    toast.error("Nothing to export. Run table extraction first.");
     return;
   }
 

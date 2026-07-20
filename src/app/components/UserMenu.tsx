@@ -8,7 +8,7 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { UserPlus, Check, RotateCcw } from "lucide-react";
 import { toast } from "sonner";
 
-// Local reviewer-profile switcher. No accounts or passwords — profiles exist so
+// Local reviewer-profile switcher. No accounts or passwords. Profiles exist so
 // multiple people screening on this machine (or LAN) get their own decisions in
 // dual-review projects. Everything is stored locally by the backend.
 export function UserMenu() {

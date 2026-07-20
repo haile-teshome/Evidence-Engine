@@ -14,7 +14,7 @@ export const FRESH_LAUNCH: boolean = (() => {
       return true;
     }
   } catch {
-    /* SSR / no window — treat as a normal load */
+    /* SSR / no window: treat as a normal load */
   }
   return false;
 })();

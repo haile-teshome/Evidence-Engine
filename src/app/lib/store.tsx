@@ -153,7 +153,7 @@ type Ctx = {
 
   // Reviewer overrides on screening decisions. Keyed by paper_id; value is
   // the reviewer's effective decision ("INCLUDE" / "EXCLUDE" for abstract,
-  // "Include" / "Exclude" for full-text — matching the case the screener
+  // "Include" / "Exclude" for full-text, matching the case the screener
   // already uses for each stage). The AI's original Decision stays on the
   // result row so the override is auditable.
   abstractOverrides: Record<string, "INCLUDE" | "EXCLUDE">;
@@ -173,13 +173,13 @@ type Ctx = {
   setQualityOverrides: (v: QualityOverride[]) => void;
   gradeOutcomes: GradeOutcome[]; setGradeOutcomes: React.Dispatch<React.SetStateAction<GradeOutcome[]>>;
 
-  // Relevance reranking — LEADS-scored papers from the home-analysis pipeline.
+  // Relevance reranking: LEADS-scored papers from the home-analysis pipeline.
   // Threshold is user-tunable in the sidebar; rerankResults holds the full
   // ranked list so the UI can re-filter without re-running LLM calls.
   rerankThreshold: number; setRerankThreshold: (v: number) => void;
   rerankResults: RerankResult | null; setRerankResults: (v: RerankResult | null) => void;
 
-  // Meta-analysis agent — extracted effect sizes + full analysis bundle
+  // Meta-analysis agent: extracted effect sizes + full analysis bundle
   // (pool + subgroup + LOO + funnel + Egger + Begg + trim-and-fill +
   // meta-regression). All editable by the user; rows can be removed or
   // corrected without re-running LLM extraction, then re-run the analysis
@@ -211,6 +211,7 @@ type Ctx = {
   // summary, so switching tabs doesn't re-fetch everything.
   writingEnriched: Record<string, Record<string, any>>; setWritingEnriched: React.Dispatch<React.SetStateAction<Record<string, Record<string, any>>>>;
   writingSummary: string; setWritingSummary: (v: string) => void;
+  writingMethodsMain: string; setWritingMethodsMain: (v: string) => void;
 
   // PRISMA
   prisma: PrismaCounts; setPrisma: React.Dispatch<React.SetStateAction<PrismaCounts>>;
@@ -282,7 +283,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     try { localStorage.setItem(PAGE_STORAGE_KEY, page); } catch { /* ignore */ }
   }, [page]);
-  // Default to LEADS — the benchmark's highest-performing screening model
+  // Default to LEADS, the benchmark's highest-performing screening model
   // (LEADS-mistral-7b × LEADS-native @ score ≥ +0.20: recall=1.000,
   // specificity=0.676, MCC=+0.260 on van_Dis_2020). The Backend resolves
   // "leads" to the full GGUF tag and routes to the LEADS-native pipeline.
@@ -387,6 +388,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [textExtractions, setTextExtractions] = useState<TextExtractionResult[]>([]);
   const [writingEnriched, setWritingEnriched] = useState<Record<string, Record<string, any>>>({});
   const [writingSummary, setWritingSummary] = useState("");
+  const [writingMethodsMain, setWritingMethodsMain] = useState("");
 
   const [prisma, setPrisma] = useState<PrismaCounts>({
     identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0,
@@ -485,17 +487,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // localStorage quota; backend sessions always keep them.
     simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary,
     textExtractions, fullTexts,
-    writingEnriched, writingSummary,
+    writingEnriched, writingSummary, writingMethodsMain,
   });
 
   // `authoritative` = true replaces every field outright (explicit session
-  // load/switch — the incoming session IS the truth, even where it's empty).
+  // load/switch: the incoming session IS the truth, even where it's empty).
   // `authoritative` = false is a RECONCILIATION (restore-on-open, where the
   // local snapshot and the backend session are two views of the same session):
   // an absent or empty incoming collection must NOT clobber one the store
   // already has populated. Without this, a leaner/staler source (or a session
   // whose late-stage tabs were dropped) wipes extractions/quality/snowball on
-  // reopen and autosave then persists the empties — the tabs-go-blank bug.
+  // reopen and autosave then persists the empties: the tabs-go-blank bug.
   const hydrate = (d: any, authoritative = true) => {
     if (!d) return;
     // Prefer a non-empty incoming collection; otherwise keep what we have.
@@ -549,6 +551,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setTextExtractions(prev => pick(d.textExtractions, prev, []) ?? []);
     if (d.writingEnriched && typeof d.writingEnriched === "object") setWritingEnriched(d.writingEnriched);
     if (typeof d.writingSummary === "string") setWritingSummary(d.writingSummary);
+    if (typeof d.writingMethodsMain === "string") setWritingMethodsMain(d.writingMethodsMain);
     setFullTexts(prev => pick(d.fullTexts, prev, {}) ?? {});
   };
 
@@ -568,7 +571,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Envelope keeps the session identity with the data, so a refresh keeps
       // editing the SAME session instead of spawning a duplicate.
       const env = { data: snapshot(), sessionId: currentSessionId, sessionTitle: currentSessionTitle };
-      // Primary store: IndexedDB — a much larger quota than localStorage (~5 MB),
+      // Primary store: IndexedDB, a much larger quota than localStorage (~5 MB),
       // so big full-text sets (many uploaded PDFs) persist intact across reloads.
       idbSet(LOCAL_SNAPSHOT_KEY, env)
         .then(() => { try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } })
@@ -586,7 +589,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const data: any = { ...env.data };
             for (const k of drop) delete data[k];
             try { localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ ...env, data })); break; }
-            catch { /* over quota — try the next, leaner tier */ }
+            catch { /* over quota, try the next, leaner tier */ }
           }
         });
     }, 600);
@@ -597,7 +600,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
       snowballResults, snowballScreened, extractedPapers, prisma,
       simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
-      writingEnriched, writingSummary,
+      writingEnriched, writingSummary, writingMethodsMain,
       currentSessionId, currentSessionTitle]);
 
   const restoreStarted = useRef(false);
@@ -624,7 +627,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           if (parsed.sessionId) setCurrentSessionId(parsed.sessionId);
           if (parsed.sessionTitle) setCurrentSessionTitle(parsed.sessionTitle);
         }
-      } catch { /* corrupt snapshot — ignore */ }
+      } catch { /* corrupt snapshot, ignore */ }
       finally { localRestored.current = true; }   // only now may auto-save run
     })();
   }, []);
@@ -643,7 +646,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setResults(null); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
     setSnowballResults(null); setSnowballScreened(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
-    setWritingEnriched({}); setWritingSummary("");
+    setWritingEnriched({}); setWritingSummary(""); setWritingMethodsMain("");
     setPrisma({ identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0, excluded_total: 0, exclusion_breakdown: {}, included_final: 0 });
     setCurrentSessionId(null); setCurrentSessionTitle("Untitled session");
     setCurrentProjectId(null); setCurrentProjectName(""); setCurrentProjectRole(null); setCurrentProjectMode(null);
@@ -670,6 +673,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,
+    writingMethodsMain, setWritingMethodsMain,
     currentSessionId, setCurrentSessionId, currentSessionTitle, setCurrentSessionTitle,
     currentProjectId, setCurrentProjectId,
     currentProjectName, setCurrentProjectName,

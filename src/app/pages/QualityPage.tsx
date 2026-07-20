@@ -65,7 +65,7 @@ function judgmentDotClass(j: RoBJudgment): string {
   return "bg-rose-700";              // critical
 }
 
-// Colour for a signalling-question answer (Y/PY/PN/N/NI) — a neutral indicator
+// Colour for a signalling-question answer (Y/PY/PN/N/NI), a neutral indicator
 // of the answer itself, independent of per-signal polarity.
 function answerClass(a: string): string {
   const v = (a || "").toUpperCase();
@@ -96,7 +96,7 @@ function shortDomainLabel(name: string): string {
     .replace(/^the /, "");
 }
 
-// "No information" reads better as "Unclear" for reviewers. Display-only — the
+// "No information" reads better as "Unclear" for reviewers. Display-only: the
 // stored judgment keeps the instrument's own scale value (ROBINS uses
 // "No information") so roll-up stays correct.
 function displayJudgment(j: string): string {
@@ -136,7 +136,7 @@ function latestOverride(
   return last;
 }
 
-/** Effective judgment for a domain — the override if present, else the AI's. */
+/** Effective judgment for a domain: the override if present, else the AI's. */
 function effectiveJudgment(
   paperId: string,
   domain: RoBDomain,
@@ -202,7 +202,7 @@ export function QualityPage() {
   // reviewer never loses a prior appraisal when switching frameworks.
   function archiveReport(outgoing: QualityReport | undefined, incomingInstrumentId?: string) {
     if (!outgoing || !outgoing.instrument_id) return;
-    if (outgoing.instrument_id === incomingInstrumentId) return;   // same tool re-run — nothing to keep
+    if (outgoing.instrument_id === incomingInstrumentId) return;   // same tool re-run, nothing to keep
     s.setQualityArchive(prev => [
       outgoing,
       ...prev.filter(a => !(a.paper_id === outgoing.paper_id
@@ -223,7 +223,7 @@ export function QualityPage() {
       fresh.assessed_at = new Date().toISOString();
       archiveReport(report, fresh.instrument_id);
       s.setQualityReports((s.qualityReports || []).map(r => r.paper_id === report.paper_id ? fresh : r));
-      // A new instrument means new domains — old overrides for this paper no longer apply.
+      // A new instrument means new domains, so old overrides for this paper no longer apply.
       s.setQualityOverrides(s.qualityOverrides.filter(o => o.paper_id !== report.paper_id));
       applyExcludeRule(excludeRule);
       const inst = instruments.find(i => i.id === instrumentId);
@@ -259,7 +259,7 @@ export function QualityPage() {
   }
 
   // Papers to appraise: the ones that PASSED screening. Risk-of-bias is only
-  // meaningful for studies you're actually including — prefer full-text includes,
+  // meaningful for studies you're actually including, so prefer full-text includes,
   // otherwise fall back to abstract includes.
   function includedPapers(): { papers: Paper[]; stage: "full-text" | "abstract" } {
     const toPaper = (r: any): Paper => ({ id: r.paper_id, source: r.Source, title: r.Title, abstract: r.Abstract, url: r.URL });
@@ -281,7 +281,7 @@ export function QualityPage() {
   async function runAssess(forceInstrumentId?: string) {
     const { papers, stage } = includedPapers();
     if (papers.length === 0) {
-      toast.error("No included papers yet — run Abstract or Full-Text screening first.");
+      toast.error("No included papers yet. Run Abstract or Full-Text screening first.");
       return;
     }
     const priorById = new Map((s.qualityReports || []).map(r => [r.paper_id, r]));
@@ -300,7 +300,7 @@ export function QualityPage() {
         });
         try {
           // Full text (when acquired) yields far better risk-of-bias judgments
-          // than the abstract alone — the backend uses it when provided.
+          // than the abstract alone; the backend uses it when provided.
           const fullText = s.fullTexts[p.id]?.text || undefined;
           const fresh = await QualityService.assessPaper(p, signal, {
             fullText,
@@ -335,11 +335,11 @@ export function QualityPage() {
       s.setQualityOverrides([]);
       if (signal.aborted) {
         s.updateTask("quality-assess", { status: "canceled" });
-        toast.info(`Canceled — ${reports.length} of ${papers.length} assessed`);
+        toast.info(`Canceled: ${reports.length} of ${papers.length} assessed`);
       } else {
         s.updateTask("quality-assess", { status: "done" });
         const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
-        toast.success(`Appraised ${reports.length} included papers${forcedName ? ` with ${forcedName}` : ` (${stage})`}${withFT ? ` — ${withFT} using full text` : ""}.`);
+        toast.success(`Appraised ${reports.length} included papers${forcedName ? ` with ${forcedName}` : ` (${stage})`}${withFT ? `, ${withFT} using full text` : ""}.`);
       }
     } catch (e: any) {
       s.updateTask("quality-assess", { status: "error", detail: e?.message });
@@ -376,7 +376,7 @@ export function QualityPage() {
   function proceedToScreening() {
     if (!s.qualityReports || !s.uniquePapers) return;
     const kept = s.uniquePapers.filter(p => !s.excludedByQuality.has(p.id));
-    if (kept.length === 0) { toast.error("All papers are currently excluded — adjust your selections."); return; }
+    if (kept.length === 0) { toast.error("All papers are excluded. Adjust your selections."); return; }
     s.setPage("abstract");
     toast.info(`${kept.length} papers will be carried forward to abstract screening.`);
   }
@@ -433,18 +433,18 @@ export function QualityPage() {
           <Alert>
             <AlertDescription>
               Risk-of-bias appraisal of your <strong>included</strong> papers, with a rubric matched to each study
-              design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Uses the acquired full text where available for more reliable
-              judgments; reviewer overrides are audit-logged.
+              design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Uses the acquired full text where available for better
+              judgments. Reviewer overrides are audit-logged.
             </AlertDescription>
           </Alert>
           {(() => {
             const { papers, stage } = includedPapers();
             const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
             return papers.length === 0 ? (
-              <Alert><AlertDescription>No included papers yet — run Abstract or Full-Text screening first, then come back to appraise risk of bias.</AlertDescription></Alert>
+              <Alert><AlertDescription>No included papers yet. Run Abstract or Full-Text screening first, then come back to appraise risk of bias.</AlertDescription></Alert>
             ) : (
               <div className="text-xs text-muted-foreground px-1">
-                {papers.length} included paper{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text acquired yet — abstract-only appraisal"}
+                {papers.length} included paper{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text yet, abstract-only appraisal"}
               </div>
             );
           })()}
@@ -479,15 +479,15 @@ export function QualityPage() {
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
                 Framework
-                <HelpLabel text="Re-run all included papers with one instrument, or auto-match each to its study design. Prior appraisals are saved per paper." />
+                <HelpLabel text="Re-run all papers with one instrument, or auto-match each to its study design. Prior appraisals are saved per paper." />
               </div>
               <div className="flex items-center gap-2">
                 <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
                   <SelectTrigger className="h-9 w-[240px] text-xs">
-                    <SelectValue placeholder="Auto — match by design" />
+                    <SelectValue placeholder="Auto: match by design" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__auto">Auto — match each paper's design</SelectItem>
+                    <SelectItem value="__auto">Auto: match each paper's design</SelectItem>
                     {["internal_validity", "reporting", "certainty"]
                       .filter(ax => instruments.some(i => i.axis === ax))
                       .map(ax => (
@@ -516,7 +516,7 @@ export function QualityPage() {
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
                 Exclude
-                <HelpLabel text="How aggressively to exclude papers based on risk of bias. Uses your edited judgments where applicable; override individual rows below." />
+                <HelpLabel text="How aggressively to exclude papers by risk of bias. Uses your edited judgments where set; override individual rows below." />
               </div>
               <div className="flex gap-1 flex-wrap">
                 {([
@@ -576,7 +576,7 @@ export function QualityPage() {
 
           <Card className="p-4">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-medium">Risk-of-bias appraisal{instrumentGroups.length > 1 && activeGroup ? ` — ${activeGroup.label}` : ""}</h3>
+              <h3 className="font-medium">Risk-of-bias appraisal{instrumentGroups.length > 1 && activeGroup ? `: ${activeGroup.label}` : ""}</h3>
               <div className="text-xs text-muted-foreground">
                 Select a paper, then click a judgment chip to override it.
               </div>
@@ -731,7 +731,7 @@ function PaperDetail({
         <div className="flex items-start gap-3">
           <label
             className="flex items-center gap-1.5 text-xs shrink-0 pt-0.5 cursor-pointer"
-            title={excluded ? "Excluded by quality — check to carry forward" : "Carrying forward to screening"}
+            title={excluded ? "Excluded by quality; check to carry forward" : "Carrying forward to screening"}
           >
             <Checkbox checked={!excluded} onCheckedChange={onToggleExclude} />
             <span className="text-muted-foreground">Keep</span>
@@ -764,7 +764,7 @@ function PaperDetail({
         </div>
         <div className="text-xs text-muted-foreground italic">
           Overall: <span className="not-italic font-medium">{overall.judgment}</span>
-          {" — "}{overall.rationale}
+          {". "}{overall.rationale}
         </div>
         {archived.length > 0 && (
           <SavedAppraisals
@@ -812,7 +812,7 @@ function FrameworkSelector({
   onRun: (instrumentId: string) => void;
 }) {
   // Staged selection: changing the dropdown only picks a tool; the appraisal runs
-  // only when the reviewer clicks Run (an LLM call — never fire it on every click).
+  // only when the reviewer clicks Run (an LLM call, never fire it on every click).
   const [pending, setPending] = useState(currentId);
   useEffect(() => { setPending(currentId); }, [currentId]);
 
@@ -829,7 +829,7 @@ function FrameworkSelector({
       <Select value={pending} onValueChange={setPending} disabled={reassessing}>
         <SelectTrigger
           className={`h-6 px-2 py-0 text-xs w-auto gap-1 border-dashed ${changed ? "border-primary/60 text-primary" : ""}`}
-          title="Appraisal framework — pick a tool, then Run to (re-)appraise this paper"
+          title="Appraisal framework: pick a tool, then Run to (re-)appraise this paper"
         >
           <SelectValue placeholder={fallbackLabel} />
         </SelectTrigger>
@@ -1009,7 +1009,7 @@ function DomainList({
               <details className="group mt-2.5 border-t">
                 <summary className="px-3 py-2 text-[11px] font-medium text-muted-foreground cursor-pointer select-none hover:text-foreground flex items-center gap-1.5">
                   <ChevronRight className="size-3 transition-transform group-open:rotate-90" />
-                  Evidence — {d.signals.length} signalling question{d.signals.length === 1 ? "" : "s"}
+                  Evidence: {d.signals.length} signalling question{d.signals.length === 1 ? "" : "s"}
                   {sigsWithQuote.length > 0 && <span className="opacity-70">· {sigsWithQuote.length} cited</span>}
                 </summary>
                 <div className="px-3 pb-3 space-y-3">
@@ -1168,7 +1168,7 @@ function AuditLogPanel({
   return (
     <div className="rounded border bg-muted/20 p-3 space-y-2">
       <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-muted-foreground">
-        <History className="size-3" /> Audit log — {paperOverrides.length} change{paperOverrides.length === 1 ? "" : "s"}
+        <History className="size-3" /> Audit log: {paperOverrides.length} change{paperOverrides.length === 1 ? "" : "s"}
       </div>
       {ordered.map(({ domain, history }) => {
         const latest = history[history.length - 1];
@@ -1230,7 +1230,7 @@ function AuditLogPanel({
 // judgments. Papers are grouped by instrument (each tool has its own domains).
 // ---------------------------------------------------------------------------
 // Risk-of-bias tiers shared by the summary bars, the traffic-light dots, and the
-// legend — one source of truth for colour + symbol across every instrument.
+// legend: one source of truth for colour + symbol across every instrument.
 const ROB_TIERS: { label: string; glyph: string; test: (r: number) => boolean; cls: string }[] = [
   { label: "Low", glyph: "+", test: r => r === 0, cls: "bg-emerald-500" },
   { label: "Some concerns / Moderate", glyph: "−", test: r => r === 1 || r === 2, cls: "bg-amber-500" },
@@ -1246,7 +1246,7 @@ function judgmentGlyph(j: string): string {
 }
 
 // A traffic-light cell: the whole square is filled with the judgment colour and
-// carries the judgment symbol (so it reads without relying on colour alone —
+// carries the judgment symbol (so it reads without relying on colour alone,
 // colourblind-safe and print-friendly).
 function RobCell({ j, title, overall }: { j: RoBJudgment; title: string; overall?: boolean }) {
   const ni = sevRank(j) < 0;
@@ -1299,7 +1299,7 @@ function EditableRobCell({
         <PopoverTrigger asChild>
           <button
             className={`w-full h-10 flex items-center justify-center font-bold text-[13px] leading-none ${ni ? "text-slate-600" : "text-white"} hover:brightness-95 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white/70`}
-            title={`${domain.name}: ${displayJudgment(judgment)} — click to edit`}
+            title={`${domain.name}: ${displayJudgment(judgment)} (click to edit)`}
           >
             {judgmentGlyph(judgment)}
           </button>
@@ -1385,7 +1385,7 @@ export function RobvisSummary({ reports, overrides, onOverride }: { reports: Qua
         const domains = rs[0]?.domains ?? [];
         const n = rs.length;
         // One entry per domain (+ an Overall row/column), with the effective
-        // judgment for every study — drives both the bars and the grid.
+        // judgment for every study, driving both the bars and the grid.
         const cols = [
           ...domains.map((d, i) => ({
             id: d.id, num: `D${i + 1}`, name: shortDomainLabel(d.name),
@@ -1400,7 +1400,7 @@ export function RobvisSummary({ reports, overrides, onOverride }: { reports: Qua
           <div key={inst} className="space-y-4">
             <div className="text-sm font-medium">{inst}</div>
 
-            {/* Weighted summary — proportion of studies at each level, per domain.
+            {/* Weighted summary: proportion of studies at each level, per domain.
                 Full domain names on the left, never truncated. */}
             <div className="space-y-1">
               {cols.map(col => {
@@ -1482,7 +1482,7 @@ export function RobvisSummary({ reports, overrides, onOverride }: { reports: Qua
         );
       })}
 
-      {/* Legend — colour + symbol together. */}
+      {/* Legend: colour + symbol together. */}
       <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px] pt-3 border-t">
         {ROB_TIERS.map(t => (
           <span key={t.label} className="flex items-center gap-1.5 text-muted-foreground">
@@ -1496,7 +1496,7 @@ export function RobvisSummary({ reports, overrides, onOverride }: { reports: Qua
 }
 
 // ---------------------------------------------------------------------------
-// GRADE — certainty of the body of evidence, per user-defined OUTCOME. This axis
+// GRADE: certainty of the body of evidence, per user-defined OUTCOME. This axis
 // is outcome-level (not study-level); certainty rolls up deterministically from
 // the downgrade/upgrade selections (mirrors Backend /api/grade).
 // ---------------------------------------------------------------------------
@@ -1536,7 +1536,7 @@ function GradePanel() {
     <Card className="p-4 space-y-3">
       <div className="flex items-center gap-2">
         <ShieldCheck className="size-4 text-primary" />
-        <h3 className="font-medium">Certainty of evidence — GRADE (per outcome)</h3>
+        <h3 className="font-medium">Certainty of evidence: GRADE (per outcome)</h3>
         <span className="text-xs text-muted-foreground">Outcome-level, separate from study risk of bias.</span>
       </div>
       <div className="flex gap-2">
@@ -1544,7 +1544,7 @@ function GradePanel() {
           onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); add(); } }} className="h-8 text-sm" />
         <Button size="sm" onClick={add} disabled={!name.trim()}><Plus className="size-3.5 mr-1" />Add outcome</Button>
       </div>
-      {outcomes.length === 0 && <div className="text-xs text-muted-foreground">No outcomes yet — add the outcomes you'll rate.</div>}
+      {outcomes.length === 0 && <div className="text-xs text-muted-foreground">No outcomes yet. Add the outcomes you'll rate.</div>}
       <div className="space-y-3">
         {outcomes.map(o => {
           const certainty = gradeCertainty(o);

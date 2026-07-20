@@ -39,7 +39,7 @@ export function useStudyImport() {
     // warn on the heavy (full-text PDF) count.
     const pdfCount = usable.filter(f => /\.pdf$/i.test(f.name) || f.type === "application/pdf").length;
     if (pdfCount > 500) {
-      toast.warning(`Attaching ${pdfCount.toLocaleString()} PDFs — parsing and screening this many takes a while. It still works; consider smaller batches if it feels slow.`, { duration: 9000 });
+      toast.warning(`Attaching ${pdfCount.toLocaleString()} PDFs. Parsing and screening this many takes a while. Consider smaller batches if it feels slow.`, { duration: 9000 });
     }
     setBusy(true);
     setProgress({ done: 0, total: usable.length, name: "" });
@@ -48,7 +48,7 @@ export function useStudyImport() {
       loadIntoCorpus(studies);
       if (studies.length) {
         toast.success(`Attached ${studies.length} stud${studies.length === 1 ? "y" : "ies"}`
-          + (failed.length ? ` — ${failed.length} could not be read (scanned/image-only?)` : ""));
+          + (failed.length ? `. ${failed.length} could not be read (scanned/image-only?)` : ""));
       } else {
         toast.error("None of the files yielded extractable text (scanned/image-only PDFs?).");
       }

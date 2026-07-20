@@ -4,7 +4,7 @@ import { useBackendReady } from "./backendReady";
 
 // Local reviewer profiles replace cloud accounts. A "user" is just a named
 // profile (with an optional email) stored in the local backend. There are no
-// passwords or sign-in — you pick or create a profile, and its id scopes your
+// passwords or sign-in. You pick or create a profile, and its id scopes your
 // sessions and per-reviewer decisions in multi-reviewer projects.
 
 export type AuthUser = { id: string; email: string; name?: string };
@@ -33,7 +33,7 @@ async function loadReviewers(): Promise<AuthUser[]> {
     }));
     return list.length ? list : [DEFAULT_USER];
   } catch {
-    // Backend not up yet (or offline) — fall back to the default profile so the
+    // Backend not up yet (or offline). Fall back to the default profile so the
     // app is always usable locally.
     return [DEFAULT_USER];
   }

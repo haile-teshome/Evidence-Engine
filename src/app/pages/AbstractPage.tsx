@@ -27,7 +27,7 @@ function picoVoteClass(v: PicoVote): string {
 
 function picoVoteShort(v: PicoVote): string {
   // Compact label so the column cells stay narrow. NA is intentionally not
-  // mapped here — NA cells render as an empty placeholder via PicoCell, not
+  // mapped here. NA cells render as an empty placeholder via PicoCell, not
   // as a chip.
   switch (v) {
     case "PASS":    return "✓";
@@ -92,7 +92,7 @@ export function AbstractPage() {
           ],
         });
         // Pull the FULL planning corpus: every source's own query, up to its
-        // planning yield — so all found papers are screened, not a small sample.
+        // planning yield, so all found papers are screened, not a small sample.
         const { papers: all, truncated } = await DataAggregator.fetchForScreening(
           s.sources,
           s.perDbQueries,
@@ -103,7 +103,7 @@ export function AbstractPage() {
         );
         if (signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
         if (truncated.length > 0) {
-          toast.info(`Very large result set — capped ${truncated.join(", ")} for screening.`);
+          toast.info(`Large result set: capped ${truncated.join(", ")} for screening.`);
         }
         const { unique, duplicates } = Deduplicator.run(all);
         // Persist so a later QA run can reuse this set, and so the PRISMA flow
@@ -114,7 +114,7 @@ export function AbstractPage() {
         queue = unique;
         if (queue.length === 0) {
           s.updateTask("abstract-screen", { status: "error", detail: "No papers retrieved for this query." });
-          toast.error("No papers retrieved for this query — broaden it on the Home page.");
+          toast.error("No papers retrieved for this query. Broaden it on the Home page.");
           return;
         }
         s.updateTask("abstract-screen", {
@@ -133,7 +133,7 @@ export function AbstractPage() {
     s.updateTask("abstract-screen", { progress: { done: 0, total: queue.length } });
     try {
       const reasons: Record<string, number> = {};
-      // Screen with bounded concurrency — much faster on large sets. Cloud models
+      // Screen with bounded concurrency, much faster on large sets. Cloud models
       // handle many parallel calls; a local Ollama serves fewer at once, so keep
       // the pool small there to avoid thrashing.
       const CONCURRENCY = /^(claude|gpt|gemini)/i.test(s.model) ? 8 : 3;
@@ -167,7 +167,7 @@ export function AbstractPage() {
 
       if (signal.aborted) {
         s.updateTask("abstract-screen", { status: "canceled" });
-        toast.info(`Canceled — ${screened.length} of ${queue.length} screened`);
+        toast.info(`Canceled: ${screened.length} of ${queue.length} screened`);
       }
 
       const totalExcluded = Object.values(reasons).reduce((a, b) => a + b, 0);
@@ -220,7 +220,7 @@ export function AbstractPage() {
       {!r && !s.uniquePapers && s.query && (
         <Alert>
           <AlertDescription>
-            Ready to screen against your PICO. Papers will be fetched and deduplicated on demand — Quality Assessment is optional and can still be run beforehand from the sidebar.
+            Ready to screen against your PICO. Papers are fetched and deduplicated on demand. Quality Assessment is optional and can be run first from the sidebar.
           </AlertDescription>
         </Alert>
       )}
@@ -256,7 +256,7 @@ export function AbstractPage() {
             </div>
             {overrideCount > 0 && (
               <div className="text-xs text-muted-foreground mb-2">
-                {overrideCount} reviewer override{overrideCount === 1 ? "" : "s"} active —
+                {overrideCount} reviewer override{overrideCount === 1 ? "" : "s"} active.
                 Decision column reflects the reviewer's choice.
               </div>
             )}
@@ -264,7 +264,7 @@ export function AbstractPage() {
               <table className="w-full text-sm border-collapse">
                 <thead className="bg-muted sticky top-0 z-30">
                   <tr className="text-left">
-                    <th className="px-3 py-2 sticky left-0 bg-muted z-40 border-b border-r min-w-[60px] text-center" title="Reviewer override — check to keep, uncheck to drop">Keep</th>
+                    <th className="px-3 py-2 sticky left-0 bg-muted z-40 border-b border-r min-w-[60px] text-center" title="Check to keep, uncheck to drop">Keep</th>
                     <th className="px-3 py-2 sticky left-[60px] bg-muted z-40 border-b border-r min-w-[120px]">Decision</th>
                     <th className="px-3 py-2 sticky left-[180px] bg-muted z-40 border-b border-r min-w-[260px] max-w-[260px] shadow-[6px_0_8px_-6px_rgba(0,0,0,0.22)]">Title</th>
                     <th className="px-3 py-2 border-b whitespace-nowrap">Source</th>
@@ -288,7 +288,7 @@ export function AbstractPage() {
                             checked={keep}
                             onCheckedChange={(v) => {
                               const wantKeep = v === true;
-                              // Local override (always — keeps in-memory state in sync).
+                              // Local override (always, keeps in-memory state in sync).
                               if ((row.Decision === "INCLUDE") === wantKeep) {
                                 s.clearAbstractOverride(row.paper_id);
                               } else {
@@ -347,7 +347,7 @@ export function AbstractPage() {
               </table>
             </div>
             {passed.length > 0 && (
-              <Alert className="mt-3"><AlertDescription>{passed.length} papers passed abstract screening — head to Full-Text Evidence to continue.</AlertDescription></Alert>
+              <Alert className="mt-3"><AlertDescription>{passed.length} papers passed abstract screening. Continue to Full-Text Evidence.</AlertDescription></Alert>
             )}
           </Card>
         </>
@@ -373,7 +373,7 @@ export function AbstractPage() {
 // ---- per-PICO chip with evidence popover ----------------------------------
 //
 // NA ("not assessed") renders as a neutral slate chip with a minus glyph and a
-// popover that explains *why* — either the PICO element was left blank in the
+// popover that explains *why*: either the PICO element was left blank in the
 // frame, or the abstract lacked the information needed to judge it. This reads
 // as an intentional state rather than a missing/incomplete value.
 
@@ -383,7 +383,7 @@ function PicoCell({ label, field, criterion }: { label: string; field?: PicoFiel
   const naReason = (field?.reasoning || "").trim()
     || ((criterion || "").trim()
       ? `The abstract did not give enough information to judge the ${label.toLowerCase()}.`
-      : `No ${label.toLowerCase()} was specified in your PICO frame, so there is nothing to assess this paper against. Add one on the Home page to enable this check.`);
+      : `No ${label.toLowerCase()} in your PICO frame, so there's nothing to assess against. Add one on the Home page to enable this check.`);
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -500,7 +500,7 @@ async function downloadAbstractXlsx(
     { header: "O · reasoning", key: "o_reason",   width: 40 },
   ];
 
-  // Header styling — dark band with white bold text.
+  // Header styling: dark band with white bold text.
   const header = ws.getRow(1);
   header.height = 26;
   header.eachCell((cell) => {
@@ -536,13 +536,13 @@ async function downloadAbstractXlsx(
       o_reason: pa?.outcome.reasoning ?? "",
     });
 
-    // Default to top-aligned wrapped text everywhere — quotes are often long.
+    // Default to top-aligned wrapped text everywhere, quotes are often long.
     row.eachCell((cell) => {
       cell.alignment = { vertical: "top", wrapText: true };
       cell.font = { size: 10 };
     });
 
-    // Colour-coded Decision cell — uses the EFFECTIVE decision. The AI's
+    // Colour-coded Decision cell, uses the EFFECTIVE decision. The AI's
     // original verdict stays available in the adjacent "AI Decision" column
     // for audit purposes.
     const decCell = row.getCell("decision");
@@ -582,7 +582,7 @@ async function downloadAbstractXlsx(
       urlCell.font = { size: 10, color: { argb: "FF1D4ED8" }, underline: true };
     }
 
-    // Reasonable minimum row height — let Excel auto-grow when needed.
+    // Reasonable minimum row height, let Excel auto-grow when needed.
     row.height = 60;
   }
 

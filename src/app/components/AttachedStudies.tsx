@@ -72,7 +72,7 @@ export function AttachedStudies({
                   <span className="flex-1 min-w-0">
                     <span className="block text-xs font-medium line-clamp-2">{p.title}</span>
                     <span className="block text-[11px] text-muted-foreground mt-0.5">
-                      {p.authors ? p.authors.split(/[;,]/)[0] + " et al." : "—"}{p.year ? ` · ${p.year}` : ""}
+                      {p.authors ? p.authors.split(/[;,]/)[0] + " et al." : "Unknown author"}{p.year ? ` · ${p.year}` : ""}
                     </span>
                   </span>
                   <span

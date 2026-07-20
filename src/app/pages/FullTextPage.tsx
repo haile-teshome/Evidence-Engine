@@ -26,7 +26,7 @@ export function FullTextPage() {
   // rescued at the abstract stage (by checking its Keep box) now joins the
   // full-text queue, and one they dropped is removed.
   const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
-  if (passed.length === 0) return <Alert><AlertDescription>No papers passed abstract screening — adjust your criteria and rerun.</AlertDescription></Alert>;
+  if (passed.length === 0) return <Alert><AlertDescription>No papers passed abstract screening. Adjust your criteria and rerun.</AlertDescription></Alert>;
 
   // Screen `targets`. When `append`, keep the existing results and add the new
   // rows (used to screen papers added after the first run, e.g. via snowball);
@@ -79,7 +79,7 @@ export function FullTextPage() {
       s.setPrisma(p => ({ ...p, ft_exclusion_breakdown: ftReasons, included_final: combined.filter(x => x.Decision === "Include").length }));
       if (signal.aborted) {
         s.updateTask("full-text-screen", { status: "canceled" });
-        toast.info(`Canceled — ${out.length} of ${list.length} screened`);
+        toast.info(`Canceled: ${out.length} of ${list.length} screened`);
       } else {
         s.updateTask("full-text-screen", { status: "done" });
         toast.success(`Full-text screening complete in ${formatDuration((Date.now() - start) / 1000)}`);
@@ -92,7 +92,7 @@ export function FullTextPage() {
   const ft = s.fullTextResults;
   const allCriteria = [...s.inclusion, ...s.exclusion];
   // Papers in the queue that haven't been screened at full text yet (e.g. added
-  // later via snowball) — offer to screen just these without redoing the rest.
+  // later via snowball). Offer to screen just these without redoing the rest.
   const newPapers = ft ? passed.filter(p => !ft.some(r => r.paper_id === p.paper_id)) : [];
 
   return (
@@ -158,7 +158,7 @@ export function FullTextPage() {
                 )}
                 {overrideCount > 0 && (
                   <div className="text-xs text-muted-foreground mb-2">
-                    {overrideCount} reviewer override{overrideCount === 1 ? "" : "s"} active — Decision column reflects the reviewer's choice.
+                    {overrideCount} reviewer override{overrideCount === 1 ? "" : "s"} active. Decision column reflects the reviewer's choice.
                   </div>
                 )}
               </>
@@ -168,7 +168,7 @@ export function FullTextPage() {
             <table className="w-full text-sm border-collapse">
               <thead className="bg-muted sticky top-0 z-30">
                 <tr className="text-left">
-                  <th className="px-3 py-2 sticky left-0 bg-muted z-40 border-b border-r min-w-[60px] text-center" title="Reviewer override — check to keep, uncheck to drop">Keep</th>
+                  <th className="px-3 py-2 sticky left-0 bg-muted z-40 border-b border-r min-w-[60px] text-center" title="Reviewer override: check to keep, uncheck to drop">Keep</th>
                   <th className="px-3 py-2 sticky left-[60px] bg-muted z-40 border-b border-r min-w-[120px]">Decision</th>
                   <th className="px-3 py-2 sticky left-[180px] bg-muted z-40 border-b border-r min-w-[300px] max-w-[300px] shadow-[6px_0_8px_-6px_rgba(0,0,0,0.22)]">Title</th>
                   <th className="px-3 py-2 border-b whitespace-nowrap border-l">Population</th>

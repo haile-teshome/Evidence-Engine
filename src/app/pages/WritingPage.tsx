@@ -195,6 +195,23 @@ function downloadFile(content: string, filename: string, mime: string) {
   URL.revokeObjectURL(a.href);
 }
 
+// The interface/platform each source was searched through, shown in the
+// PRISMA-S appendix so reviewers can name the exact resource (editable).
+const PLATFORM_DEFAULTS: Record<string, string> = {
+  "PubMed": "NCBI PubMed",
+  "Europe PMC": "Europe PMC (REST API)",
+  "Semantic Scholar": "Semantic Scholar (Graph API)",
+  "OpenAlex": "OpenAlex (REST API)",
+  "CrossRef": "Crossref (REST API)",
+  "arXiv": "arXiv (API)",
+  "bioRxiv": "bioRxiv (API)",
+  "medRxiv": "medRxiv (API)",
+  "DOAJ": "Directory of Open Access Journals (API)",
+  "CORE": "CORE (API)",
+  "Scopus": "Elsevier Scopus",
+  "Embase": "Elsevier Embase (Emtree)",
+};
+
 // ── Multi-source metadata enrichment ─────────────────────────────────────────
 
 async function fetchEuropePmc(pmid: string): Promise<Partial<PaperMeta>> {
@@ -271,7 +288,7 @@ async function fetchCrossRef(doi: string): Promise<Partial<PaperMeta>> {
 async function fetchMetadata(p: PaperMeta): Promise<Partial<PaperMeta>> {
   const src = p.source.toLowerCase();
 
-  // Europe PMC — id is a PMID (pure digits) or EPM internal ID
+  // Europe PMC: id is a PMID (pure digits) or EPM internal ID
   if (src.includes("europe pmc") || src.includes("europepmc") || src.includes("pubmed")) {
     const pmid = p.paper_id.replace(/\D/g, "");
     if (pmid) {
@@ -280,7 +297,7 @@ async function fetchMetadata(p: PaperMeta): Promise<Partial<PaperMeta>> {
     }
   }
 
-  // OpenAlex / Semantic Scholar — id starts with W
+  // OpenAlex / Semantic Scholar: id starts with W
   if (/^W\d+/.test(p.paper_id) || src.includes("openalex") || src.includes("semantic")) {
     const data = await fetchOpenAlex(p.paper_id);
     if (data.authors || data.year) return data;
@@ -315,18 +332,18 @@ export function WritingPage() {
 
   // Walk back through the pipeline to find the best available paper set.
   const { includedPapers, stage } = useMemo(() => {
-    // Stage 1 — full-text screening decisions
+    // Stage 1: full-text screening decisions
     const ftIncluded = s.fullTextResults?.filter(r => r.Decision === "Include") ?? [];
     if (ftIncluded.length)
       return { includedPapers: ftIncluded.map(fromFullTextResult), stage: "full-text screening" };
 
-    // Stage 2 — abstract screening decisions (with reviewer overrides)
+    // Stage 2: abstract screening decisions (with reviewer overrides)
     const abIncluded = (s.results ?? [])
       .filter(r => (s.abstractOverrides[r.paper_id] ?? r.Decision) === "INCLUDE");
     if (abIncluded.length)
       return { includedPapers: abIncluded.map(fromScreenResult), stage: "abstract screening" };
 
-    // Stage 3 — LEADS relevance rerank kept set
+    // Stage 3: LEADS relevance rerank kept set
     const reranked = s.rerankResults?.kept ?? [];
     if (reranked.length)
       return {
@@ -343,7 +360,7 @@ export function WritingPage() {
         stage: "relevance rerank",
       };
 
-    // Stage 4 — deduplicated retrieval pool
+    // Stage 4: deduplicated retrieval pool
     const unique = s.uniquePapers ?? [];
     if (unique.length)
       return {
@@ -360,7 +377,7 @@ export function WritingPage() {
         stage: "retrieval (all)",
       };
 
-    // Stage 5 — raw retrieved papers
+    // Stage 5: raw retrieved papers
     const raw = s.rawPapers ?? [];
     return {
       includedPapers: raw.map(p => ({
@@ -383,6 +400,8 @@ export function WritingPage() {
   const setEnriched = s.setWritingEnriched;
   const summary = s.writingSummary;
   const setSummary = s.setWritingSummary;
+  const mainText = s.writingMethodsMain;
+  const setMainText = s.setWritingMethodsMain;
   const [enriching, setEnriching] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [format, setFormat] = useState<CiteFormat>("BibTeX");
@@ -390,6 +409,20 @@ export function WritingPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [searchDate, setSearchDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [editingSummary, setEditingSummary] = useState(false);
+  const [editingMain, setEditingMain] = useState(false);
+  // Per-database interface overrides + a global coverage/limits note for the appendix.
+  const [platforms, setPlatforms] = useState<Record<string, string>>({});
+  const [coverage, setCoverage] = useState(
+    "Each database was searched from inception to the search date, with no language or date restrictions.",
+  );
+  // Characteristics of included studies (per paper) + Ask-your-evidence Q&A.
+  type CharRow = { design: string; population: string; intervention: string; comparator: string; outcomes: string };
+  const emptyChar: CharRow = { design: "", population: "", intervention: "", comparator: "", outcomes: "" };
+  const [characteristics, setCharacteristics] = useState<Record<string, CharRow>>({});
+  const [genChar, setGenChar] = useState(false);
+  const [askQ, setAskQ] = useState("");
+  const [askAnswer, setAskAnswer] = useState("");
+  const [asking, setAsking] = useState(false);
 
   const merged = useMemo<PaperMeta[]>(
     () => includedPapers.map(p => ({ ...p, ...(enriched[p.paper_id] ?? {}) })),
@@ -414,7 +447,7 @@ export function WritingPage() {
 
   async function enrichAll(papers = includedPapers, force = false) {
     const todo = papers.filter(p => force || !enriched[p.paper_id]);
-    if (todo.length === 0) return;   // already cached — no refetch
+    if (todo.length === 0) return;   // already cached, no refetch
     setEnriching(true);
     let done = 0;
     for (const p of todo) {
@@ -446,7 +479,7 @@ export function WritingPage() {
     downloadFile(allFormatted(), `references.${fmtCfg.ext}`, fmtCfg.mime);
     toast.success(
       format === "RIS"
-        ? "Downloaded references.ris — import into Zotero via File → Import"
+        ? "Downloaded references.ris. Import into Zotero via File → Import"
         : `Downloaded references.${fmtCfg.ext}`,
     );
   }
@@ -461,6 +494,7 @@ export function WritingPage() {
   async function generateSummary() {
     setGenerating(true);
     setSummary("");
+    setMainText("");
     try {
       // Collect per-database result counts from simulation or PRISMA counts
       const dbCounts: Record<string, number> = s.simulation
@@ -498,10 +532,11 @@ export function WritingPage() {
         body: JSON.stringify(searchPayload),
       });
       if (!r.ok) throw new Error(await r.text());
-      const { summary: text } = await r.json();
-      setSummary(text);
+      const data = await r.json();
+      setMainText(data.main_text || "");
+      setSummary(data.appendix || data.summary || "");
     } catch (e: any) {
-      toast.error(`Summary failed: ${e.message}`);
+      toast.error(`Methods generation failed: ${e.message}`);
     } finally {
       setGenerating(false);
     }
@@ -516,8 +551,10 @@ export function WritingPage() {
     if (s.rawPapers) { const c = s.rawPapers.filter(p => p.source === src).length; return c || null; }
     return null;
   };
+  const platformOf = (src: string) => platforms[src] ?? PLATFORM_DEFAULTS[src] ?? src;
   const searchRows = apiDbs.map(src => ({
     db: src,
+    platform: platformOf(src),
     query: (s.perDbQueries[src] || baseQuery || "").trim(),
     count: countOf(src),
   }));
@@ -528,11 +565,12 @@ export function WritingPage() {
 
   function buildSearchAppendix(): string {
     const L: string[] = [];
-    L.push("SEARCH STRATEGY (PRISMA-S)");
+    L.push("APPENDIX: SEARCH STRATEGY (PRISMA-S)");
     L.push("");
     L.push(`Databases searched (${apiDbs.length}): ${apiDbs.join(", ") || "none"}.`);
     if (s.sources.includes("Local PDFs")) L.push(`Additional records: uploaded local PDFs (${s.files.length}).`);
     L.push(`Search date: ${searchDate}.`);
+    if (coverage.trim()) L.push(`Coverage / limits: ${coverage.trim()}`);
     if (baseQuery) {
       L.push("");
       L.push("Base query (applied to each database unless a custom string is shown below):");
@@ -544,9 +582,10 @@ export function WritingPage() {
     for (const r of searchRows) {
       L.push("");
       L.push(r.db);
-      L.push(`  Query run:         ${r.query || "(not specified)"}`);
-      L.push(`  Date searched:     ${searchDate}`);
-      L.push(`  Records retrieved: ${r.count != null ? r.count.toLocaleString() : "not run"}`);
+      L.push(`  Interface/platform: ${r.platform}`);
+      L.push(`  Query run:          ${r.query || "(not specified)"}`);
+      L.push(`  Date searched:      ${searchDate}`);
+      L.push(`  Records retrieved:  ${r.count != null ? r.count.toLocaleString() : "not run"}`);
     }
     L.push("");
     L.push("Identification");
@@ -559,9 +598,122 @@ export function WritingPage() {
 
   function appendixCsv(): string {
     const esc = (v: string) => `"${String(v).replace(/"/g, '""')}"`;
-    const rows = [["Database", "Query", "Date searched", "Records retrieved"]];
-    for (const r of searchRows) rows.push([r.db, r.query, searchDate, r.count != null ? String(r.count) : "not run"]);
+    const rows = [["Database", "Interface/platform", "Search string", "Date searched", "Records retrieved"]];
+    for (const r of searchRows) rows.push([r.db, r.platform, r.query, searchDate, r.count != null ? String(r.count) : "not run"]);
     return rows.map(row => row.map(esc).join(",")).join("\n");
+  }
+
+  // Publication-ready Word appendix: a formatted search-strategy table plus the
+  // configuration and identification counts, the format journals expect.
+  async function exportAppendixDocx() {
+    try {
+      const docx = await import("docx");
+      const { Document, Packer, Paragraph, TextRun, Table: DTable, TableRow: DRow, TableCell: DCell, WidthType, HeadingLevel, AlignmentType, BorderStyle } = docx as any;
+      const cellBorder = { style: BorderStyle.SINGLE, size: 4, color: "999999" };
+      const borders = { top: cellBorder, bottom: cellBorder, left: cellBorder, right: cellBorder };
+      const hdr = (t: string) => new DCell({ borders, shading: { fill: "EEF6F5" }, children: [new Paragraph({ children: [new TextRun({ text: t, bold: true, size: 18 })] })] });
+      const cell = (t: string, opts: any = {}) => new DCell({ borders, children: [new Paragraph({ alignment: opts.right ? AlignmentType.RIGHT : AlignmentType.LEFT, children: [new TextRun({ text: t, size: opts.mono ? 16 : 18, font: opts.mono ? "Consolas" : undefined })] })] });
+      const rows = [
+        new DRow({ tableHeader: true, children: [hdr("Database"), hdr("Interface / platform"), hdr("Search string"), hdr("Date"), hdr("Records")] }),
+        ...searchRows.map(r => new DRow({ children: [
+          cell(r.db), cell(r.platform), cell(r.query || "(not specified)", { mono: true }), cell(searchDate), cell(r.count != null ? r.count.toLocaleString() : "not run", { right: true }),
+        ] })),
+        new DRow({ children: [cell("Total records retrieved"), cell(""), cell(""), cell(""), cell(identified != null ? identified.toLocaleString() : "n/a", { right: true })] }),
+        new DRow({ children: [cell("Duplicates removed"), cell(""), cell(""), cell(""), cell(dupRemoved.toLocaleString(), { right: true })] }),
+        new DRow({ children: [cell("Unique records screened"), cell(""), cell(""), cell(""), cell(afterDedup != null ? afterDedup.toLocaleString() : "n/a", { right: true })] }),
+      ];
+      const p = (runs: any[]) => new Paragraph({ spacing: { after: 120 }, children: runs });
+      const doc = new Document({ styles: { default: { document: { run: { font: "Calibri", size: 22 } } } }, sections: [{ children: [
+        new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun("Appendix: Search strategy (PRISMA-S)")] }),
+        p([new TextRun({ text: "Databases searched: ", bold: true }), new TextRun(`${apiDbs.join(", ") || "none"} (${apiDbs.length}).`)]),
+        p([new TextRun({ text: "Search date: ", bold: true }), new TextRun(`${searchDate}.`)]),
+        ...(coverage.trim() ? [p([new TextRun({ text: "Coverage / limits: ", bold: true }), new TextRun(coverage.trim())])] : []),
+        ...(baseQuery ? [p([new TextRun({ text: "Base query: ", bold: true }), new TextRun({ text: baseQuery, font: "Consolas", size: 18 })])] : []),
+        new Paragraph({ spacing: { before: 120, after: 120 }, children: [new TextRun({ text: "Table A1. Per-database search strings and yield.", bold: true, italics: true })] }),
+        new DTable({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }),
+      ] }] });
+      const blob = await Packer.toBlob(doc);
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob); a.download = "search_strategy_appendix.docx"; a.click(); URL.revokeObjectURL(a.href);
+      toast.success("Downloaded search_strategy_appendix.docx");
+    } catch (e: any) {
+      toast.error(`Word export failed: ${e?.message || e}`);
+    }
+  }
+
+  // ── Characteristics of included studies ─────────────────────────────────────
+  const robOf = (paperId: string): string =>
+    (s.qualityReports || []).find(r => r.paper_id === paperId)?.overall_judgment || "";
+  const studyLabel = (p: PaperMeta): string =>
+    `${p.authors ? p.authors.split(/[;,]/)[0].trim() + " et al." : p.source}${p.year ? ` ${p.year}` : ""}`.trim();
+
+  function setCharCell(id: string, field: keyof CharRow, val: string) {
+    setCharacteristics(prev => ({ ...prev, [id]: { ...(prev[id] || emptyChar), [field]: val } }));
+  }
+
+  async function generateCharacteristics() {
+    if (!merged.length) { toast.error("No included studies yet. Finish screening first."); return; }
+    setGenChar(true);
+    try {
+      const papers = merged.map(p => ({ id: p.paper_id, title: p.title, abstract: p.abstract || "", full_text: s.fullTexts[p.paper_id]?.text || "" }));
+      const r = await fetch("/api/writing/characteristics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ papers, model: s.model }) });
+      if (!r.ok) throw new Error(await r.text());
+      const { characteristics: list } = await r.json();
+      const map: Record<string, CharRow> = {};
+      for (const c of list) map[c.id] = { design: c.design, population: c.population, intervention: c.intervention, comparator: c.comparator, outcomes: c.outcomes };
+      setCharacteristics(prev => ({ ...prev, ...map }));
+      toast.success(`Extracted characteristics for ${list.length} stud${list.length === 1 ? "y" : "ies"}`);
+    } catch (e: any) { toast.error(`Extraction failed: ${e.message}`); }
+    finally { setGenChar(false); }
+  }
+
+  function characteristicsCsv(): string {
+    const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const rows = [["Study", "Design", "Population", "Intervention", "Comparator", "Outcomes", "Risk of bias"]];
+    merged.forEach(p => {
+      const c = characteristics[p.paper_id] || emptyChar;
+      rows.push([studyLabel(p), c.design, c.population, c.intervention, c.comparator, c.outcomes, robOf(p.paper_id)]);
+    });
+    return rows.map(r => r.map(esc).join(",")).join("\n");
+  }
+
+  async function exportCharacteristicsDocx() {
+    try {
+      const docx = await import("docx");
+      const { Document, Packer, Paragraph, TextRun, Table: DTable, TableRow: DRow, TableCell: DCell, WidthType, HeadingLevel, AlignmentType, BorderStyle } = docx as any;
+      const b = { style: BorderStyle.SINGLE, size: 4, color: "999999" };
+      const borders = { top: b, bottom: b, left: b, right: b };
+      const hdr = (t: string) => new DCell({ borders, shading: { fill: "EEF6F5" }, children: [new Paragraph({ children: [new TextRun({ text: t, bold: true, size: 16 })] })] });
+      const cell = (t: string) => new DCell({ borders, children: [new Paragraph({ children: [new TextRun({ text: t || "", size: 16 })] })] });
+      const rows = [
+        new DRow({ tableHeader: true, children: ["Study", "Design", "Population", "Intervention", "Comparator", "Outcomes", "Risk of bias"].map(hdr) }),
+        ...merged.map(p => { const c = characteristics[p.paper_id] || emptyChar; return new DRow({ children: [studyLabel(p), c.design, c.population, c.intervention, c.comparator, c.outcomes, robOf(p.paper_id)].map(cell) }); }),
+      ];
+      const doc = new Document({ styles: { default: { document: { run: { font: "Calibri", size: 20 } } } }, sections: [{ children: [
+        new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun("Characteristics of included studies")] }),
+        new Paragraph({ spacing: { after: 120 }, children: [new TextRun({ text: `Table. Characteristics of the ${merged.length} included studies.`, italics: true })] }),
+        new DTable({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }),
+      ] }] });
+      const blob = await Packer.toBlob(doc);
+      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "included_studies.docx"; a.click(); URL.revokeObjectURL(a.href);
+      toast.success("Downloaded included_studies.docx");
+    } catch (e: any) { toast.error(`Word export failed: ${e?.message || e}`); }
+  }
+
+  // ── Ask your evidence (grounded, cited synthesis over included studies) ──────
+  async function askEvidence() {
+    const q = askQ.trim();
+    if (!q) return;
+    if (!merged.length) { toast.error("No included studies to search."); return; }
+    setAsking(true); setAskAnswer("");
+    try {
+      const papers = merged.map((p, i) => ({ n: i + 1, title: p.title, abstract: p.abstract || "", full_text: s.fullTexts[p.paper_id]?.text || "" }));
+      const r = await fetch("/api/writing/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q, papers, model: s.model }) });
+      if (!r.ok) throw new Error(await r.text());
+      const { answer } = await r.json();
+      setAskAnswer(answer || "No answer returned.");
+    } catch (e: any) { toast.error(`Ask failed: ${e.message}`); }
+    finally { setAsking(false); }
   }
 
   // ── RAISE AI use disclosure (grounded in stages that actually ran) ───────────
@@ -648,6 +800,9 @@ export function WritingPage() {
         <TabsList>
           <TabsTrigger value="citations" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Citations</TabsTrigger>
           <TabsTrigger value="methods" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Search strategy</TabsTrigger>
+          <TabsTrigger value="writeup" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Methods</TabsTrigger>
+          <TabsTrigger value="studies" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Included studies</TabsTrigger>
+          <TabsTrigger value="ask" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Ask evidence</TabsTrigger>
         </TabsList>
 
         {/* ── Citations: searchable paper list (left) + citation detail (right) ── */}
@@ -699,14 +854,14 @@ export function WritingPage() {
           </div>
         </TabsContent>
 
-        {/* ── Search strategy (PRISMA-S) — per-database table ── */}
+        {/* ── Search strategy (PRISMA-S): per-database table ── */}
         <TabsContent value="methods" className="mt-3 space-y-3">
           <Card className="p-4 space-y-4">
             <div className="flex items-start justify-between gap-3 flex-wrap">
               <div>
                 <h3 className="font-medium">Search strategy (PRISMA-S)</h3>
                 <p className="text-xs text-muted-foreground mt-0.5">
-                  Per-database query, date run, and records retrieved — report this as a supplement.
+                  Per-database query, date run, and records retrieved. Report this as a supplement.
                 </p>
               </div>
               <div className="flex items-center gap-2 flex-wrap">
@@ -723,7 +878,18 @@ export function WritingPage() {
                 <Button variant="outline" size="sm" onClick={() => downloadFile(appendixCsv(), "search_strategy.csv", "text/csv")}>
                   <Download className="size-3.5 mr-1.5" />.csv
                 </Button>
+                <Button size="sm" onClick={exportAppendixDocx}>
+                  <Download className="size-3.5 mr-1.5" />Word
+                </Button>
               </div>
+            </div>
+
+            {/* Coverage / limits: editable note reported in the appendix. */}
+            <div>
+              <div className="text-xs font-semibold text-muted-foreground mb-1.5">Coverage &amp; limits</div>
+              <Input value={coverage} onChange={e => setCoverage(e.target.value)}
+                placeholder="e.g., Database inception to the search date; English-language only"
+                className="text-sm" />
             </div>
 
             {baseQuery && (
@@ -737,8 +903,9 @@ export function WritingPage() {
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-40">Database</TableHead>
-                    <TableHead>Query run</TableHead>
+                    <TableHead className="w-32">Database</TableHead>
+                    <TableHead className="w-44">Interface / platform</TableHead>
+                    <TableHead>Search string</TableHead>
                     <TableHead className="w-28">Date</TableHead>
                     <TableHead className="w-24 text-right">Records</TableHead>
                   </TableRow>
@@ -748,7 +915,12 @@ export function WritingPage() {
                     <TableRow key={r.db} className="align-top">
                       <TableCell className="font-medium">{r.db}</TableCell>
                       <TableCell>
-                        <pre className="font-mono text-xs whitespace-pre-wrap break-words leading-relaxed max-w-[44rem]">{r.query || "(not specified)"}</pre>
+                        <Input value={r.platform}
+                          onChange={e => setPlatforms(p => ({ ...p, [r.db]: e.target.value }))}
+                          className="h-7 text-xs" />
+                      </TableCell>
+                      <TableCell>
+                        <pre className="font-mono text-xs whitespace-pre-wrap break-words leading-relaxed max-w-[40rem]">{r.query || "(not specified)"}</pre>
                       </TableCell>
                       <TableCell className="text-sm tabular-nums whitespace-nowrap">{searchDate}</TableCell>
                       <TableCell className="text-right text-sm tabular-nums">
@@ -758,7 +930,7 @@ export function WritingPage() {
                   ))}
                   {searchRows.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-sm text-muted-foreground text-center py-6">
+                      <TableCell colSpan={5} className="text-sm text-muted-foreground text-center py-6">
                         No databases selected. Pick sources in the sidebar.
                       </TableCell>
                     </TableRow>
@@ -766,19 +938,19 @@ export function WritingPage() {
                   {searchRows.length > 0 && (
                     <>
                       <TableRow className="border-t-2 bg-muted/30">
-                        <TableCell colSpan={3} className="font-medium">Total records retrieved</TableCell>
+                        <TableCell colSpan={4} className="font-medium">Total records retrieved</TableCell>
                         <TableCell className="text-right text-sm font-semibold tabular-nums">
-                          {identified != null ? identified.toLocaleString() : "—"}
+                          {identified != null ? identified.toLocaleString() : "n/a"}
                         </TableCell>
                       </TableRow>
                       <TableRow className="bg-muted/30">
-                        <TableCell colSpan={3} className="font-medium">Duplicates removed</TableCell>
+                        <TableCell colSpan={4} className="font-medium">Duplicates removed</TableCell>
                         <TableCell className="text-right text-sm font-semibold tabular-nums">{dupRemoved.toLocaleString()}</TableCell>
                       </TableRow>
                       <TableRow className="bg-muted/30">
-                        <TableCell colSpan={3} className="font-medium">Unique records screened</TableCell>
+                        <TableCell colSpan={4} className="font-medium">Unique records screened</TableCell>
                         <TableCell className="text-right text-sm font-semibold tabular-nums">
-                          {afterDedup != null ? afterDedup.toLocaleString() : "—"}
+                          {afterDedup != null ? afterDedup.toLocaleString() : "n/a"}
                         </TableCell>
                       </TableRow>
                     </>
@@ -787,43 +959,169 @@ export function WritingPage() {
               </Table>
             </div>
           </Card>
+        </TabsContent>
 
-          {/* Search-strategy methods appendix (Design / Sources / Eligibility / Selection / Synthesis) */}
+        {/* ── METHODS (AI prose: main text + detailed appendix) ────────────── */}
+        <TabsContent value="writeup" className="mt-3 space-y-3">
           <Card className="p-4 space-y-3">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
-                <h3 className="font-medium">Search strategy methods (appendix)</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">Prose methods appendix: design &amp; scope, data sources, eligibility, study selection, synthesis, and a RAISE-compliant AI &amp; automation use declaration.</p>
+                <h3 className="font-medium">Methods write-up</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Drafts a concise <strong>main-text</strong> Methods paragraph plus the full
+                  <strong> detailed appendix</strong> (design, sources, eligibility, selection, synthesis, and a RAISE AI-use declaration), grounded in your actual funnel.
+                </p>
               </div>
-              <Button size="sm" variant="outline" onClick={generateSummary} disabled={generating}>
+              <Button size="sm" onClick={generateSummary} disabled={generating}>
                 {generating
                   ? <><Loader2 className="size-4 mr-2 animate-spin" />Generating…</>
-                  : <><BookOpen className="size-4 mr-2" />{summary ? "Regenerate" : "Generate with AI"}</>}
+                  : <><BookOpen className="size-4 mr-2" />{(summary || mainText) ? "Regenerate both" : "Generate with AI"}</>}
               </Button>
             </div>
+
+            {mainText && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Methods: main text</div>
+                  <div className="flex gap-2">
+                    <Button variant="ghost" size="sm" className="h-7" onClick={() => setEditingMain(v => !v)}>{editingMain ? "Done" : "Edit"}</Button>
+                    <Button variant="ghost" size="sm" className="h-7" onClick={() => { navigator.clipboard.writeText(mainText); toast.success("Copied"); }}><Copy className="size-3.5 mr-1.5" />Copy</Button>
+                    <Button variant="ghost" size="sm" className="h-7" onClick={() => downloadFile(mainText, "methods_main_text.txt", "text/plain")}><Download className="size-3.5 mr-1.5" />.txt</Button>
+                  </div>
+                </div>
+                {editingMain
+                  ? <Textarea value={mainText} onChange={e => setMainText(e.target.value)} rows={10} className="font-mono text-xs leading-relaxed" />
+                  : <div className="space-y-3 font-serif rounded-md border bg-muted/20 p-3">{renderMethodsAppendix(mainText)}</div>}
+              </div>
+            )}
+
             {summary && (
+              <div className="space-y-2">
+                <Separator />
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Methods: detailed appendix</div>
+                  <div className="flex gap-2">
+                    <Button variant="ghost" size="sm" className="h-7" onClick={() => setEditingSummary(v => !v)}>{editingSummary ? "Done" : "Edit"}</Button>
+                    <Button variant="ghost" size="sm" className="h-7" onClick={() => { navigator.clipboard.writeText(summary); toast.success("Copied"); }}><Copy className="size-3.5 mr-1.5" />Copy</Button>
+                    <Button variant="ghost" size="sm" className="h-7" onClick={() => downloadFile(summary, "methods_appendix.txt", "text/plain")}><Download className="size-3.5 mr-1.5" />.txt</Button>
+                  </div>
+                </div>
+                {editingSummary
+                  ? <Textarea value={summary} onChange={e => setSummary(e.target.value)} rows={16} className="font-mono text-xs leading-relaxed" />
+                  : <div className="space-y-3 font-serif rounded-md border bg-muted/20 p-3">{renderMethodsAppendix(summary)}</div>}
+              </div>
+            )}
+
+            {!summary && !mainText && !generating && (
+              <p className="text-sm text-muted-foreground">Click <em>Generate with AI</em> to draft the Methods. You'll get a concise body paragraph and the full appendix, both editable.</p>
+            )}
+          </Card>
+        </TabsContent>
+
+        {/* ── INCLUDED STUDIES (characteristics table) ─────────────────────── */}
+        <TabsContent value="studies" className="mt-3 space-y-3">
+          <Card className="p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div>
+                <h3 className="font-medium">Characteristics of included studies</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Design, population, intervention, comparator, and outcomes per study, extracted from each study's text
+                  (risk of bias pulled from Quality Assessment). Cells are editable; export to Word/CSV.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <Button size="sm" variant="outline" onClick={() => downloadFile(characteristicsCsv(), "included_studies.csv", "text/csv")} disabled={!merged.length}>
+                  <Download className="size-3.5 mr-1.5" />.csv
+                </Button>
+                <Button size="sm" variant="outline" onClick={exportCharacteristicsDocx} disabled={!merged.length}>
+                  <Download className="size-3.5 mr-1.5" />Word
+                </Button>
+                <Button size="sm" onClick={generateCharacteristics} disabled={genChar || !merged.length}>
+                  {genChar ? <><Loader2 className="size-4 mr-2 animate-spin" />Extracting…</> : <><Layers className="size-4 mr-2" />Generate with AI</>}
+                </Button>
+              </div>
+            </div>
+            <div className="rounded-md border overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-36">Study</TableHead>
+                    <TableHead className="w-28">Design</TableHead>
+                    <TableHead>Population</TableHead>
+                    <TableHead>Intervention</TableHead>
+                    <TableHead>Comparator</TableHead>
+                    <TableHead>Outcomes</TableHead>
+                    <TableHead className="w-28">Risk of bias</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {merged.map(p => {
+                    const c = characteristics[p.paper_id] || emptyChar;
+                    return (
+                      <TableRow key={p.paper_id} className="align-top">
+                        <TableCell className="font-medium text-xs">{studyLabel(p)}</TableCell>
+                        {(["design", "population", "intervention", "comparator", "outcomes"] as const).map(f => (
+                          <TableCell key={f}>
+                            <Textarea value={c[f] || ""} onChange={e => setCharCell(p.paper_id, f, e.target.value)} rows={2} className="text-xs min-w-[8rem] resize-y" />
+                          </TableCell>
+                        ))}
+                        <TableCell className="text-xs">{robOf(p.paper_id) || <span className="text-muted-foreground">n/a</span>}</TableCell>
+                      </TableRow>
+                    );
+                  })}
+                  {merged.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-6">
+                        No included studies yet. Complete screening first.
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </Card>
+        </TabsContent>
+
+        {/* ── ASK YOUR EVIDENCE (grounded cited Q&A) ───────────────────────── */}
+        <TabsContent value="ask" className="mt-3 space-y-3">
+          <Card className="p-4 space-y-3">
+            <div>
+              <h3 className="font-medium">Ask your evidence</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Ask a question and get a synthesis grounded <strong>only</strong> in your {merged.length} included stud{merged.length === 1 ? "y" : "ies"}, with <span className="font-mono">[n]</span> citations to the references below. No outside knowledge.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Input
+                value={askQ}
+                onChange={e => setAskQ(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") askEvidence(); }}
+                placeholder="e.g., What adverse events were reported across the studies?"
+                className="flex-1"
+              />
+              <Button onClick={askEvidence} disabled={asking || !askQ.trim() || !merged.length}>
+                {asking ? <Loader2 className="size-4 animate-spin" /> : <><Search className="size-4 mr-2" />Ask</>}
+              </Button>
+            </div>
+            {askAnswer && (
               <>
                 <Separator />
-                {editingSummary ? (
-                  <Textarea value={summary} onChange={e => setSummary(e.target.value)} rows={16} className="font-mono text-xs leading-relaxed" />
-                ) : (
-                  <div className="space-y-3 font-serif">{renderMethodsAppendix(summary)}</div>
-                )}
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" onClick={() => setEditingSummary(v => !v)}>
-                    {editingSummary ? "Done" : "Edit"}
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(summary); toast.success("Copied"); }}>
-                    <Copy className="size-3.5 mr-1.5" />Copy
-                  </Button>
-                  <Button variant="outline" size="sm" onClick={() => downloadFile(summary, "methods_appendix.txt", "text/plain")}>
-                    <Download className="size-3.5 mr-1.5" />Download
-                  </Button>
-                </div>
+                <div className="text-sm leading-relaxed whitespace-pre-wrap">{askAnswer}</div>
+                <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(askAnswer); toast.success("Copied"); }}>
+                  <Copy className="size-3.5 mr-1.5" />Copy
+                </Button>
+                <Separator />
+                <div className="text-xs font-semibold text-muted-foreground">References</div>
+                <ol className="text-xs space-y-1 list-decimal ml-5 text-muted-foreground">
+                  {merged.map(p => (
+                    <li key={p.paper_id}>
+                      {p.authors ? p.authors.split(/[;,]/)[0].trim() + " et al." : p.source}{p.year ? ` (${p.year})` : ""}. {p.title}
+                    </li>
+                  ))}
+                </ol>
               </>
             )}
           </Card>
-
         </TabsContent>
       </Tabs>
     </div>
