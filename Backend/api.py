@@ -790,30 +790,66 @@ class TitleRequest(BaseModel):
     model: Optional[str] = None
 
 
+_TITLE_LEADINS = re.compile(
+    r"^(?:i\s+(?:want|would\s+like|need|wish|aim|plan|hope|am\s+looking)\s+to\s+"
+    r"(?:know|understand|find\s+out|learn|explore|investigate|examine|study|review|assess|evaluate|research|determine|see)"
+    r"(?:\s+(?:about|whether|if|how|what|the))?|"
+    r"what\s+(?:is|are|was|were)|how\s+(?:does|do|did|can|to)|"
+    r"can\s+you|could\s+you|please|tell\s+me\s+about|i'?m\s+interested\s+in|"
+    r"(?:a\s+)?(?:study|systematic\s+review|review|analysis|investigation|meta[- ]analysis)\s+(?:of|on|about)|"
+    r"the\s+(?:relationship|association|effect|effects|impact|role|link|correlation)\s+(?:between|of|on)|"
+    r"explore|investigate|examine|assess|evaluate|determine|understand|"
+    r"is\s+there\s+(?:a|an)?)\s+",
+    re.IGNORECASE,
+)
+
+
+def _heuristic_title(goal: str) -> str:
+    """Deterministic short summary of a research goal for the fallback title —
+    strips conversational lead-ins ("I want to know about the relationship
+    between …") rather than slicing the question verbatim."""
+    g = goal.strip().strip("?.! ")
+    for _ in range(3):                      # peel nested lead-ins in one pass each
+        stripped = _TITLE_LEADINS.sub("", g).strip(" ?.!,:")
+        if stripped == g or not stripped:
+            break
+        g = stripped
+    if not g:
+        g = goal.strip()
+    short = " ".join(g.split()[:8]).strip(" ?.!,:")
+    if len(short) > 60:
+        short = short[:60].rsplit(" ", 1)[0]
+    if not short:
+        return "Untitled session"
+    return short[0].upper() + short[1:]
+
+
 @app.post("/api/sessions/title")
 def session_title(req: TitleRequest):
     """Generate a short 3-6 word title from a research goal (LLM-driven, with a
     string-slice fallback so the frontend always gets something usable)."""
     goal = (req.goal or "").strip()
-    fallback = (goal[:50] + ("…" if len(goal) > 50 else "")) or "Untitled session"
     if not goal:
         return {"title": "Untitled session"}
+    fallback = _heuristic_title(goal)   # a summary, not a verbatim slice
     try:
         from langchain_core.messages import HumanMessage
         model = AIService.get_model(resolve_for_thinking(req.model))
         if not model:
             return {"title": fallback}
         prompt = (
-            "Summarize this research goal in 3-6 words as a concise title. "
-            "No quotes, no surrounding punctuation, no trailing period, no preamble. "
-            "Return only the title text.\n\n"
+            "Write a SHORT topic title (3 to 6 words) that summarizes this research goal, "
+            "as a noun phrase like a paper's short title. Do NOT restate the question or use "
+            "phrases like 'I want to know', 'the relationship between', 'a study of', 'what is'. "
+            "No quotes, no end punctuation, no preamble — return only the title.\n\n"
+            "Example goal: I want to know about the relationship between pet ownership and cardiovascular disease\n"
+            "Example title: Pet Ownership and Cardiovascular Disease\n\n"
             f"GOAL: {goal}\n\nTITLE:"
         )
         r = model.invoke([HumanMessage(content=prompt)])
-        title = (r.content or "").strip()
-        # Take only the first line and strip wrapping punctuation.
-        title = title.split("\n")[0].strip().strip('"').strip("'").rstrip(".").strip()
-        if not title or len(title) > 80:
+        title = (r.content or "").strip().split("\n")[0].strip().strip('"').strip("'").rstrip(".").strip()
+        # Reject junk or an answer that just echoes the goal verbatim.
+        if not title or len(title) > 70 or title.lower() == goal.lower():
             return {"title": fallback}
         return {"title": title}
     except Exception as e:
