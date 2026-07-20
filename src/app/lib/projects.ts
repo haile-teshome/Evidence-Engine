@@ -3,9 +3,9 @@
 // A "project" is a shared systematic-review workspace with multiple members.
 // Each member screens the same corpus independently. The platform supports
 // three screening modes:
-//   - single        — single-user, AI as accelerator (legacy behavior)
-//   - dual          — two+ reviewers, unblinded (faster but biased)
-//   - dual_blinded  — two+ reviewers, each can only see their own decisions
+//   - single        : single-user, AI as accelerator (legacy behavior)
+//   - dual          : two+ reviewers, unblinded (faster but biased)
+//   - dual_blinded  : two+ reviewers, each can only see their own decisions
 //                     until they have decided on a given paper; the system
 //                     then surfaces the conflict to the adjudicator role.
 //
@@ -186,6 +186,61 @@ export async function setProjectPapers(pid: string, papers: ProjectPaper[]): Pro
     body: JSON.stringify({ papers }),
   });
   return r.count ?? 0;
+}
+
+// ---- Participants (author-defined reviewer slots) ------------------------
+
+export type Participant = { id: string; project_id: string; name: string; role: ProjectRole; weight: number; created_at: string };
+
+export async function listParticipants(pid: string): Promise<Participant[]> {
+  const r = await apiFetch(`/projects/${pid}/participants`);
+  return r.participants || [];
+}
+export async function addParticipant(pid: string, name: string, role: ProjectRole = "reviewer", weight = 1): Promise<Participant> {
+  const r = await apiFetch(`/projects/${pid}/participants`, { method: "POST", body: JSON.stringify({ name, role, weight }) });
+  return r.participant;
+}
+export async function updateParticipant(pid: string, partId: string, patch: { name?: string; role?: ProjectRole; weight?: number }): Promise<Participant> {
+  const r = await apiFetch(`/projects/${pid}/participants/${partId}`, { method: "PUT", body: JSON.stringify(patch) });
+  return r.participant;
+}
+export async function removeParticipant(pid: string, partId: string): Promise<void> {
+  await apiFetch(`/projects/${pid}/participants/${partId}`, { method: "DELETE" });
+}
+
+// ---- Granular auto-assignment -------------------------------------------
+
+export type AutoAssignResult = { strategy: string; assigned: number; per_reviewer: { id: string; name: string; count: number }[]; calibration: number; papers: number };
+export async function autoAssign(
+  pid: string,
+  body: { strategy: "dual" | "overlap" | "weighted" | "manual"; overlap_pct?: number; reviewers_per_paper?: number; include_calibration?: boolean; manual?: { paper_id: string; participant_ids: string[] }[] },
+): Promise<AutoAssignResult> {
+  return apiFetch(`/projects/${pid}/auto-assign`, { method: "POST", body: JSON.stringify(body) });
+}
+
+// ---- Tags ---------------------------------------------------------------
+
+export async function getProjectTags(pid: string): Promise<{ tags: string[]; paper_tags: Record<string, string[]> }> {
+  const r = await apiFetch(`/projects/${pid}/tags`);
+  return { tags: r.tags || [], paper_tags: r.paper_tags || {} };
+}
+export async function setProjectTags(pid: string, tags: string[]): Promise<string[]> {
+  const r = await apiFetch(`/projects/${pid}/tags`, { method: "PUT", body: JSON.stringify({ tags }) });
+  return r.tags || [];
+}
+export async function setPaperTags(pid: string, paperId: string, tags: string[]): Promise<string[]> {
+  const r = await apiFetch(`/projects/${pid}/papers/${paperId}/tags`, { method: "PUT", body: JSON.stringify({ paper_id: paperId, tags }) });
+  return r.tags || [];
+}
+
+// ---- Calibration set ----------------------------------------------------
+
+export async function setCalibration(
+  pid: string,
+  items: { paper_id: string; gold?: string | null; rationale?: string; is_calibration?: boolean }[],
+): Promise<string[]> {
+  const r = await apiFetch(`/projects/${pid}/calibration`, { method: "PUT", body: JSON.stringify(items) });
+  return r.calibration || [];
 }
 
 // ---- Decisions, conflicts, adjudications --------------------------------

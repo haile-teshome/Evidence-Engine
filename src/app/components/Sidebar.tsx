@@ -27,7 +27,7 @@ const TASK_LABEL: Record<string, string> = {
 // Friendly display names for known model tags. Keep the value field
 // pointing at the actual Ollama / provider id; only the label changes.
 function formatModelName(m: string): string {
-  if (/leads.*mistral/i.test(m)) return "LEADS-Mistral 7B  (default — screening)";
+  if (/leads.*mistral/i.test(m)) return "LEADS-Mistral 7B  (default, screening)";
   if (/medgemma.*27b/i.test(m)) return "MedGemma 27B  (clinical)";
   if (/medgemma/i.test(m)) return "MedGemma";
   if (/qwen2\.5.*7b/i.test(m)) return "Qwen 2.5 7B";
@@ -61,7 +61,7 @@ const NAV: { id: PageId; label: string; icon: any; anim: keyof typeof ANIM }[] =
   { id: "textextraction", label: "Text Extraction", icon: ScanText, anim: "bob" },
   { id: "quality", label: "Quality Assessment", icon: ShieldCheck, anim: "pop" },
   { id: "prisma", label: "Diagramming", icon: GitBranch, anim: "swing" },
-  // Meta-analysis tab hidden for now — re-add to restore.
+  // Meta-analysis tab hidden for now. Re-add to restore.
   // { id: "meta", label: "Meta-analysis", icon: Sigma, anim: "pop" },
   { id: "writing", label: "Writing Assistant", icon: PenLine, anim: "wiggle" },
 ];
@@ -110,7 +110,7 @@ export function Sidebar() {
 
   return (
     <aside className="w-72 shrink-0 border-r bg-muted/30 h-screen sticky top-0 flex flex-col">
-      {/* Brand header — fixed bar, distinct from the navigation below. */}
+      {/* Brand header: fixed bar, distinct from the navigation below. */}
       <div className="shrink-0 px-4 py-3.5 border-b bg-background/80 backdrop-blur-sm">
         <Logo />
       </div>
@@ -193,8 +193,8 @@ export function Sidebar() {
           </Select>
           {ollamaRunning === false && (
             <p className="text-xs text-amber-600 mt-2">
-              Setting up the local AI engine… the launcher installs and starts Ollama
-              automatically. If this doesn't clear, relaunch — or pick a cloud model above.
+              Setting up the local AI engine. The launcher installs and starts Ollama
+              automatically. If this doesn't clear, relaunch or pick a cloud model above.
             </p>
           )}
           {ollamaRunning && localModels.length === 0 && (

@@ -80,7 +80,7 @@ export function SnowballPage() {
   if (!s.fullTextResults) {
     return <Alert><AlertDescription>Complete Full-Text Evidence screening first to unlock Citation Snowballing.</AlertDescription></Alert>;
   }
-  // Honour reviewer overrides — papers the user kept by checking the
+  // Honour reviewer overrides: papers the user kept by checking the
   // full-text Keep box should seed snowballing even if the AI excluded them.
   const seeds = s.fullTextResults.filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include");
   if (seeds.length === 0) return <Alert><AlertDescription>No papers passed full-text screening. Cannot perform snowballing.</AlertDescription></Alert>;
@@ -113,7 +113,7 @@ export function SnowballPage() {
       s.setSnowballResults(unique);
       if (signal.aborted) {
         s.updateTask("snowball", { status: "canceled" });
-        toast.info(`Canceled — ${unique.length} unique citations gathered`);
+        toast.info(`Canceled: ${unique.length} unique citations gathered`);
       } else {
         s.updateTask("snowball", { status: "done" });
         toast.success(`Found ${unique.length} unique papers via snowballing`);
@@ -152,7 +152,7 @@ export function SnowballPage() {
       s.setSnowballScreened(out);
       if (signal.aborted) {
         s.updateTask("snowball-screen", { status: "canceled" });
-        toast.info(`Canceled — ${out.length} of ${s.snowballResults.length} screened`);
+        toast.info(`Canceled: ${out.length} of ${s.snowballResults.length} screened`);
       } else {
         s.updateTask("snowball-screen", { status: "done" });
         toast.success(`Screened ${out.length} snowballed papers`);
@@ -175,7 +175,7 @@ export function SnowballPage() {
     for (const p of s.snowballResults) {
       if (!chosen.has(p.id)) continue;
       const r = byKey.get(p.id) || byKey.get((p.title || "").toLowerCase().trim());
-      // The reviewer chose it, so it carries forward as an INCLUDE — even if the
+      // The reviewer chose it, so it carries forward as an INCLUDE, even if the
       // AI excluded it, or it was never AI-screened at all.
       if (r) {
         toAdd.push({ ...r, Decision: "INCLUDE" });
@@ -238,8 +238,8 @@ export function SnowballPage() {
             <div className="flex flex-wrap items-center gap-1.5">
               <Pill icon={FileText} title="Seed papers that passed full-text screening">{seeds.length} seeds</Pill>
               {results && <Pill icon={Network}>{results.length} found</Pill>}
-              {results && <Pill icon={ArrowDownLeft} title="Backward — references cited by the seeds">{backCount} backward</Pill>}
-              {results && <Pill icon={ArrowUpRight} title="Forward — papers that cite the seeds">{fwdCount} forward</Pill>}
+              {results && <Pill icon={ArrowDownLeft} title="Backward: references cited by the seeds">{backCount} backward</Pill>}
+              {results && <Pill icon={ArrowUpRight} title="Forward: papers that cite the seeds">{fwdCount} forward</Pill>}
               {screened && <Pill icon={CheckCircle2} tone="green" title="AI marked INCLUDE">{includedCount} AI-included</Pill>}
               {screened && <Pill icon={XCircle} tone="amber" title="AI marked EXCLUDE">{excludedCount} AI-excluded</Pill>}
               {results && chosen.size > 0 && <Pill icon={CheckCircle2} tone="green" title="Selected to carry into main results">{chosen.size} selected</Pill>}
@@ -396,7 +396,7 @@ export function SnowballPage() {
                           checked={picked}
                           onCheckedChange={() => toggleChosen(p.id)}
                           className="mt-0.5 shrink-0"
-                          title={picked ? "Selected — will carry into main results" : "Click to include in main results"}
+                          title={picked ? "Selected: will carry into main results" : "Click to include in main results"}
                         />
                         <Badge variant="outline" className="text-[10px] shrink-0 mt-0.5 gap-1">
                           {p.citation_type === "backward" ? <ArrowDownLeft className="size-3" /> : <ArrowUpRight className="size-3" />}

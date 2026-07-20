@@ -4,10 +4,11 @@ import { useAuth } from "../lib/auth";
 import {
   Project, ProjectMember, ScreeningMode, ProjectRole, Invite, AssignmentStrategy,
   listProjects, createProject, getProject, createInvite, setMemberRole,
-  lockProject, acceptInvite, previewInvite, setProjectPapers, assignPapers,
+  lockProject, acceptInvite, previewInvite, setProjectPapers, assignPapers, listProjectPapers,
 } from "../lib/projects";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { ConflictsSection } from "../components/ConflictsSection";
+import { ProjectWorkspace } from "../components/ProjectWorkspace";
 import { Card } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -26,6 +27,7 @@ export function ProjectsPage() {
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [acceptToken, setAcceptToken] = useState("");
+  const [manage, setManage] = useState<{ id: string; name: string } | null>(null);
   const [acceptPreview, setAcceptPreview] = useState<{ invite: Invite; project: { id: string; name: string } | null } | null>(null);
 
   async function refresh() {
@@ -64,7 +66,19 @@ export function ProjectsPage() {
       s.setPico(project.pico);
       s.setInclusion(project.inclusion);
       s.setExclusion(project.exclusion);
-      toast.success(`Opened ${project.name} (${members.length} member${members.length === 1 ? "" : "s"})`);
+      // Load the project's shared papers into the screening corpus so every
+      // member (including invited reviewers who never had them locally) can
+      // screen the same set. The project is the source of truth.
+      const projectPapers = await listProjectPapers(project.id);
+      const asPapers = projectPapers.map(pp => ({
+        id: pp.paper_id, source: pp.source || "Project", title: pp.title,
+        abstract: pp.abstract || "", url: pp.url || "",
+      }));
+      s.setRawPapers(asPapers.length ? asPapers : null);
+      s.setUniquePapers(asPapers.length ? asPapers : null);
+      s.setDuplicatesCount(0);
+      if (asPapers.length && !s.query) { s.setQuery(project.name); s.setUnifiedSearchQuery(project.name); }
+      toast.success(`Opened ${project.name}: ${asPapers.length} papers, ${members.length} member${members.length === 1 ? "" : "s"}`);
       s.setPage("home");
     } catch (e: any) {
       toast.error(e?.message || "Failed to open project");
@@ -149,10 +163,10 @@ export function ProjectsPage() {
         )}
         <div className="space-y-2">
           {projects.map(p => (
-            <button
+            <div
               key={p.id}
               onClick={() => openProject(p)}
-              className="w-full text-left p-3 border rounded hover:bg-muted/30 transition-colors"
+              className="w-full text-left p-3 border rounded hover:bg-muted/30 transition-colors cursor-pointer"
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
@@ -166,12 +180,23 @@ export function ProjectsPage() {
                     <span>Updated {new Date(p.updated_at).toLocaleDateString()}</span>
                   </div>
                 </div>
-                <Users className="size-4 text-muted-foreground shrink-0" />
+                <div className="flex items-center gap-1 shrink-0">
+                  {p.my_role === "lead" && (
+                    <Button variant="outline" size="sm" className="h-7" onClick={e => { e.stopPropagation(); setManage({ id: p.id, name: p.name }); }}>
+                      <Users className="size-3.5 mr-1.5" />Manage
+                    </Button>
+                  )}
+                  <Button variant="ghost" size="sm" className="h-7" onClick={e => { e.stopPropagation(); openProject(p); }}>Open</Button>
+                </div>
               </div>
-            </button>
+            </div>
           ))}
         </div>
       </Card>
+
+      {manage && (
+        <ProjectWorkspace projectId={manage.id} projectName={manage.name} onClose={() => setManage(null)} />
+      )}
 
       <Card className="p-4">
         <div className="font-medium mb-2">Have an invite token?</div>
@@ -287,7 +312,7 @@ function CreateProjectCard({
       }
 
       // 4. (Optional) materialise assignments. Note: only the *lead* exists
-      //    in the project at this moment — reviewers join when they accept
+      //    in the project at this moment; reviewers join when they accept
       //    invites. So if the user picked split-assignment we skip the API
       //    call now and surface a hint to re-run it once members join. For
       //    full_overlap, no assignment write is required (the project
@@ -299,7 +324,7 @@ function CreateProjectCard({
 
       // 5. Show summary
       toast.success(
-        `Created ${project.name}: ${seeds.length} papers, ${links.length} invite links${strategy === "split" ? ` · split (${reviewersPerPaper}/paper) — assign after reviewers join` : ""}`,
+        `Created ${project.name}: ${seeds.length} papers, ${links.length} invite links${strategy === "split" ? ` · split (${reviewersPerPaper}/paper), assign after reviewers join` : ""}`,
         { duration: 6000 },
       );
 
@@ -336,26 +361,26 @@ function CreateProjectCard({
             <Select value={mode} onValueChange={(v) => setMode(v as ScreeningMode)}>
               <SelectTrigger><SelectValue /></SelectTrigger>
               <SelectContent>
-                <SelectItem value="dual_blinded">Dual blinded — Cochrane standard, conflicts adjudicated</SelectItem>
-                <SelectItem value="dual">Dual unblinded — reviewers see each other in real time</SelectItem>
-                <SelectItem value="single">Single — one reviewer (legacy mode)</SelectItem>
+                <SelectItem value="dual_blinded">Dual blinded: Cochrane standard, conflicts adjudicated</SelectItem>
+                <SelectItem value="dual">Dual unblinded: reviewers see each other in real time</SelectItem>
+                <SelectItem value="single">Single: one reviewer (legacy mode)</SelectItem>
               </SelectContent>
             </Select>
             <div className="text-xs text-muted-foreground">
-              {mode === "dual_blinded" && "Each reviewer screens independently; only their own decisions are visible until both have decided. Conflicts route to the adjudicator. Recommended for published reviews."}
+              {mode === "dual_blinded" && "Each reviewer screens independently; their own decisions stay hidden until both have decided. Conflicts route to the adjudicator. Recommended for published reviews."}
               {mode === "dual" && "Each reviewer sees the others' decisions live. Faster, but introduces bias."}
               {mode === "single" && "One reviewer. Equivalent to running the platform without a project."}
             </div>
           </div>
           <div className="text-xs text-muted-foreground">
-            Your current PICO and {s.inclusion.length + s.exclusion.length} inclusion/exclusion criteria will be copied to the review and can be edited later.
+            Your current PICO and {s.inclusion.length + s.exclusion.length} inclusion/exclusion criteria are copied to the review and can be edited later.
           </div>
         </div>
       )}
 
       {step === 2 && (
         <div className="space-y-3">
-          <div className="text-sm">Pick which subset of your workspace to seed the review with. Reviewers will screen exactly this set.</div>
+          <div className="text-sm">Pick which subset of your workspace seeds the review. Reviewers screen exactly this set.</div>
           <div className="space-y-2">
             {Object.entries(sources).map(([k, v]) => (
               <SourceOption
@@ -372,7 +397,7 @@ function CreateProjectCard({
           </div>
           {source === "custom" && (
             <div className="space-y-1.5">
-              <Label className="text-xs">Paste CSV (title,abstract,source,url,doi — first row = headers)</Label>
+              <Label className="text-xs">Paste CSV (title,abstract,source,url,doi; first row = headers)</Label>
               <Textarea
                 value={customCsv}
                 onChange={(e) => setCustomCsv(e.target.value)}
@@ -387,7 +412,7 @@ function CreateProjectCard({
 
       {step === 3 && (
         <div className="space-y-3">
-          <div className="text-sm">Invite reviewers. We'll generate one-time links you can share by email or Slack.</div>
+          <div className="text-sm">Invite reviewers. We generate one-time links you can share by email or Slack.</div>
           <div className="space-y-2">
             {pendingInvites.map((inv, i) => (
               <div key={i} className="flex items-center gap-2">
@@ -398,7 +423,7 @@ function CreateProjectCard({
                     next[i] = { ...next[i], label: e.target.value };
                     setPendingInvites(next);
                   }}
-                  placeholder="Reviewer label (e.g. 'Jane' — for your tracking only)"
+                  placeholder="Reviewer label (e.g. 'Jane', for your tracking only)"
                   className="flex-1"
                 />
                 <Select
@@ -436,7 +461,7 @@ function CreateProjectCard({
           </div>
           <Alert>
             <AlertDescription className="text-xs">
-              The lead (you) is automatically a member with full access. Invitees receive one-time links — after they click and sign up, they're added to the project with the role above.
+              The lead (you) is automatically a member with full access. Invitees receive one-time links. After they click and sign up, they join the project with the role above.
             </AlertDescription>
           </Alert>
         </div>
@@ -481,7 +506,7 @@ function CreateProjectCard({
             <Alert className="bg-amber-50 border-amber-200">
               <AlertTriangle className="size-4 inline mr-1 text-amber-700" />
               <AlertDescription className="text-xs text-amber-900">
-                Assignment runs after reviewers accept their invites — the project starts as full-overlap by default. Open the project's <strong>Detail</strong> card and click <em>Re-distribute</em> once everyone has joined.
+                Assignment runs after reviewers accept their invites. The project starts as full-overlap by default. Open the project's <strong>Detail</strong> card and click <em>Re-distribute</em> once everyone has joined.
               </AlertDescription>
             </Alert>
           )}
@@ -624,7 +649,7 @@ function useMemoSources(s: ReturnType<typeof useStore>) {
     raw: {
       title: "Raw aggregated papers (pre-dedup)",
       count: s.rawPapers?.length || 0,
-      description: "Every record fetched from databases, including duplicates. Rarely the right choice — only use when you specifically want pre-dedup state.",
+      description: "Every record fetched from databases, including duplicates. Rarely the right choice; use it only when you want the pre-dedup state.",
       materialise: () => (s.rawPapers || []).map(p => ({
         paper_id: p.id, title: p.title, abstract: p.abstract || "", source: p.source,
         url: (p as any).url || "", doi: (p as any).doi || "",

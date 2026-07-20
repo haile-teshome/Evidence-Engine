@@ -31,7 +31,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -535,6 +535,228 @@ def clear_assignments(pid: str, request: Request):
     for r in existing:
         kv_del(f"paper_assignment:{pid}:{r['paper_id']}:{r['user_id']}")
     return {"cleared": len(existing)}
+
+
+# ---- Participants (author-defined reviewer slots; no server join needed) ---
+# The author's copy is the master. Reviewers are local "slots" the lead defines
+# and assigns papers to; their work comes back via exported/imported bundles.
+
+class ParticipantCreate(BaseModel):
+    name: str
+    role: Optional[str] = "reviewer"
+    weight: Optional[float] = 1.0
+
+
+@router.get("/projects/{pid}/participants")
+def list_participants(pid: str, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ROLES)
+    parts = kv_get_by_prefix(f"project_participant:{pid}:")
+    parts.sort(key=lambda x: x.get("created_at") or "")
+    return {"participants": parts}
+
+
+@router.post("/projects/{pid}/participants")
+def add_participant(pid: str, body: ParticipantCreate, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    part_id = _new_id("rev")
+    rec = {
+        "id": part_id, "project_id": pid, "name": (body.name or "Reviewer").strip(),
+        "role": body.role or "reviewer", "weight": max(0.0, float(body.weight or 1.0)),
+        "created_at": _now(),
+    }
+    kv_set(f"project_participant:{pid}:{part_id}", rec)
+    return {"participant": rec}
+
+
+class ParticipantUpdate(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    weight: Optional[float] = None
+
+
+@router.put("/projects/{pid}/participants/{part_id}")
+def update_participant(pid: str, part_id: str, body: ParticipantUpdate, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    rec = kv_get(f"project_participant:{pid}:{part_id}")
+    if not rec:
+        raise HTTPException(status_code=404, detail="Participant not found")
+    if body.name is not None:
+        rec["name"] = body.name.strip()
+    if body.role is not None:
+        rec["role"] = body.role
+    if body.weight is not None:
+        rec["weight"] = max(0.0, float(body.weight))
+    kv_set(f"project_participant:{pid}:{part_id}", rec)
+    return {"participant": rec}
+
+
+@router.delete("/projects/{pid}/participants/{part_id}")
+def remove_participant(pid: str, part_id: str, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    kv_del(f"project_participant:{pid}:{part_id}")
+    for a in kv_get_by_prefix(f"paper_assignment:{pid}:"):
+        if a.get("user_id") == part_id:
+            kv_del(f"paper_assignment:{pid}:{a['paper_id']}:{part_id}")
+    return {"ok": True}
+
+
+# ---- Granular auto-assignment across participants -------------------------
+
+class AutoAssign(BaseModel):
+    strategy: str = "dual"            # dual | overlap | weighted | manual
+    overlap_pct: Optional[int] = 100  # for 'overlap': % of papers double-screened
+    reviewers_per_paper: Optional[int] = 2
+    include_calibration: Optional[bool] = True   # give every reviewer the calibration set
+    manual: Optional[List[dict]] = None          # [{paper_id, participant_ids:[...]}]
+
+
+@router.post("/projects/{pid}/auto-assign")
+def auto_assign(pid: str, body: AutoAssign, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    papers = kv_get(f"project_papers:{pid}") or []
+    parts = [p for p in kv_get_by_prefix(f"project_participant:{pid}:") if p.get("role") in ("reviewer", "lead", "adjudicator")]
+    reviewers = [p for p in parts if p.get("role") in ("reviewer", "lead")]
+    if not reviewers:
+        raise HTTPException(status_code=400, detail="Add at least one reviewer participant first")
+
+    # Clear prior assignments, then rebuild.
+    for a in kv_get_by_prefix(f"paper_assignment:{pid}:"):
+        kv_del(f"paper_assignment:{pid}:{a['paper_id']}:{a['user_id']}")
+
+    now = _now()
+    counts: Dict[str, int] = {r["id"]: 0 for r in reviewers}
+
+    def assign(paper_id: str, rid: str):
+        kv_set(f"paper_assignment:{pid}:{paper_id}:{rid}",
+               {"project_id": pid, "paper_id": paper_id, "user_id": rid, "assigned_at": now, "strategy": body.strategy})
+        counts[rid] = counts.get(rid, 0) + 1
+
+    # Deterministic order (no RNG in the store): rotate by index.
+    calib_ids = {p["paper_id"] for p in papers if p.get("calibration")}
+    work = [p for p in papers if not p.get("calibration")]
+
+    strat = body.strategy or "dual"
+    if strat == "manual" and isinstance(body.manual, list):
+        for m in body.manual:
+            for rid in (m.get("participant_ids") or []):
+                if rid in counts:
+                    assign(m["paper_id"], rid)
+    elif strat == "dual":
+        n = max(1, min(len(reviewers), int(body.reviewers_per_paper or 2)))
+        for i, p in enumerate(work):
+            for k in range(n):
+                assign(p["paper_id"], reviewers[(i + k) % len(reviewers)]["id"])
+    elif strat == "overlap":
+        pct = max(0, min(100, int(body.overlap_pct if body.overlap_pct is not None else 100)))
+        # Every Nth paper (per pct) is double-screened; the rest are single, split round-robin.
+        every = 0 if pct <= 0 else max(1, round(100 / pct)) if pct < 100 else 1
+        for i, p in enumerate(work):
+            double = pct >= 100 or (every and i % every == 0)
+            assign(p["paper_id"], reviewers[i % len(reviewers)]["id"])
+            if double and len(reviewers) > 1:
+                assign(p["paper_id"], reviewers[(i + 1) % len(reviewers)]["id"])
+    elif strat == "weighted":
+        # Largest-remainder split by weight; each paper to a single reviewer.
+        total_w = sum(max(0.0, float(r.get("weight") or 1.0)) for r in reviewers) or 1.0
+        # Build a weighted round-robin sequence.
+        seq: List[str] = []
+        targets = {r["id"]: (float(r.get("weight") or 1.0) / total_w) * len(work) for r in reviewers}
+        acc = {r["id"]: 0.0 for r in reviewers}
+        for _ in range(len(work)):
+            # pick reviewer whose (target - assigned) deficit is largest
+            rid = max(reviewers, key=lambda r: targets[r["id"]] - acc[r["id"]])["id"]
+            acc[rid] += 1.0
+            seq.append(rid)
+        for p, rid in zip(work, seq):
+            assign(p["paper_id"], rid)
+    else:
+        raise HTTPException(status_code=400, detail=f"Unknown strategy '{strat}'")
+
+    # Calibration set → every reviewer screens it (unless disabled).
+    if body.include_calibration and calib_ids:
+        for pid_ in calib_ids:
+            for r in reviewers:
+                assign(pid_, r["id"])
+
+    return {
+        "strategy": strat,
+        "assigned": sum(counts.values()),
+        "per_reviewer": [{"id": r["id"], "name": r.get("name"), "count": counts.get(r["id"], 0)} for r in reviewers],
+        "calibration": len(calib_ids),
+        "papers": len(papers),
+    }
+
+
+# ---- Tags ------------------------------------------------------------------
+
+class TagsBody(BaseModel):
+    tags: List[str] = []
+
+
+@router.get("/projects/{pid}/tags")
+def get_tags(pid: str, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ROLES)
+    project_tags = kv_get(f"project_tags:{pid}") or []
+    paper_tags = {r["paper_id"]: r["tags"] for r in kv_get_by_prefix(f"paper_tags:{pid}:")}
+    return {"tags": project_tags, "paper_tags": paper_tags}
+
+
+@router.put("/projects/{pid}/tags")
+def set_project_tags(pid: str, body: TagsBody, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    clean = sorted({t.strip() for t in body.tags if t.strip()})
+    kv_set(f"project_tags:{pid}", clean)
+    return {"tags": clean}
+
+
+class PaperTagsBody(BaseModel):
+    paper_id: str
+    tags: List[str] = []
+
+
+@router.put("/projects/{pid}/papers/{paper_id}/tags")
+def set_paper_tags(pid: str, paper_id: str, body: PaperTagsBody, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead", "reviewer", "adjudicator"])
+    tags = sorted({t.strip() for t in body.tags if t.strip()})
+    if tags:
+        kv_set(f"paper_tags:{pid}:{paper_id}", {"paper_id": paper_id, "tags": tags})
+    else:
+        kv_del(f"paper_tags:{pid}:{paper_id}")
+    return {"paper_id": paper_id, "tags": tags}
+
+
+# ---- Calibration set (gold decisions to train/check reviewers) -------------
+
+class CalibrationItem(BaseModel):
+    paper_id: str
+    gold: Optional[str] = None       # include | exclude | maybe | None (unset)
+    rationale: Optional[str] = ""
+    is_calibration: bool = True
+
+
+@router.put("/projects/{pid}/calibration")
+def set_calibration(pid: str, items: List[CalibrationItem], request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    papers = kv_get(f"project_papers:{pid}") or []
+    by_id = {p["paper_id"]: p for p in papers}
+    for it in items:
+        p = by_id.get(it.paper_id)
+        if not p:
+            continue
+        p["calibration"] = bool(it.is_calibration)
+        p["gold"] = it.gold
+        p["gold_rationale"] = it.rationale or ""
+    kv_set(f"project_papers:{pid}", papers)
+    return {"calibration": [p["paper_id"] for p in papers if p.get("calibration")]}
 
 
 # ---- Decisions + adjudications + blinding ---------------------------------

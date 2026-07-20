@@ -81,7 +81,7 @@ function guessTitle(metaTitle: string, firstPage: string, filename: string): str
 }
 
 function guessAbstract(text: string): string {
-  const m = text.match(/\babstract\b\s*[:.\-—]?\s*/i);
+  const m = text.match(/\babstract\b\s*[:.\-\u2014]?\s*/i);
   if (m && m.index !== undefined) {
     const after = text.slice(m.index + m[0].length);
     const stop = after.search(HEADING_STOP);

@@ -9,9 +9,9 @@ import { createContext, useContext, useEffect, useState, ReactNode } from "react
 // progress instead of a single static spinner.
 
 export type EngineStatus = {
-  ready: boolean;    // backend answers /api/health — screening/search/session APIs work
+  ready: boolean;    // backend answers /api/health; screening/search/session APIs work
   message: string;   // human-readable phase, e.g. "Loading AI model…"
-  done: boolean;     // engine fully up (model loaded or cloud provider) — hide the indicator
+  done: boolean;     // engine fully up (model loaded or cloud provider); hide the indicator
 };
 
 const INITIAL: EngineStatus = { ready: false, message: "Starting engine…", done: false };
@@ -24,7 +24,7 @@ export function BackendReadyProvider({ children }: { children: ReactNode }) {
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     // Once the backend answers, don't nag forever if the local model is slow to
-    // load — after a grace period treat the engine as ready enough to hide the
+    // load. After a grace period treat the engine as ready enough to hide the
     // indicator (the first screening call will finish loading the model).
     let readyPolls = 0;
     const READY_GRACE_POLLS = 20;   // ~30s at 1.5s cadence
@@ -51,7 +51,7 @@ export function BackendReadyProvider({ children }: { children: ReactNode }) {
       }
       if (!active) return;
       setStatus(next);
-      if (next.done) return;                 // fully up — stop polling
+      if (next.done) return;                 // fully up, stop polling
       timer = setTimeout(poll, 1500);
     };
 

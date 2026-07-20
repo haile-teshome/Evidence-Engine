@@ -77,7 +77,7 @@ export function TextExtractionPage() {
   const missing = useMemo(() => Object.values(s.fullTexts).filter(r => r.status === "missing"), [s.fullTexts]);
 
   if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first.</AlertDescription></Alert>;
-  if (acquired.length === 0) return <Alert><AlertDescription>No full texts acquired yet — visit Full-Text Acquisition to fetch them first.</AlertDescription></Alert>;
+  if (acquired.length === 0) return <Alert><AlertDescription>No full texts acquired yet. Fetch them on Full-Text Acquisition first.</AlertDescription></Alert>;
 
   async function run() {
     if (!query.trim()) { toast.error("Enter a question or instruction first."); return; }
@@ -124,7 +124,7 @@ export function TextExtractionPage() {
       s.setTextExtractions(out);
       if (signal.aborted) {
         s.updateTask("text-extract", { status: "canceled" });
-        toast.info(`Canceled — ${out.length} of ${acquired.length} processed`);
+        toast.info(`Canceled: ${out.length} of ${acquired.length} processed`);
       } else {
         s.updateTask("text-extract", { status: "done" });
         toast.success(`Extracted from ${out.length} papers`);
@@ -156,7 +156,7 @@ export function TextExtractionPage() {
 
   return (
     <div className="space-y-3">
-      {/* ── Compact header: question + run + export, with inline counts ─────── */}
+      {/* ── Compact header: question, run, export, with inline counts ─────── */}
       <Card className="p-3 space-y-2">
         <div className="flex items-start justify-between gap-2">
           {s.textExtractions.length > 0 ? (
@@ -212,7 +212,7 @@ export function TextExtractionPage() {
               </>
             )}
             {missing.length > 0 && (
-              <Pill icon={AlertTriangle} tone="amber" title="Skipped — no full text acquired">{missing.length} skipped</Pill>
+              <Pill icon={AlertTriangle} tone="amber" title="Skipped: no full text acquired">{missing.length} skipped</Pill>
             )}
           </div>
         )}
@@ -434,7 +434,7 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
                 )}
                 </div>
 
-                {/* SOURCE VIEWER — PDF (default) or extracted text ----------- */}
+                {/* SOURCE VIEWER: PDF (default) or extracted text ----------- */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <div className="inline-flex rounded-md border bg-muted/40 p-0.5 text-xs">
@@ -606,7 +606,7 @@ function renderLineWithHighlights(
             ? "bg-amber-300 ring-2 ring-amber-500 rounded px-0.5 dark:bg-amber-700/60"
             : "bg-yellow-200 dark:bg-yellow-900/50 rounded px-0.5"
         }
-        title={s.section ? `${s.section} — chars ${s.start}-${s.end}` : `chars ${s.start}-${s.end}`}
+        title={s.section ? `${s.section}, chars ${s.start}-${s.end}` : `chars ${s.start}-${s.end}`}
       >
         {lineText.slice(s.localStart, Math.min(lineText.length, s.localEnd))}
       </mark>
@@ -623,9 +623,9 @@ function renderLineWithHighlights(
 // ---- XLSX export ----------------------------------------------------------
 //
 // Produces a formatted workbook with four kinds of sheets:
-//   1. "Summary"      — one row per paper with link to its per-paper sheet
-//   2. "All values"   — flat list of every extracted value across papers
-//   3. "All evidence" — flat list of every evidence quote across papers
+//   1. "Summary"      : one row per paper with link to its per-paper sheet
+//   2. "All values"   : flat list of every extracted value across papers
+//   3. "All evidence" : flat list of every evidence quote across papers
 //   4. one sheet per paper with Answer / Evidence / Values stacked
 // Section badges in the workbook share the same colour palette as the on-
 // screen badges so the export reads like a continuation of the UI.
@@ -691,7 +691,7 @@ function _safeSheetName(name: string, taken: Set<string>): string {
 
 async function downloadTextExtractionXlsx(results: TextExtractionResult[], query: string) {
   if (!results || results.length === 0) {
-    toast.error("Nothing to export — run extraction first.");
+    toast.error("Nothing to export. Run extraction first.");
     return;
   }
 
@@ -775,7 +775,7 @@ async function downloadTextExtractionXlsx(results: TextExtractionResult[], query
   summary.views = [{ state: "frozen", ySplit: 2 }];
   summary.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: 6 } };
 
-  // ---- 2. "All values" — flat list ---------------------------------------
+  // ---- 2. "All values": flat list ---------------------------------------
   const allValues = wb.addWorksheet("All values", {
     views: [{ state: "frozen", ySplit: 1 }],
   });
@@ -806,7 +806,7 @@ async function downloadTextExtractionXlsx(results: TextExtractionResult[], query
   }
   allValues.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 5 } };
 
-  // ---- 3. "All evidence" — flat list -------------------------------------
+  // ---- 3. "All evidence": flat list -------------------------------------
   const allEv = wb.addWorksheet("All evidence", {
     views: [{ state: "frozen", ySplit: 1 }],
   });

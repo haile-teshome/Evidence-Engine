@@ -4158,5 +4158,134 @@ Rules:
 - Do NOT name any specific commercial software, product, or company other than the AI system named above and the named bibliographic databases; for de-duplication/screening management refer generically (e.g. "a systematic review management tool") or simply state records were de-duplicated and screened.
 - Output only the six labeled subsections — no overall title, no preamble, no closing remarks."""
 
-    resp = model.invoke([HumanMessage(content=prompt)])
-    return {"summary": resp.content.strip()}
+    main_prompt = f"""You are writing the Methods section (main text) of a systematic review manuscript — concise and self-contained, as it appears in the body of the paper, NOT the appendix.
+
+Review question: {req.goal or '(not specified)'}
+
+{pico_block}
+
+{ic_block}
+
+{ec_block}
+
+Databases searched (with record counts):
+{db_block}
+
+Search date: {req.search_date or 'not recorded'}
+
+PRISMA screening funnel:
+{funnel_block or '(screening counts not yet available)'}
+
+AI and automation use:
+{ai_block}
+
+Write 2-3 tight paragraphs of flowing prose (no subsection labels, no bullet points) covering, in order: (1) the review type and aim, the topic domain named specifically, adherence to PRISMA 2020, and the synthesis approach (narrative vs. quantitative); (2) the databases searched and the search date, the concept blocks combined with AND (named from the PICO), the eligibility criteria, de-duplication and the two-stage screening (title/abstract then full text) with the actual PRISMA counts where provided, and how data were charted and synthesized; (3) a brief transparent statement of AI/automation use following the RAISE recommendations (name the AI system, note human oversight and that every AI-suggested judgement was reviewer-facing and could be overridden) — or state plainly that no judgement-making AI was used if none is recorded. Point the reader to the appendix for the full per-database search strings.
+
+Rules:
+- Past tense, third person, formal academic register. Concise — this is the body Methods, not the appendix.
+- Use ONLY the numbers and facts provided; do not invent counts, reviewer numbers or tools. Omit any claim whose data is missing.
+- Do NOT name commercial software or companies other than the AI system named above and the named bibliographic databases.
+- Output only the prose paragraphs — no title, no preamble, no closing remarks."""
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_main = ex.submit(lambda: model.invoke([HumanMessage(content=main_prompt)]))
+        fut_app = ex.submit(lambda: model.invoke([HumanMessage(content=prompt)]))
+        main_text = (fut_main.result().content or "").strip()
+        appendix = (fut_app.result().content or "").strip()
+    # `summary` kept for back-compat with older clients.
+    return {"main_text": main_text, "appendix": appendix, "summary": appendix}
+
+
+class CharItem(BaseModel):
+    id: str = ""
+    title: str = ""
+    abstract: str = ""
+    full_text: str = ""
+
+
+class CharacteristicsRequest(BaseModel):
+    papers: List[CharItem] = []
+    model: str = ""
+
+
+@app.post("/api/writing/characteristics")
+def writing_characteristics(req: CharacteristicsRequest):
+    """Extract 'Characteristics of included studies' fields per paper (design,
+    population, intervention, comparator, outcomes) from each study's text."""
+    from langchain_core.messages import HumanMessage
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if not model:
+        raise HTTPException(status_code=503, detail="No model available")
+
+    def _one(p: CharItem) -> Dict[str, Any]:
+        text = (p.full_text or p.abstract or "")[:6000]
+        base = {"id": p.id, "design": "", "population": "", "intervention": "", "comparator": "", "outcomes": ""}
+        if not text.strip():
+            return base
+        prompt = (
+            "From this study report, fill a 'Characteristics of included studies' row. "
+            "Be concise (a short phrase per field), use the study's own terms, and return ONLY JSON with keys "
+            '{"design","population","intervention","comparator","outcomes"}. '
+            "Use an empty string for anything not reported. No commentary, no code fences.\n\n"
+            f"TITLE: {p.title}\n\nREPORT:\n{text}"
+        )
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            data = AIService._extract_json(r.content) or {}
+        except Exception as e:
+            print(f"[characteristics] {e}")
+            data = {}
+        for k in ("design", "population", "intervention", "comparator", "outcomes"):
+            base[k] = str(data.get(k) or "").strip()
+        return base
+
+    workers = max(1, min(Config.PARALLEL_AGENT_WORKERS, len(req.papers) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        out = list(ex.map(_one, req.papers))
+    return {"characteristics": out}
+
+
+class AskPaper(BaseModel):
+    n: int = 0
+    title: str = ""
+    abstract: str = ""
+    full_text: str = ""
+
+
+class AskRequest(BaseModel):
+    question: str = ""
+    papers: List[AskPaper] = []
+    model: str = ""
+
+
+@app.post("/api/writing/ask")
+def writing_ask(req: AskRequest):
+    """Answer a question by synthesizing ONLY from the included papers, citing
+    each claim with the study number(s) in brackets — grounded, no outside
+    knowledge, no invented references."""
+    from langchain_core.messages import HumanMessage
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if not model:
+        raise HTTPException(status_code=503, detail="No model available")
+    q = (req.question or "").strip()
+    if not q:
+        return {"answer": ""}
+    blocks = []
+    for p in req.papers[:40]:
+        body = (p.full_text or p.abstract or "")[:2500]
+        blocks.append(f"[{p.n}] {p.title}\n{body}")
+    corpus = "\n\n".join(blocks) if blocks else "(no papers provided)"
+    prompt = (
+        "You are a systematic-review assistant. Answer the QUESTION using ONLY the numbered studies below. "
+        "Cite every claim with the study number(s) in square brackets, e.g. [1] or [2,5]. "
+        "Do NOT use outside knowledge and do NOT invent citations. If the studies do not address the question, "
+        "say so plainly. Write a concise synthesised answer (a few sentences up to a short paragraph), grouping "
+        "agreeing findings and noting disagreements.\n\n"
+        f"QUESTION: {q}\n\nSTUDIES:\n{corpus}"
+    )
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        return {"answer": (r.content or "").strip()}
+    except Exception as e:
+        print(f"[writing_ask] {e}")
+        raise HTTPException(status_code=500, detail=str(e))

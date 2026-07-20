@@ -20,10 +20,10 @@ export type AgentTrace = Record<string, AgentVote>;
 
 // Per-PICO structured appraisal returned by the screen-abstract endpoint.
 // vote semantics:
-//   PASS     — abstract clearly satisfies this PICO element
-//   PARTIAL  — partial / related match
-//   FAIL     — clearly does not match
-//   NA       — abstract lacks enough information to judge
+//   PASS     : abstract clearly satisfies this PICO element
+//   PARTIAL  : partial / related match
+//   FAIL     : clearly does not match
+//   NA       : abstract lacks enough information to judge
 export type PicoVote = "PASS" | "PARTIAL" | "FAIL" | "NA";
 
 export type PicoFieldAssessment = {
@@ -242,7 +242,7 @@ export const AIService = {
     return r.per_source_queries || {};
   },
 
-  // Clarifying questions — called BEFORE the search runs. Returns 1-3 multiple-
+  // Clarifying questions, called BEFORE the search runs. Returns 1-3 multiple-
   // choice questions that disambiguate underspecified PICO elements. The Home
   // page shows them in a Claude-style modal so the user owns the answer.
   async getClarifyingQuestions(input: string, signal?: AbortSignal): Promise<ClarifyingQuestion[]> {
@@ -574,7 +574,7 @@ export type RerankResult = {
 
 export const DataAggregator = {
   // `maxPerSource` is a download budget, NOT a relevance cap. The downstream
-  // rerank stage auto-detects the relevance break — anything that fetched
+  // rerank stage auto-detects the relevance break, so anything that fetched
   // matters only insofar as LEADS can score it. Default raised to 50 so the
   // candidate pool is broad enough to find the natural break without missing
   // relevant papers from a single source.
@@ -588,7 +588,7 @@ export const DataAggregator = {
 
   // Fetch the FULL planning corpus for screening: for each source use its
   // per-database query (from the Planning page) and pull up to that source's
-  // planning yield, so everything the search found is screened — not a fixed
+  // planning yield, so everything the search found is screened, not a fixed
   // small sample. `cap` is a safety ceiling per source; anything above it is
   // reported back in `truncated` so nothing is silently dropped.
   async fetchForScreening(
@@ -629,7 +629,7 @@ export const DataAggregator = {
   // `threshold` is the absolute floor in [-1, +1]. `quantileKeep`, if set,
   // additionally requires the paper to be in the top `quantileKeep` fraction of
   // the scored corpus (e.g. 0.30 = top 30 %). The effective acceptance bar is
-  // max(absolute floor, quantile cutoff) — both gates must be cleared.
+  // max(absolute floor, quantile cutoff): both gates must be cleared.
   async rerankByRelevance(
     papers: Paper[],
     pico: Pico,
@@ -655,7 +655,7 @@ export const DataAggregator = {
 };
 
 // ---------------------------------------------------------------------------
-// Deduplicator — kept client-side (pure logic, no backend round-trip)
+// Deduplicator, kept client-side (pure logic, no backend round-trip)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

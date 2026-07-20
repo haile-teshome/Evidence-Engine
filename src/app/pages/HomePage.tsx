@@ -21,7 +21,7 @@ import { toast } from "sonner";
 function ReferencesBySource({ refs, idPrefix }: { refs: { title: string; url: string; source: string; id: string }[]; idPrefix?: string }) {
   // The backend re-orders papers so that papers from the same source are
   // contiguous, with [N] citation markers in the summary matching this order.
-  // We render the same sequence here under source headings — within each
+  // We render the same sequence here under source headings, within each
   // heading the numbers stay continuous because the backend grouped them
   // before assigning [1]..[N].
   const numbered = refs.map((r, i) => ({ ...r, n: i + 1 }));
@@ -307,7 +307,7 @@ function ClarifyingQuestionsModal({
   // populations or outcomes); they're combined into one criterion on confirm.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const freeRef = useRef<HTMLInputElement>(null);
-  // PICO element ids already asked — at most one question per element, no repeats.
+  // PICO element ids already asked, at most one question per element, no repeats.
   const askedRef = useRef<Set<string>>(new Set());
 
   const fetchNext = useCallback(async (current: Record<string, string>, r: number) => {
@@ -458,7 +458,7 @@ function ClarifyingQuestionsModal({
                 );
               })}
 
-              {/* Custom values added via "Other" — shown as selected chips. */}
+              {/* Custom values added via "Other", shown as selected chips. */}
               {[...selected].filter(l => !question!.options.slice(0, 3).some(o => o.label === l)).map(label => (
                 <button
                   key={label}
@@ -613,7 +613,7 @@ function RelevanceExplorer() {
   const r = s.rerankResults;
   if (!r) return null;
   // Use the auto-cutoff the rerank actually applied (effective_floor), not the
-  // legacy store threshold — the slider that used to drive it has been removed.
+  // legacy store threshold. The slider that used to drive it has been removed.
   const threshold = typeof r.effective_floor === "number" ? r.effective_floor : r.threshold;
   const kept = r.ranked.filter(x => x.leads_score >= threshold);
   const dropped = r.ranked.filter(x => x.leads_score < threshold);
@@ -636,7 +636,7 @@ function RelevanceExplorer() {
       {kept.length > 0 && (
         <section>
           <div className="text-sm font-semibold text-foreground mb-1.5">
-            Kept — above threshold (used for the summary)
+            Kept: above threshold (used for the summary)
           </div>
           <div className="rounded-md border bg-muted/20 max-h-72 overflow-auto p-1">
             <ul className="space-y-0.5">
@@ -653,7 +653,7 @@ function RelevanceExplorer() {
       ) : (
         <section>
           <div className="text-sm font-semibold text-foreground mb-1.5">
-            Dropped — below threshold
+            Dropped: below threshold
           </div>
           <div className="rounded-md border bg-muted/20 max-h-72 overflow-auto p-1">
             <ul className="space-y-0.5">
@@ -734,7 +734,7 @@ export function HomePage() {
     //    answer through a Claude-style multi-question popup. If the model
     //    returns no clarifying questions, this is a no-op.
     //
-    //    Skipped when handleSubmit is called from applyRefinement — the
+    //    Skipped when handleSubmit is called from applyRefinement: the
     //    refinement IS the clarification, no need to ask again.
     let clarifyAnswers: Record<string, string> = {};
     if (!opts.skipClarify) {
@@ -759,7 +759,7 @@ export function HomePage() {
     const clarifyExtras = Object.entries(clarifyAnswers)
       .map(([k, v]) => `${k}: ${v}`)
       .join("; ");
-    const effectiveText = clarifyExtras ? `${t}\n\nFurther context — ${clarifyExtras}` : t;
+    const effectiveText = clarifyExtras ? `${t}\n\nFurther context. ${clarifyExtras}` : t;
 
     const { abort } = s.startTask("home-analysis", INITIAL_STAGES.map(st => ({ ...st, status: "pending" as const })));
     const signal = abort.signal;
@@ -767,7 +767,7 @@ export function HomePage() {
     try {
       // 1. PICO inference. When a strategy already exists, treat this message as
       //    a REFINEMENT of the CURRENT active strategy (the one shown in the
-      //    Strategy Review drawer — includes any edits / version reverts) so the
+      //    Strategy Review drawer, includes any edits / version reverts) so the
       //    operationalised detail is preserved instead of regenerated.
       const prior = s.history.length > 0
         ? { p: s.pico.population, i: s.pico.intervention, c: s.pico.comparator, o: s.pico.outcome,
@@ -800,7 +800,7 @@ export function HomePage() {
           const breakdown = Object.entries(fetched.sourceCounts || {})
             .map(([k, v]) => `${k}: ${v}`)
             .join(" · ");
-          markStage("papers", { status: "done", detail: `${papers.length} papers — ${breakdown}` });
+          markStage("papers", { status: "done", detail: `${papers.length} papers: ${breakdown}` });
           s.setRawPapers(papers);
         }
       }
@@ -822,7 +822,7 @@ export function HomePage() {
             newPico,
             analysis.inclusion,
             analysis.exclusion,
-            -1.0,        // disabled — auto mode supersedes
+            -1.0,        // disabled, auto mode supersedes
             undefined,
             sig,
           )
@@ -890,7 +890,7 @@ export function HomePage() {
     // up. Then re-run the full analysis pipeline with the refinement folded
     // into the goal text so the search query, retrieval, rerank, and summary
     // all reflect the new constraint. We skip the clarifying-questions popup
-    // because the refinement itself IS a clarification — re-prompting would
+    // because the refinement itself IS a clarification, re-prompting would
     // be circular.
     const field = refinement.field;
     const suggested = refinement.suggested;
@@ -898,8 +898,8 @@ export function HomePage() {
     const baseGoal = (last?.goal || "").trim();
     setRefinement(null);
     if (baseGoal) {
-      const augmented = `${baseGoal}\n\nFurther context — ${field}: ${suggested}`;
-      // Fire-and-forget — handleSubmit manages its own task lifecycle.
+      const augmented = `${baseGoal}\n\nFurther context. ${field}: ${suggested}`;
+      // Fire-and-forget. handleSubmit manages its own task lifecycle.
       void handleSubmit(augmented, { skipClarify: true });
     }
   }
@@ -1016,7 +1016,7 @@ export function HomePage() {
                   )}
                 </TabsContent>
 
-                {/* Relevance-rerank explorer — only for the most recent run,
+                {/* Relevance-rerank explorer, only for the most recent run,
                     since rerankResults holds only the latest LEADS pass. */}
                 {idx === s.history.length - 1 && s.rerankResults && (
                   <TabsContent value="relevance" className="mt-0">
@@ -1042,7 +1042,7 @@ export function HomePage() {
 
       <div className="h-24" />
 
-      {/* Clarifying-questions modal — opens BEFORE the search runs whenever the
+      {/* Clarifying-questions modal, opens BEFORE the search runs whenever the
           user's goal is under-specified. Pauses handleSubmit until the user
           answers or skips, then resumes with the answers folded into the
           effective goal text. */}
@@ -1053,7 +1053,7 @@ export function HomePage() {
         onSkipAll={() => clarifyResolverRef.current?.({})}
       />
 
-      {/* Refinement popup — floats above the chat input, Claude-clarifying-question style */}
+      {/* Refinement popup, floats above the chat input, Claude-clarifying-question style */}
       {(refining || refinement) && s.history.length > 0 && (
         <div className={`fixed bottom-20 left-72 z-30 px-6 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
           <div className="max-w-4xl mx-auto pointer-events-auto">
@@ -1123,7 +1123,7 @@ export function HomePage() {
                     variant="outline"
                     onClick={() => {
                       if (!refinement) return;
-                      setInput(prev => (prev ? `${prev} — ${refinement.suggested}` : refinement.suggested));
+                      setInput(prev => (prev ? `${prev}, ${refinement.suggested}` : refinement.suggested));
                       setRefinement(null);
                     }}
                   >
@@ -1139,7 +1139,7 @@ export function HomePage() {
         </div>
       )}
 
-      {/* ── Strategy Review — collapsible right-hand drawer ────────────────── */}
+      {/* ── Strategy Review, collapsible right-hand drawer ────────────────── */}
       {s.history.length > 0 && (
         <>
           {/* Opened from the "Strategy Review" button in the top header bar. */}
@@ -1195,7 +1195,7 @@ export function HomePage() {
         </>
       )}
 
-      {/* Chat input — fixed to bottom, matching content width */}
+      {/* Chat input, fixed to bottom, matching content width */}
       <div className={`fixed bottom-0 left-72 z-30 px-6 py-4 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
         <div className="max-w-4xl mx-auto pointer-events-auto">
           <input ref={attachRef} type="file" multiple

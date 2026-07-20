@@ -141,7 +141,7 @@ function PaperList({ papers }: { papers: PaperRef[] }) {
 const BOX_STYLE = "border border-[#a3c4c2] bg-white rounded text-xs leading-snug p-2.5 text-[#0f172a] w-full";
 const EXCLUDED_BOX_STYLE = "border border-[#a3c4c2] bg-white rounded text-xs leading-snug p-2.5 text-[#0f172a] w-full";
 const PHASE_BAR = "text-white text-[10px] font-bold tracking-widest uppercase writing-vertical flex items-center justify-center bg-[#0d6b66] px-2 select-none";
-// Light teal panel behind each phase group — the Covidence look, in our colour.
+// Light teal panel behind each phase group, in our colour.
 const SECTION_PANEL = "flex items-stretch rounded-lg bg-[#eef6f5] overflow-hidden";
 
 // ---------------------------------------------------------------------------
@@ -198,7 +198,7 @@ function ExclusionBox({
 // ---- Export rasterisation helpers (module-level, browser-robust) ------------
 
 /** Pull width/height off the generated SVG root so the raster canvas is sized
- *  explicitly — never relying on an SVG <img>'s intrinsic size, which WebKit
+ *  explicitly, never relying on an SVG <img>'s intrinsic size, which WebKit
  *  reports as 0. */
 function svgDimensions(svg: string): { w: number; h: number } {
   const wm = svg.match(/\bwidth="(\d+(?:\.\d+)?)"/);
@@ -360,7 +360,7 @@ export function PrismaFlow({
 
   // Build a NATIVE, editable Word document that mirrors the on-screen Covidence
   // layout: teal vertical phase bands, a [band | main | gap | excluded] grid,
-  // bordered white boxes, and right-aligned reason counts — every value real,
+  // bordered white boxes, and right-aligned reason counts. Every value is real,
   // editable text rather than a flat image.
   async function exportDocx() {
     const {
@@ -372,7 +372,7 @@ export function PrismaFlow({
     const FONT = "Calibri";
     const TEAL = "0D6B66", GREEN = "166534", SUB = "64748B", BORD = "A3C4C2", GREY = "94A3B8";
     const W_BAND = 420, W_MAIN = 4200, W_GAP = 300, W_EXC = 4080;   // twips
-    const INNER = W_BAND + W_MAIN + W_GAP + W_EXC;                  // 9000 — fits inside the panel
+    const INNER = W_BAND + W_MAIN + W_GAP + W_EXC;                  // 9000, fits inside the panel
     const PAGE = 9360;                                             // Letter content width
 
     const edge = { style: BorderStyle.SINGLE, size: 6, color: BORD };
@@ -543,7 +543,7 @@ export function PrismaFlow({
     <div className="py-2 space-y-3 font-sans text-xs">
       <div className="flex items-center justify-between gap-4">
         <p className="text-xs text-muted-foreground">Click any label or number to edit inline.</p>
-        {/* Plain buttons — Radix dropdown items didn't deliver the click in Safari. */}
+        {/* Plain buttons. Radix dropdown items didn't deliver the click in Safari. */}
         <div className="flex items-center gap-1.5 shrink-0">
           <span className="text-xs text-muted-foreground flex items-center gap-1">
             <Download className="size-3" />Export
@@ -662,7 +662,7 @@ export function PrismaFlow({
               <div className="grid grid-cols-[5fr_16px_6fr] gap-2 py-2.5">{ARROW}<div /><div /></div>
 
               {/* Row: assessed for eligibility → excluded at full text.
-                  Reasons + counts only — no per-study disclosure. */}
+                  Reasons + counts only, no per-study disclosure. */}
               <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
                 <div className={BOX_STYLE}>
                   <span className="font-semibold">
@@ -731,7 +731,7 @@ export function PrismaFlow({
 }
 
 // ---------------------------------------------------------------------------
-// SVG export — PRISMA 2020 layout
+// SVG export: PRISMA 2020 layout
 // ---------------------------------------------------------------------------
 
 function esc(s: string) {

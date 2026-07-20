@@ -381,7 +381,7 @@ function BubblePlot({
 }
 
 // ===========================================================================
-// Study row editor — switches input fields based on effect_measure
+// Study row editor. Switches input fields based on effect_measure
 // ===========================================================================
 
 function StudyRowEditor({
@@ -637,7 +637,7 @@ export function MetaAnalysisPage() {
               onChange={e => s.setMetaOutcome(e.target.value)}
               placeholder="e.g., all-cause mortality at 12 months; depression score reduction; incidence of MI"
             />
-            <p className="text-xs text-muted-foreground mt-1">Specific outcome → better extractions. Mention units / time point.</p>
+            <p className="text-xs text-muted-foreground mt-1">A specific outcome gives better extractions. Include units and the time point.</p>
           </div>
           <div>
             <Label className="text-sm">Preferred effect measure (optional hint)</Label>
@@ -685,7 +685,7 @@ export function MetaAnalysisPage() {
         </div>
 
         {candidatePapers.length === 0 && (
-          <Alert><AlertDescription>No source papers found. Run Abstract Screening first — included papers feed the meta-analysis.</AlertDescription></Alert>
+          <Alert><AlertDescription>No source papers found. Run Abstract Screening first; included papers feed the meta-analysis.</AlertDescription></Alert>
         )}
       </Card>
 
@@ -813,9 +813,9 @@ export function MetaAnalysisPage() {
                       .map((r, i) => (
                         <tr key={i} className="border-t border-border/40">
                           <td className="py-1 pr-2 truncate max-w-[200px]" title={r.title}>{r.title.slice(0, 36)}</td>
-                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{r.estimate_without?.toFixed(3) ?? "—"}</td>
+                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{r.estimate_without?.toFixed(3) ?? "–"}</td>
                           <td className={`py-1 text-right font-mono tabular-nums ${Math.abs(r.delta ?? 0) > 0.1 ? "text-amber-700" : ""}`}>
-                            {r.delta !== null ? (r.delta >= 0 ? "+" : "") + r.delta.toFixed(3) : "—"}
+                            {r.delta !== null ? (r.delta >= 0 ? "+" : "") + r.delta.toFixed(3) : "–"}
                           </td>
                         </tr>
                       ))}
@@ -837,7 +837,7 @@ export function MetaAnalysisPage() {
                       <tr key={i} className="border-t border-border/40">
                         <td className="py-1 pr-2 tabular-nums">{r.k}</td>
                         <td className="py-1 pr-2 truncate max-w-[180px]">{r.last_added.slice(0, 30)}</td>
-                        <td className="py-1 pr-2 text-right font-mono tabular-nums">{r.estimate?.toFixed(3) ?? "—"}</td>
+                        <td className="py-1 pr-2 text-right font-mono tabular-nums">{r.estimate?.toFixed(3) ?? "–"}</td>
                         <td className="py-1 text-right font-mono tabular-nums">{r.I2_pct?.toFixed(0)}%</td>
                       </tr>
                     ))}
@@ -913,9 +913,9 @@ export function MetaAnalysisPage() {
                         <tr key={i} className="border-t border-border/40">
                           <td className="py-1 pr-2 font-medium">{g.name}</td>
                           <td className="py-1 pr-2 text-right tabular-nums">{g.k}</td>
-                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{g.estimate?.toFixed(3) ?? "—"}</td>
+                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{g.estimate?.toFixed(3) ?? "–"}</td>
                           <td className="py-1 pr-2 text-right font-mono tabular-nums text-xs">
-                            {g.ci_low !== null && g.ci_high !== null ? `[${g.ci_low.toFixed(3)}, ${g.ci_high.toFixed(3)}]` : "—"}
+                            {g.ci_low !== null && g.ci_high !== null ? `[${g.ci_low.toFixed(3)}, ${g.ci_high.toFixed(3)}]` : "–"}
                           </td>
                           <td className="py-1 text-right tabular-nums">{g.I2_pct?.toFixed(0)}%</td>
                         </tr>
@@ -927,7 +927,7 @@ export function MetaAnalysisPage() {
                     Between-group Q = <span className="font-mono">{run.subgroup.Q_between.toFixed(2)}</span>
                     {" "}(df = {run.subgroup.df_between}, p = {run.subgroup.Q_between_p.toFixed(4)}).{" "}
                     {run.subgroup.Q_between_p < 0.05
-                      ? "Statistically significant heterogeneity between subgroups — the moderator matters."
+                      ? "Statistically significant heterogeneity between subgroups: the moderator matters."
                       : "No significant between-group differences."}
                   </div>
                 </>

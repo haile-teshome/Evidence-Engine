@@ -8,7 +8,7 @@
 // active profile id is sent in the `X-Reviewer-Id` header so the backend can
 // scope sessions and multi-reviewer project data per reviewer. When we later
 // host this backend for remote collaboration, only the server-side identity
-// check changes — this client stays the same.
+// check changes; this client stays the same.
 
 export const REVIEWER_ID_KEY = "ee_reviewer_id";
 
