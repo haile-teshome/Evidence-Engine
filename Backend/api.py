@@ -957,6 +957,55 @@ def papers_fetch(req: FetchAllRequest):
     }
 
 
+class PdfMetadataRequest(BaseModel):
+    text: str = ""
+    filename: str = ""
+    model: str = ""
+
+
+@app.post("/api/pdf/metadata")
+def pdf_metadata(req: PdfMetadataRequest):
+    """Extract clean bibliographic metadata (title / authors / year / abstract /
+    DOI) from an uploaded PDF's extracted text, using the thinking model. This
+    upgrades the client's filename-based heuristic. Best-effort — missing fields
+    come back empty so the caller can keep its heuristic value."""
+    from langchain_core.messages import HumanMessage
+    text = (req.text or "")[:6000]   # title/abstract live in the opening pages
+    if not text.strip():
+        return {"title": "", "authors": "", "year": None, "abstract": "", "doi": ""}
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    prompt = f"""Extract bibliographic metadata from the opening text of a research paper. Return ONLY a JSON object with these exact keys, no commentary or code fences:
+{{
+  "title": "<full paper title, or empty string>",
+  "authors": "<comma-separated author names, or empty string>",
+  "year": <4-digit publication year as a number, or null>,
+  "abstract": "<the abstract verbatim if present, else a 2-3 sentence summary, or empty string>",
+  "doi": "<DOI like 10.xxxx/yyyy, or empty string>"
+}}
+Filename hint: {req.filename}
+
+PAPER TEXT:
+{text}"""
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+    except Exception as e:
+        print(f"[pdf_metadata] {e}")
+        data = {}
+    yr = data.get("year")
+    try:
+        yr = int(yr) if yr else None
+    except Exception:
+        yr = None
+    return {
+        "title": str(data.get("title") or "").strip(),
+        "authors": str(data.get("authors") or "").strip(),
+        "year": yr,
+        "abstract": str(data.get("abstract") or "").strip(),
+        "doi": str(data.get("doi") or "").strip(),
+    }
+
+
 class SimulateYieldRequest(BaseModel):
     query: str
     sources: List[str]
@@ -1745,8 +1794,21 @@ def screen_fulltext(req: ScreenFullTextRequest):
                 best, best_score = s, score
         return best or source_text[:200]
 
+    # The full-text screener returns per-criterion verdicts under
+    # "criteria_evaluations". Match each user criterion to its verdict by exact
+    # then whitespace/case-normalised text, so the PRISMA exclusion "reasons" name
+    # the specific criterion a paper failed rather than a generic PICO bucket.
+    _ce = raw.get("criteria_evaluations")
+    _ce = _ce if isinstance(_ce, dict) else {}
+    _ce_norm = {re.sub(r"\s+", " ", str(k).strip().lower()): str(v).upper() for k, v in _ce.items()}
+
+    def _crit_verdict(crit: str) -> str:
+        if crit in _ce:
+            return str(_ce[crit]).upper()
+        return _ce_norm.get(re.sub(r"\s+", " ", str(crit).strip().lower()), str(raw.get(crit, "INCLUDE")).upper())
+
     for crit in (req.inclusion or []):
-        v = str(raw.get(crit, "INCLUDE")).upper()
+        v = _crit_verdict(crit)
         v = "INCLUDE" if v == "INCLUDE" else "EXCLUDE"
         criteria_eval[crit] = v
         criteria_evidence[crit] = {
@@ -1758,7 +1820,7 @@ def screen_fulltext(req: ScreenFullTextRequest):
             inclusion_score += 1
 
     for crit in (req.exclusion or []):
-        v = str(raw.get(crit, "INCLUDE")).upper()
+        v = _crit_verdict(crit)
         v = "EXCLUDE" if v == "EXCLUDE" else "INCLUDE"
         criteria_eval[crit] = v
         criteria_evidence[crit] = {
@@ -3607,9 +3669,14 @@ def _answer_signals(paper: PaperIn, text: str, inst: dict, model_name: str) -> D
         for s in d["signals"]:
             sig_lines.append(f'  - {s["id"]}: {s["text"]}')
     prompt = f"""You are a systematic-review methodologist applying the {inst['short_name']} tool.
-Answer EACH signalling question below based ONLY on what the paper states. Use exactly one of:
-"Y" (yes), "PY" (probably yes), "PN" (probably no), "N" (no), "NI" (no information).
-Do not judge the domain — only answer the signalling questions and give a short exact quote.
+Answer EACH signalling question below based ONLY on what the paper states. Do not judge the domain.
+
+For each question return:
+  - "answer": exactly one of "Y" (yes), "PY" (probably yes), "PN" (probably no), "N" (no), "NI" (no information)
+  - "quote": a VERBATIM excerpt copied word-for-word from the PAPER TEXT below that supports your answer
+    (<= 220 characters). Use "" only if the paper gives no explicit evidence. Never paraphrase or invent a quote.
+  - "section": where that quote appears in the paper, e.g. "Methods", "Results", "Abstract", "Table 2" (or "")
+  - "rationale": one clear sentence explaining the answer in terms of what the paper does or does not report
 
 PAPER TITLE: {paper.title or "(untitled)"}
 PAPER TEXT:
@@ -3618,7 +3685,7 @@ PAPER TEXT:
 SIGNALLING QUESTIONS:
 {chr(10).join(sig_lines)}
 
-Return ONLY JSON: {{"answers":[{{"signal_id":"1.1","answer":"Y|PY|PN|N|NI","quote":"<=200 chars exact quote or empty","section":"Methods|Results|Discussion|Abstract|Other|","rationale":"one sentence"}}, ...]}}"""
+Return ONLY JSON: {{"answers":[{{"signal_id":"1.1","answer":"Y","quote":"...","section":"Methods","rationale":"..."}}, ...]}}"""
     try:
         r = model.invoke([HumanMessage(content=prompt)])
         data = AIService._extract_json(r.content) or {}
@@ -3635,8 +3702,8 @@ Return ONLY JSON: {{"answers":[{{"signal_id":"1.1","answer":"Y|PY|PN|N|NI","quot
                 ans = "NI"
             out[did][sid] = {
                 "answer": ans,
-                "quote": str(it.get("quote") or "").strip()[:250],
-                "section": str(it.get("section") or "").strip()[:30],
+                "quote": str(it.get("quote") or "").strip()[:300],
+                "section": str(it.get("section") or "").strip()[:120],
                 "rationale": str(it.get("rationale") or "").strip()[:400],
             }
     except Exception as e:
@@ -3682,7 +3749,7 @@ def quality_assess(req: QualityRequest):
         # Domain-level rationale/quote synthesised from the signalling answers, so
         # existing UI (which reads domain.rationale/supporting_quote) keeps working
         # while the richer `signals` array powers the new generic renderer.
-        rationale = "; ".join(x["rationale"] for x in sigs if x.get("rationale"))[:600]
+        rationale = " ".join(x["rationale"].strip() for x in sigs if x.get("rationale"))[:800]
         quoted = next((x for x in sigs if x.get("quote")), None)
         domains_out.append({
             "id": d["id"], "name": d["name"],

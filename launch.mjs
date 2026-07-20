@@ -6,6 +6,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -14,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const PROJECT = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_DIR = path.join(PROJECT, "Backend");
 const FRONTEND_PORT = 5180;
-const BACKEND_PORT = 8000;
+let BACKEND_PORT = 8000;   // resolved at startup; may shift if 8000 is taken by a foreign process
 const APP_URL = `http://localhost:${FRONTEND_PORT}/`;
 // The window is opened at this URL: the `?new=1` flag tells the app a fresh
 // launch happened so it starts on Home with a new session instead of restoring
@@ -40,6 +41,48 @@ function httpOk(url) {
     req.on("error", () => resolve(false));
     req.setTimeout(2000, () => { req.destroy(); resolve(false); });
   });
+}
+
+// True only if OUR FastAPI backend answers on this port. A dumb static server or
+// other program squatting the port returns a 200/404 too, so we must confirm the
+// health endpoint returns our JSON shape — otherwise the launcher would mistake a
+// foreign process for the backend and never start the real one (the "sessions
+// gone / stuck on Starting engine" bug).
+function isOurBackend(port) {
+  return new Promise((resolve) => {
+    const req = http.get(`http://localhost:${port}/api/health`, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(false); }
+      let body = "";
+      res.on("data", (c) => { body += c; if (body.length > 4096) req.destroy(); });
+      res.on("end", () => { try { resolve(JSON.parse(body)?.ok === true); } catch { resolve(false); } });
+    });
+    req.on("error", () => resolve(false));
+    req.setTimeout(2000, () => { req.destroy(); resolve(false); });
+  });
+}
+
+// Resolve if a TCP port is free to bind on localhost.
+function portFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", () => resolve(false));
+    srv.once("listening", () => srv.close(() => resolve(true)));
+    srv.listen(port, "localhost");
+  });
+}
+
+// Pick the backend port: reuse ours if already running, else the default if free,
+// else the next free port so a foreign program on 8000 can't break the app.
+async function resolveBackendPort() {
+  if (await isOurBackend(BACKEND_PORT)) return BACKEND_PORT;
+  if (await portFree(BACKEND_PORT)) return BACKEND_PORT;
+  for (let p = BACKEND_PORT + 1; p < BACKEND_PORT + 20; p++) {
+    if (await portFree(p)) {
+      log(`Port ${BACKEND_PORT} is in use by another program; using ${p} for the backend.`);
+      return p;
+    }
+  }
+  return BACKEND_PORT;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -538,7 +581,13 @@ async function main() {
   //    with correctly-built deps, regardless of what `python3` resolves to when
   //    launched from Finder/Explorer (which often finds an old system Python).
   ensureBackendEnv();
-  if (await httpOk(`http://localhost:${BACKEND_PORT}/docs`)) {
+  // Choose the backend port before wiring the proxy: reuse a running Evidence
+  // Engine backend, otherwise the default port if free, otherwise the next free
+  // one. This is verified against /api/health so a foreign server squatting :8000
+  // can never masquerade as the backend (which left /api calls 404-ing — sessions
+  // vanished and "Starting engine" never cleared).
+  BACKEND_PORT = await resolveBackendPort();
+  if (await isOurBackend(BACKEND_PORT)) {
     log(`Backend already running on :${BACKEND_PORT}`);
   } else {
     const backendPy = ensureBackendPython();

@@ -2098,51 +2098,49 @@ OUTPUT FORMAT:
             inclusion_criteria = []
             exclusion_criteria = []
 
-        inc_text = ", ".join(inclusion_criteria) if inclusion_criteria else "None specified"
-        excl_text = ", ".join(exclusion_criteria) if exclusion_criteria else "None specified"
+        inc_text = "\n".join(f"        - {c}" for c in inclusion_criteria) if inclusion_criteria else "        (none specified)"
+        excl_text = "\n".join(f"        - {c}" for c in exclusion_criteria) if exclusion_criteria else "        (none specified)"
 
         prompt = f"""
         You are performing the Full-Text Eligibility phase of a Systematic Review.
-        
+
         INCLUSION CRITERIA:
-        {inc_text}
-        
+{inc_text}
+
         EXCLUSION CRITERIA:
-        {excl_text}
+{excl_text}
 
         FULL TEXT TO ANALYZE:
-        {paper_text[:4000]} 
+        {paper_text[:4000]}
 
         SCREENING RULES:
         1. Paper must meet ALL inclusion criteria to be included
         2. Paper must NOT match ANY exclusion criteria to be included
         3. Be thorough - this is full-text screening, so be more comprehensive
         4. Look for specific details in methods, results, and discussion sections
-        
+
         CRITERIA EVALUATION:
-        For EACH criterion in the inclusion and exclusion lists above, evaluate whether the paper meets it.
-        Return "INCLUDE" if the paper meets the criterion, "EXCLUDE" if it does not.
-        
+        Evaluate the paper against EACH criterion listed above. For an INCLUSION criterion,
+        return "INCLUDE" if the paper meets it, "EXCLUDE" if it does not. For an EXCLUSION
+        criterion, return "INCLUDE" if the paper does NOT match it, "EXCLUDE" if the paper
+        matches/violates it. Use the criterion's EXACT wording as the JSON key.
+
         AI REASONING SUMMARY:
         Provide a 1-2 sentence summary explaining the main reason for inclusion or exclusion.
         Focus on which specific criteria were met or violated.
 
-        REQUIRED JSON FORMAT:
+        REQUIRED JSON FORMAT (use the exact criterion text as each key, one entry per criterion):
         {{
             "decision": "Include" or "Exclude",
             "reason": "Brief 1-2 sentence summary of why included/excluded",
             "citation": "Direct quote from text (max 100 words)...",
             "criteria_evaluations": {{
-                "Inclusion Criterion 1": "INCLUDE" or "EXCLUDE",
-                "Inclusion Criterion 2": "INCLUDE" or "EXCLUDE",
-                ...
-                "Exclusion Criterion 1": "INCLUDE" or "EXCLUDE",
-                "Exclusion Criterion 2": "INCLUDE" or "EXCLUDE"
+                "<exact text of an inclusion or exclusion criterion>": "INCLUDE" or "EXCLUDE"
             }}
         }}
-        
-        You MUST provide: decision, reason (brief summary), citation, and criteria_evaluations for ALL criteria.
-        Only use "INCLUDE" or "EXCLUDE" values - no "ERROR" or other values.
+
+        You MUST include an entry in "criteria_evaluations" for EVERY inclusion and exclusion
+        criterion, keyed by the criterion's exact text. Only use "INCLUDE" or "EXCLUDE" values.
         """
 
         try:

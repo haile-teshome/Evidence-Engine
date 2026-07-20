@@ -4,9 +4,9 @@ import { Label } from "./ui/label";
 import { Checkbox } from "./ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Button } from "./ui/button";
-import { Separator } from "./ui/separator";
 import { Badge } from "./ui/badge";
-import { Upload, FileText, X, Microscope, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, PenLine } from "lucide-react";
+import { Upload, FileText, X, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, PenLine } from "lucide-react";
+import { Logo } from "./Logo";
 import { ALL_SOURCES } from "../lib/mockServices";
 import { useStore, PageId } from "../lib/store";
 import { SessionsPanel } from "./SessionsPanel";
@@ -38,20 +38,32 @@ function formatModelName(m: string): string {
   return m.replace(/^hf\.co\//, "").replace(/-GGUF.*$/, "").replace(/:latest$/, "");
 }
 
-const NAV: { id: PageId; label: string; icon: any }[] = [
-  { id: "home", label: "Home", icon: Home },
-  { id: "simulation", label: "Planning", icon: BarChart3 },
-  { id: "projects", label: "Projects", icon: Users },
-  { id: "abstract", label: "Abstract Screening", icon: FileSearch },
-  { id: "acquisition", label: "Full-Text Acquisition", icon: FileDown },
-  { id: "fulltext", label: "Full-Text Evidence", icon: FlaskConical },
-  { id: "snowball", label: "Citation Snowball", icon: Network },
-  { id: "extraction", label: "Table Extraction", icon: Table2 },
-  { id: "textextraction", label: "Text Extraction", icon: ScanText },
-  { id: "quality", label: "Quality Assessment", icon: ShieldCheck },
-  { id: "prisma", label: "Diagramming", icon: GitBranch },
-  { id: "meta", label: "Meta-analysis", icon: Sigma },
-  { id: "writing", label: "Writing Assistant", icon: PenLine },
+// Full literal class strings (so Tailwind's scanner emits them) mapping each
+// nav icon to a one-shot hover flourish. `motion-safe` respects reduced-motion.
+const ANIM: Record<string, string> = {
+  pop:    "motion-safe:group-hover:animate-[nav-pop_0.4s_ease-in-out]",
+  bob:    "motion-safe:group-hover:animate-[nav-bob_0.4s_ease-in-out]",
+  dip:    "motion-safe:group-hover:animate-[nav-dip_0.4s_ease-in-out]",
+  spin:   "motion-safe:group-hover:animate-[nav-spin_0.5s_ease-in-out]",
+  wiggle: "motion-safe:group-hover:animate-[nav-wiggle_0.5s_ease-in-out]",
+  swing:  "motion-safe:group-hover:animate-[nav-swing_0.5s_ease-in-out]",
+};
+
+const NAV: { id: PageId; label: string; icon: any; anim: keyof typeof ANIM }[] = [
+  { id: "home", label: "Home", icon: Home, anim: "bob" },
+  { id: "simulation", label: "Planning", icon: BarChart3, anim: "pop" },
+  { id: "projects", label: "Projects", icon: Users, anim: "pop" },
+  { id: "abstract", label: "Abstract Screening", icon: FileSearch, anim: "wiggle" },
+  { id: "acquisition", label: "Full-Text Acquisition", icon: FileDown, anim: "dip" },
+  { id: "fulltext", label: "Full-Text Evidence", icon: FlaskConical, anim: "wiggle" },
+  { id: "snowball", label: "Citation Snowball", icon: Network, anim: "spin" },
+  { id: "extraction", label: "Table Extraction", icon: Table2, anim: "pop" },
+  { id: "textextraction", label: "Text Extraction", icon: ScanText, anim: "bob" },
+  { id: "quality", label: "Quality Assessment", icon: ShieldCheck, anim: "pop" },
+  { id: "prisma", label: "Diagramming", icon: GitBranch, anim: "swing" },
+  // Meta-analysis tab hidden for now — re-add to restore.
+  // { id: "meta", label: "Meta-analysis", icon: Sigma, anim: "pop" },
+  { id: "writing", label: "Writing Assistant", icon: PenLine, anim: "wiggle" },
 ];
 
 export function Sidebar() {
@@ -97,13 +109,14 @@ export function Sidebar() {
   const visibleSources = ALL_SOURCES;
 
   return (
-    <aside className="w-72 shrink-0 border-r bg-muted/30 overflow-y-auto h-screen sticky top-0">
-      <div className="p-4">
-        <div className="flex items-center gap-2 mb-4">
-          <Microscope className="size-5 text-primary" />
-          <span className="font-semibold">Evidence Engine</span>
-        </div>
+    <aside className="w-72 shrink-0 border-r bg-muted/30 h-screen sticky top-0 flex flex-col">
+      {/* Brand header — fixed bar, distinct from the navigation below. */}
+      <div className="shrink-0 px-4 py-3.5 border-b bg-background/80 backdrop-blur-sm">
+        <Logo />
+      </div>
 
+      {/* Fixed: active tasks + nav tabs stay put while the panels below scroll. */}
+      <div className="shrink-0 px-4 pt-4 pb-2">
         {/* Active tasks (persists across page navigation) */}
         {Object.values(s.tasks).filter(t => t.status === "running").length > 0 && (
           <Card className="p-2 mb-3 bg-primary/5 border-primary/30 space-y-1">
@@ -132,15 +145,19 @@ export function Sidebar() {
             const active = s.page === n.id;
             return (
               <button key={n.id} onClick={() => s.setPage(n.id)}
-                className={`w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
-                <Icon className="size-4" />{n.label}
+                className={`group w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
+                <span className="inline-flex shrink-0 transition-transform duration-200 ease-out group-hover:scale-125">
+                  <Icon className={`size-4 ${ANIM[n.anim]}`} />
+                </span>
+                {n.label}
               </button>
             );
           })}
         </nav>
+      </div>
 
-        <Separator className="my-4" />
-
+      {/* Scrollable region: sessions, model, databases, local PDFs. */}
+      <div className="flex-1 overflow-y-auto border-t px-4 pt-3 pb-4">
         <div className="mb-3">
           <SessionsPanel />
         </div>
@@ -205,25 +222,6 @@ export function Sidebar() {
               `_auto_relevance_cutoff` in Backend/api.py. */}
         </Card>
 
-        <Card className="p-3">
-          <Label className="mb-2 block">Local PDFs</Label>
-          <input ref={fileRef} type="file" multiple accept=".pdf" className="hidden"
-            onChange={(e) => e.target.files && s.setFiles([...s.files, ...Array.from(e.target.files)])} />
-          <Button variant="outline" size="sm" className="w-full" onClick={() => fileRef.current?.click()}>
-            <Upload className="size-4 mr-2" /> Upload PDFs
-          </Button>
-          {s.files.length > 0 && (
-            <div className="mt-3 space-y-1">
-              {s.files.map((f, i) => (
-                <div key={i} className="flex items-center justify-between text-xs bg-background rounded px-2 py-1">
-                  <span className="flex items-center gap-1 truncate"><FileText className="size-3" />{f.name}</span>
-                  <button onClick={() => s.setFiles(s.files.filter((_, j) => j !== i))}><X className="size-3" /></button>
-                </div>
-              ))}
-              <Badge variant="secondary">{s.files.length} file(s)</Badge>
-            </div>
-          )}
-        </Card>
       </div>
     </aside>
   );

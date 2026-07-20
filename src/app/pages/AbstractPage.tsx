@@ -132,27 +132,38 @@ export function AbstractPage() {
 
     s.updateTask("abstract-screen", { progress: { done: 0, total: queue.length } });
     try {
-      const screened: ScreenResult[] = [];
       const reasons: Record<string, number> = {};
-      for (let i = 0; i < queue.length; i++) {
-        if (signal.aborted) break;
-        s.updateTask("abstract-screen", {
-          progress: { done: i, total: queue.length, label: queue[i].title.slice(0, 80) },
-          detail: queue[i].title.slice(0, 80),
-        });
-        try {
-          const r = await AIService.screenPaperMultiAgent(queue[i], s.pico, s.inclusion, s.exclusion, signal);
-          screened.push(r);
-          if (r.Decision === "EXCLUDE") {
-            const bucket = categoriseAbstractExclusion(r, s.inclusion, s.exclusion);
-            reasons[bucket] = (reasons[bucket] || 0) + 1;
+      // Screen with bounded concurrency — much faster on large sets. Cloud models
+      // handle many parallel calls; a local Ollama serves fewer at once, so keep
+      // the pool small there to avoid thrashing.
+      const CONCURRENCY = /^(claude|gpt|gemini)/i.test(s.model) ? 8 : 3;
+      const slots: (ScreenResult | undefined)[] = new Array(queue.length);
+      let done = 0, next = 0;
+      const worker = async () => {
+        while (!signal.aborted) {
+          const i = next++;
+          if (i >= queue.length) return;
+          s.updateTask("abstract-screen", {
+            progress: { done, total: queue.length, label: queue[i].title.slice(0, 80) },
+            detail: queue[i].title.slice(0, 80),
+          });
+          try {
+            const r = await AIService.screenPaperMultiAgent(queue[i], s.pico, s.inclusion, s.exclusion, signal);
+            slots[i] = r;
+            if (r.Decision === "EXCLUDE") {
+              const bucket = categoriseAbstractExclusion(r, s.inclusion, s.exclusion);
+              reasons[bucket] = (reasons[bucket] || 0) + 1;
+            }
+          } catch (e: any) {
+            if (signal.aborted) return;
+            console.error(`abstract-screen ${i + 1} failed:`, e?.message);
           }
-        } catch (e: any) {
-          if (signal.aborted) break;
-          console.error(`abstract-screen ${i + 1} failed:`, e?.message);
+          done += 1;
+          s.updateTask("abstract-screen", { progress: { done, total: queue.length } });
         }
-        s.updateTask("abstract-screen", { progress: { done: i + 1, total: queue.length } });
-      }
+      };
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
+      const screened: ScreenResult[] = slots.filter((x): x is ScreenResult => Boolean(x));
 
       if (signal.aborted) {
         s.updateTask("abstract-screen", { status: "canceled" });

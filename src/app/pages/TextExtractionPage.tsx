@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { getPdfBlob } from "../lib/pdfBlobs";
 import ExcelJS from "exceljs";
 
 const PRESETS = [
@@ -277,6 +278,7 @@ export function TextExtractionPage() {
                   key={selected.paper_id}
                   result={selected}
                   fullText={s.fullTexts[selected.paper_id]?.text || ""}
+                  pdfUrl={getPdfBlob(selected.paper_id) || s.fullTexts[selected.paper_id]?.pdf_url || ""}
                 />
               )}
             </Card>
@@ -287,7 +289,7 @@ export function TextExtractionPage() {
   );
 }
 
-function PaperExtractionDetail({ result, fullText }: { result: TextExtractionResult; fullText: string }) {
+function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: TextExtractionResult; fullText: string; pdfUrl?: string }) {
   // Evidence may live on the new `evidence[]` field OR fall back to the
   // legacy `spans[]`. Normalise into TextEvidenceItem so the renderer below
   // doesn't have to branch.
@@ -305,6 +307,8 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
   const maxTextRef = useRef<HTMLDivElement | null>(null);
   const [activeSpan, setActiveSpan] = useState<[number, number] | null>(null);
   const [maxOpen, setMaxOpen] = useState(false);
+  // Default to the PDF when a paper is opened; "Locate" flips to the text view.
+  const [viewMode, setViewMode] = useState<"pdf" | "text">(pdfUrl ? "pdf" : "text");
 
   // Scroll to a span inside whichever viewer is currently visible (inline, or
   // the maximized dialog).
@@ -317,6 +321,8 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
     });
   }
   function locate(start: number, end: number) {
+    // Char-offset jumping only works in the extracted-text view, so switch to it.
+    if (viewMode !== "text") setViewMode("text");
     scrollToSpan(maxOpen ? maxTextRef : fullTextRef, start, end);
   }
 
@@ -428,28 +434,48 @@ function PaperExtractionDetail({ result, fullText }: { result: TextExtractionRes
                 )}
                 </div>
 
-                {/* FULL-TEXT VIEWER WITH LINE NUMBERS ------------------------ */}
+                {/* SOURCE VIEWER — PDF (default) or extracted text ----------- */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <div className="text-xs uppercase tracking-wide text-muted-foreground">
-                      Full text · click any "Locate" button above to jump
+                    <div className="inline-flex rounded-md border bg-muted/40 p-0.5 text-xs">
+                      <button
+                        onClick={() => pdfUrl && setViewMode("pdf")}
+                        disabled={!pdfUrl}
+                        className={`px-2.5 py-1 rounded transition-colors ${viewMode === "pdf" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"} ${!pdfUrl ? "opacity-40 cursor-not-allowed" : ""}`}
+                        title={pdfUrl ? "View the source PDF" : "No PDF available for this paper"}
+                      >
+                        PDF
+                      </button>
+                      <button
+                        onClick={() => setViewMode("text")}
+                        className={`px-2.5 py-1 rounded transition-colors ${viewMode === "text" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"}`}
+                        title="View the extracted text with jump-to-passage"
+                      >
+                        Extracted text
+                      </button>
                     </div>
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      onClick={() => setMaxOpen(true)}
-                      className="size-7 text-muted-foreground hover:text-foreground"
-                      title="Maximize full text"
+                    {viewMode === "text" && (
+                      <Button
+                        size="icon"
+                        variant="ghost"
+                        onClick={() => setMaxOpen(true)}
+                        className="size-7 text-muted-foreground hover:text-foreground"
+                        title="Maximize full text"
+                      >
+                        <Maximize2 className="size-4" />
+                      </Button>
+                    )}
+                  </div>
+                  {viewMode === "pdf" && pdfUrl ? (
+                    <iframe src={pdfUrl} title="Source PDF" className="w-full h-96 rounded-md border bg-muted/20" />
+                  ) : (
+                    <div
+                      ref={fullTextRef}
+                      className="rounded-md border bg-muted/20 text-xs font-mono leading-relaxed max-h-96 overflow-auto"
                     >
-                      <Maximize2 className="size-4" />
-                    </Button>
-                  </div>
-                  <div
-                    ref={fullTextRef}
-                    className="rounded-md border bg-muted/20 text-xs font-mono leading-relaxed max-h-96 overflow-auto"
-                  >
-                    <FullTextViewer text={fullText} evidence={evidence} activeSpan={activeSpan} />
-                  </div>
+                      <FullTextViewer text={fullText} evidence={evidence} activeSpan={activeSpan} />
+                    </div>
+                  )}
                 </div>
               </>
             )}

@@ -12,12 +12,13 @@ import { Badge } from "../components/ui/badge";
 import { Checkbox } from "../components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Textarea } from "../components/ui/textarea";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import {
   Copy, ShieldCheck, AlertTriangle, ArrowRight, Search,
-  Pencil, History, RotateCcw, FileDown, Plus, Trash2, Loader2,
+  Pencil, History, RotateCcw, FileDown, Plus, Trash2, Loader2, HelpCircle, ChevronRight, Quote,
 } from "lucide-react";
 import {
   gradeCertainty, GRADE_DOWNGRADE_DOMAINS, GRADE_UPGRADE_FACTORS, GradeOutcome,
@@ -73,11 +74,51 @@ function answerClass(a: string): string {
   return "bg-slate-100 text-slate-600 border-slate-200";
 }
 
+// Plain-language label for a signalling answer code.
+const ANSWER_LABEL: Record<string, string> = {
+  Y: "Yes", PY: "Probably yes", PN: "Probably no", N: "No", NI: "No information",
+};
+
+// Left-accent colour for a domain card, by judgment severity.
+function judgmentBorderClass(j: RoBJudgment): string {
+  const r = sevRank(j);
+  if (r < 0) return "border-l-slate-300";
+  if (r === 0) return "border-l-emerald-400";
+  if (r <= 2) return "border-l-amber-400";
+  if (r === 3) return "border-l-rose-400";
+  return "border-l-rose-600";
+}
+
 function shortDomainLabel(name: string): string {
   return name
     .replace(/^Bias (arising from|due to|in measurement of|in selection of|in classification of) /i, "")
     .replace(/^Bias /i, "")
     .replace(/^the /, "");
+}
+
+// "No information" reads better as "Unclear" for reviewers. Display-only — the
+// stored judgment keeps the instrument's own scale value (ROBINS uses
+// "No information") so roll-up stays correct.
+function displayJudgment(j: string): string {
+  return /^no information$/i.test((j || "").trim()) ? "Unclear" : j;
+}
+
+// In-text citation for a domain's rationale: the distinct paper sections the
+// judgment's evidence is drawn from, e.g. "(Methods; Results)". Cites where in
+// the source the rationale comes from.
+function evidenceCitation(d: RoBDomain): string {
+  const secs: string[] = [];
+  const add = (x?: string) => { const v = (x || "").trim(); if (v && !secs.includes(v)) secs.push(v); };
+  add(d.section);
+  for (const sig of d.signals || []) add(sig.section);
+  return secs.length ? `(${secs.join("; ")})` : "";
+}
+
+// Rationale text with its in-text citation appended.
+function citedRationale(d: RoBDomain): string {
+  const base = (d.rationale || "").trim();
+  const cite = evidenceCitation(d);
+  return base ? (cite ? `${base} ${cite}` : base) : cite;
 }
 
 // ---- override resolution --------------------------------------------------
@@ -112,7 +153,12 @@ function recomputeOverall(
   report: QualityReport,
   overrides: QualityOverride[],
 ): { judgment: RoBJudgment; rationale: string } {
-  const hasOverride = report.domains.some(d => latestOverride(report.paper_id, d.id, overrides));
+  // Only a judgment-CHANGING override switches the overall to the worst-domain
+  // recompute; a rationale-only edit (same judgment) leaves the precise roll-up.
+  const hasOverride = report.domains.some(d => {
+    const o = latestOverride(report.paper_id, d.id, overrides);
+    return !!o && o.new_judgment !== d.judgment;
+  });
   if (!hasOverride) {
     return { judgment: report.overall_judgment, rationale: report.overall_rationale };
   }
@@ -135,6 +181,9 @@ export function QualityPage() {
   const [excludeRule, setExcludeRule] = useState<"none" | "any_high" | "two_or_more_high">("none");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [q, setQ] = useState("");
+  // Active instrument tab (empty = first group). Reviews that mix study designs
+  // get one tab per risk-of-bias tool so each figure + paper list stays focused.
+  const [activeInstrument, setActiveInstrument] = useState<string>("");
   // Available appraisal instruments (for the "choose framework" selector). The
   // backend routes one by study design, but the reviewer can override per paper.
   const [instruments, setInstruments] = useState<Instrument[]>([]);
@@ -201,7 +250,7 @@ export function QualityPage() {
     s.setQualityReports((s.qualityReports || []).map(r => r.paper_id === pid ? archived : r));
     s.setQualityOverrides(s.qualityOverrides.filter(o => o.paper_id !== pid));
     applyExcludeRule(excludeRule);
-    toast.success(`Switched to ${archived.instrument || archived.rubric} appraisal.`);
+    // No toast: switching is already reflected inline (active chip + domains update).
   }
 
   function deleteArchived(archived: QualityReport) {
@@ -350,6 +399,18 @@ export function QualityPage() {
     return { low, some, high, no_info };
   }, [reports, overrides]);
 
+  // Group appraised papers by the instrument used, so each risk-of-bias tool gets
+  // its own tab (RoB 2 / ROBINS-I / QUADAS-2 / …).
+  const instrumentGroups = useMemo(() => {
+    if (!reports) return [] as { label: string; reports: QualityReport[] }[];
+    const m = new Map<string, QualityReport[]>();
+    for (const r of reports) {
+      const key = r.instrument || r.rubric || "Appraisal";
+      (m.get(key) ?? m.set(key, []).get(key)!).push(r);
+    }
+    return [...m.entries()].map(([label, rs]) => ({ label, reports: rs }));
+  }, [reports]);
+
   // All hooks are declared above; only now is it safe to bail out early.
   if (s.history.length === 0) {
     return <Alert><AlertDescription>Define a research goal on the Home page first.</AlertDescription></Alert>;
@@ -357,10 +418,13 @@ export function QualityPage() {
 
   const kept = reports ? reports.filter(r => !s.excludedByQuality.has(r.paper_id)).length : 0;
 
-  const filtered = reports
-    ? (q.trim() ? reports.filter(r => r.title.toLowerCase().includes(q.toLowerCase())) : reports)
-    : [];
-  const selected = reports ? (reports.find(r => r.paper_id === selectedId) ?? reports[0]) : null;
+  // The figure + paper list are scoped to the active instrument tab.
+  const activeGroup = instrumentGroups.find(g => g.label === activeInstrument) ?? instrumentGroups[0] ?? null;
+  const activeReports = activeGroup?.reports ?? [];
+  const filtered = q.trim()
+    ? activeReports.filter(r => r.title.toLowerCase().includes(q.toLowerCase()))
+    : activeReports;
+  const selected = activeReports.find(r => r.paper_id === selectedId) ?? activeReports[0] ?? null;
 
   return (
     <div className="space-y-4">
@@ -404,47 +468,20 @@ export function QualityPage() {
             <Stat label="Low RoB" value={summaryCounts.low} variant="success" />
             <Stat label="Some concerns" value={summaryCounts.some} variant="warn" />
             <Stat label="High RoB" value={summaryCounts.high} variant="warn" icon={<AlertTriangle className="size-4" />} />
-            <Stat label="No information" value={summaryCounts.no_info} />
+            <Stat label="Unclear" value={summaryCounts.no_info} />
             <Stat label="Carrying Forward" value={kept} variant="info" />
           </div>
 
-          <Card className="p-4">
-            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium">Exclusion rule</div>
-                <div className="text-xs text-muted-foreground">
-                  How aggressively to exclude papers based on RoB. Reviewer can override on individual rows below.
-                  Uses your edited judgments where applicable.
-                </div>
-              </div>
-              <div className="flex gap-1 flex-wrap">
-                {([
-                  ["none", "Keep all"],
-                  ["any_high", "Exclude if any High"],
-                  ["two_or_more_high", "Exclude if ≥ 2 High"],
-                ] as const).map(([id, label]) => (
-                  <Button
-                    key={id}
-                    size="sm"
-                    variant={excludeRule === id ? "default" : "outline"}
-                    onClick={() => applyExcludeRule(id)}
-                  >
-                    {label}
-                  </Button>
-                ))}
-              </div>
-            </div>
+          <Card className="p-4 space-y-3">
+            <h3 className="text-sm font-medium">Appraisal controls</h3>
 
-            {/* Global framework: apply one tool to every paper, or auto-match by design. */}
-            <div className="mt-3 pt-3 border-t flex flex-col md:flex-row md:items-center justify-between gap-2">
-              <div>
-                <div className="text-sm font-medium">Appraisal framework</div>
-                <div className="text-xs text-muted-foreground">
-                  Re-run all included papers with one instrument, or auto-match each to its study design.
-                  Prior appraisals are saved per paper.
-                </div>
+            {/* Framework: apply one tool to every paper, or auto-match by design. */}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
+                Framework
+                <HelpLabel text="Re-run all included papers with one instrument, or auto-match each to its study design. Prior appraisals are saved per paper." />
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2">
                 <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
                   <SelectTrigger className="h-9 w-[240px] text-xs">
                     <SelectValue placeholder="Auto — match by design" />
@@ -474,8 +511,33 @@ export function QualityPage() {
                 </Button>
               </div>
             </div>
+
+            {/* Exclusion policy over the appraised papers. */}
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
+                Exclude
+                <HelpLabel text="How aggressively to exclude papers based on risk of bias. Uses your edited judgments where applicable; override individual rows below." />
+              </div>
+              <div className="flex gap-1 flex-wrap">
+                {([
+                  ["none", "Keep all"],
+                  ["any_high", "Any High"],
+                  ["two_or_more_high", "≥ 2 High"],
+                ] as const).map(([id, label]) => (
+                  <Button
+                    key={id}
+                    size="sm"
+                    variant={excludeRule === id ? "default" : "outline"}
+                    onClick={() => applyExcludeRule(id)}
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </div>
+            </div>
+
             {overrides.length > 0 && (
-              <div className="mt-3 pt-3 border-t flex items-center justify-between text-xs">
+              <div className="pt-3 border-t flex items-center justify-between text-xs">
                 <span className="text-muted-foreground">
                   {overrides.length} reviewer override{overrides.length === 1 ? "" : "s"} logged.
                 </span>
@@ -493,9 +555,28 @@ export function QualityPage() {
             )}
           </Card>
 
+          {/* One tab per risk-of-bias instrument used. The figure and paper list
+              below are scoped to the active tab. */}
+          {instrumentGroups.length > 1 && (
+            <Tabs
+              value={activeGroup?.label}
+              onValueChange={(v) => {
+                setActiveInstrument(v);
+                const g = instrumentGroups.find(x => x.label === v);
+                setSelectedId(g?.reports[0]?.paper_id ?? null);
+              }}
+            >
+              <TabsList className="flex flex-wrap h-auto gap-1">
+                {instrumentGroups.map(g => (
+                  <TabsTrigger key={g.label} value={g.label} className="text-xs">{g.label}</TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
+          )}
+
           <Card className="p-4">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-medium">Risk-of-bias appraisal</h3>
+              <h3 className="font-medium">Risk-of-bias appraisal{instrumentGroups.length > 1 && activeGroup ? ` — ${activeGroup.label}` : ""}</h3>
               <div className="text-xs text-muted-foreground">
                 Select a paper, then click a judgment chip to override it.
               </div>
@@ -510,7 +591,7 @@ export function QualityPage() {
                     <Input
                       value={q}
                       onChange={e => setQ(e.target.value)}
-                      placeholder={`Filter ${reports.length} papers…`}
+                      placeholder={`Filter ${activeReports.length} papers…`}
                       className="pl-7 h-8 text-sm"
                     />
                   </div>
@@ -593,10 +674,6 @@ export function QualityPage() {
             </div>
           </Card>
 
-          <RobvisSummary reports={reports} overrides={overrides} />
-
-          <GradePanel />
-
           <div className="grid grid-cols-3 gap-2">
             <Button variant="outline" onClick={() => runAssess()} disabled={running}>Re-run Appraisal</Button>
             <Button variant="outline" onClick={() => exportAssessments(reports, overrides)}>
@@ -669,7 +746,7 @@ function PaperDetail({
                 currentId={currentInstrumentId}
                 fallbackLabel={report.rubric}
                 reassessing={reassessing}
-                onChange={onReassess}
+                onRun={onReassess}
               />
               <Badge variant="outline">{report.source}</Badge>
               {!report.used_full_text && (
@@ -726,14 +803,19 @@ function FrameworkSelector({
   currentId,
   fallbackLabel,
   reassessing,
-  onChange,
+  onRun,
 }: {
   instruments: Instrument[];
   currentId: string;
   fallbackLabel: string;
   reassessing: boolean;
-  onChange: (instrumentId: string) => void;
+  onRun: (instrumentId: string) => void;
 }) {
+  // Staged selection: changing the dropdown only picks a tool; the appraisal runs
+  // only when the reviewer clicks Run (an LLM call — never fire it on every click).
+  const [pending, setPending] = useState(currentId);
+  useEffect(() => { setPending(currentId); }, [currentId]);
+
   // No instrument list yet (backend not reached) → show the plain badge.
   if (instruments.length === 0) {
     return <Badge variant="outline">{fallbackLabel}</Badge>;
@@ -741,11 +823,14 @@ function FrameworkSelector({
   const axes = ["internal_validity", "reporting", "certainty"].filter(
     ax => instruments.some(i => i.axis === ax),
   );
+  const changed = !!pending && pending !== currentId;   // a different tool is staged
   return (
     <div className="inline-flex items-center gap-1">
-      <Select value={currentId} onValueChange={(v) => { if (v && v !== currentId) onChange(v); }} disabled={reassessing}>
-        <SelectTrigger className="h-6 px-2 py-0 text-xs w-auto gap-1 border-dashed" title="Appraisal framework — reviewer can override the auto-routed choice">
-          {reassessing ? <Loader2 className="size-3 animate-spin" /> : null}
+      <Select value={pending} onValueChange={setPending} disabled={reassessing}>
+        <SelectTrigger
+          className={`h-6 px-2 py-0 text-xs w-auto gap-1 border-dashed ${changed ? "border-primary/60 text-primary" : ""}`}
+          title="Appraisal framework — pick a tool, then Run to (re-)appraise this paper"
+        >
           <SelectValue placeholder={fallbackLabel} />
         </SelectTrigger>
         <SelectContent>
@@ -761,6 +846,18 @@ function FrameworkSelector({
           ))}
         </SelectContent>
       </Select>
+      <Button
+        size="sm"
+        variant={changed ? "default" : "outline"}
+        className="h-6 px-2 text-xs"
+        disabled={reassessing || !pending}
+        onClick={() => onRun(pending)}
+        title={changed ? "Appraise this paper with the selected tool" : "Re-appraise this paper"}
+      >
+        {reassessing
+          ? <><Loader2 className="size-3 mr-1 animate-spin" />Running…</>
+          : changed ? "Run" : "Re-run"}
+      </Button>
     </div>
   );
 }
@@ -810,6 +907,16 @@ function SavedAppraisals({
   );
 }
 
+// Small hoverable help icon with a native tooltip, so long explanations don't
+// need to sit inline as paragraphs.
+function HelpLabel({ text }: { text: string }) {
+  return (
+    <span title={text} className="cursor-help text-muted-foreground/70 hover:text-muted-foreground">
+      <HelpCircle className="size-3.5" />
+    </span>
+  );
+}
+
 function Stat({ label, value, variant, icon }: {
   label: string; value: any; variant?: "success" | "warn" | "info"; icon?: React.ReactNode;
 }) {
@@ -849,13 +956,12 @@ function DomainList({
       {report.domains.map((d) => {
         const override = latestOverride(report.paper_id, d.id, overrides);
         const effective: RoBJudgment = override ? override.new_judgment : d.judgment;
+        const sigsWithQuote = (d.signals || []).filter(s => s.quote);
         return (
-          <div key={d.id} className="rounded border bg-card p-3">
-            <div className="flex items-start justify-between gap-3">
-              <div className="flex-1">
-                <div className="text-sm font-medium">{d.name}</div>
-                <div className="text-sm text-muted-foreground mt-1">{d.rationale}</div>
-              </div>
+          <div key={d.id} className={`rounded-lg border bg-card overflow-hidden border-l-4 ${judgmentBorderClass(effective)}`}>
+            {/* Header: domain + editable judgment */}
+            <div className="flex items-start justify-between gap-3 p-3 pb-2">
+              <div className="text-sm font-semibold leading-snug">{d.name}</div>
               <OverridePopover
                 paperId={report.paper_id}
                 domain={d}
@@ -864,42 +970,66 @@ function DomainList({
                 onSave={onOverride}
               />
             </div>
-            {override && (
-              <div className="mt-2 text-[11px] text-muted-foreground flex items-center gap-2">
-                <Pencil className="size-3" />
-                Reviewer-edited from{" "}
-                <span className="font-medium">{override.original_judgment}</span>
-                {" — "}
-                <span className="italic">"{override.reason}"</span>
-                {" — "}
-                {new Date(override.timestamp).toLocaleString()}
-              </div>
-            )}
-            {d.supporting_quote && (
-              <div className="mt-2 text-xs italic border-l-2 border-muted-foreground/30 pl-2 text-foreground/80 break-words">
-                "{d.supporting_quote}"
-                {d.section && (
-                  <span className="not-italic text-muted-foreground ml-2">— {d.section}</span>
+
+            {/* Reasoning */}
+            {d.rationale && (
+              <p className="px-3 text-[13px] text-muted-foreground leading-relaxed">
+                {d.rationale}
+                {evidenceCitation(d) && (
+                  <span className="ml-1 font-medium text-foreground/70" title="Source section(s) this judgment draws on">{evidenceCitation(d)}</span>
                 )}
+              </p>
+            )}
+
+            {/* Primary citation from the text */}
+            {d.supporting_quote && (
+              <figure className="mx-3 mt-2 rounded-md bg-muted/40 border-l-2 border-primary/50 px-3 py-2">
+                <blockquote className="text-xs italic text-foreground/85 break-words">
+                  <Quote className="inline size-3 -mt-0.5 mr-1 text-primary/60" />
+                  {d.supporting_quote}
+                </blockquote>
+                {d.section && (
+                  <figcaption className="mt-1 text-[11px] not-italic text-muted-foreground">{d.section}</figcaption>
+                )}
+              </figure>
+            )}
+
+            {/* Reviewer edit audit line */}
+            {override && (
+              <div className="mx-3 mt-2 text-[11px] text-muted-foreground flex items-start gap-1.5">
+                <Pencil className="size-3 mt-0.5 shrink-0" />
+                <span>
+                  Reviewer-edited from <span className="font-medium">{displayJudgment(override.original_judgment)}</span>: <span className="italic">"{override.reason}"</span> · {new Date(override.timestamp).toLocaleString()}
+                </span>
               </div>
             )}
+
+            {/* Per-question evidence with citations */}
             {d.signals && d.signals.length > 0 && (
-              <details className="mt-2 group">
-                <summary className="text-[11px] text-muted-foreground cursor-pointer select-none hover:text-foreground">
-                  {d.signals.length} signalling question{d.signals.length === 1 ? "" : "s"} → judgment
+              <details className="group mt-2.5 border-t">
+                <summary className="px-3 py-2 text-[11px] font-medium text-muted-foreground cursor-pointer select-none hover:text-foreground flex items-center gap-1.5">
+                  <ChevronRight className="size-3 transition-transform group-open:rotate-90" />
+                  Evidence — {d.signals.length} signalling question{d.signals.length === 1 ? "" : "s"}
+                  {sigsWithQuote.length > 0 && <span className="opacity-70">· {sigsWithQuote.length} cited</span>}
                 </summary>
-                <div className="mt-1.5 space-y-1.5">
+                <div className="px-3 pb-3 space-y-3">
                   {d.signals.map(sig => (
                     <div key={sig.id} className="text-xs">
-                      <div className="flex items-start gap-1.5">
-                        <span className={`shrink-0 mt-0.5 px-1 py-px rounded border text-[10px] font-mono font-semibold ${answerClass(sig.answer)}`} title={sig.rationale}>
+                      <div className="flex items-start gap-2">
+                        <span className={`shrink-0 mt-px px-1.5 py-px rounded border text-[10px] font-mono font-semibold ${answerClass(sig.answer)}`} title={ANSWER_LABEL[sig.answer] || sig.answer}>
                           {sig.answer}
                         </span>
-                        <span className="text-foreground/80 leading-snug"><span className="font-mono text-muted-foreground">{sig.id}</span> {sig.text}</span>
+                        <span className="text-foreground/90 leading-snug">
+                          <span className="font-mono text-muted-foreground mr-1">{sig.id}</span>{sig.text}
+                        </span>
                       </div>
+                      {sig.rationale && (
+                        <p className="pl-8 mt-1 text-muted-foreground leading-snug">{sig.rationale}</p>
+                      )}
                       {sig.quote && (
-                        <div className="italic text-muted-foreground pl-6 mt-0.5 break-words">
-                          "{sig.quote}"{sig.section && <span className="ml-1 not-italic">— {sig.section}</span>}
+                        <div className="pl-8 mt-1 break-words">
+                          <span className="italic text-foreground/70">"{sig.quote}"</span>
+                          {sig.section && <span className="ml-1.5 text-[10px] not-italic text-muted-foreground">{sig.section}</span>}
                         </div>
                       )}
                     </div>
@@ -1099,61 +1229,266 @@ function AuditLogPanel({
 // robvis-style traffic-light summary, generated from the stored per-domain
 // judgments. Papers are grouped by instrument (each tool has its own domains).
 // ---------------------------------------------------------------------------
-function RobvisSummary({ reports, overrides }: { reports: QualityReport[]; overrides: QualityOverride[] }) {
+// Risk-of-bias tiers shared by the summary bars, the traffic-light dots, and the
+// legend — one source of truth for colour + symbol across every instrument.
+const ROB_TIERS: { label: string; glyph: string; test: (r: number) => boolean; cls: string }[] = [
+  { label: "Low", glyph: "+", test: r => r === 0, cls: "bg-emerald-500" },
+  { label: "Some concerns / Moderate", glyph: "−", test: r => r === 1 || r === 2, cls: "bg-amber-500" },
+  { label: "High / Serious", glyph: "×", test: r => r === 3, cls: "bg-rose-500" },
+  { label: "Critical", glyph: "✕", test: r => r === 4, cls: "bg-rose-700" },
+  { label: "Unclear", glyph: "?", test: r => r < 0, cls: "bg-slate-300" },
+];
+
+function judgmentGlyph(j: string): string {
+  const r = sevRank(j);
+  const t = ROB_TIERS.find(x => x.test(r));
+  return t ? t.glyph : "";
+}
+
+// A traffic-light cell: the whole square is filled with the judgment colour and
+// carries the judgment symbol (so it reads without relying on colour alone —
+// colourblind-safe and print-friendly).
+function RobCell({ j, title, overall }: { j: RoBJudgment; title: string; overall?: boolean }) {
+  const ni = sevRank(j) < 0;
+  return (
+    <td
+      title={title}
+      className={`text-center h-10 font-bold text-[13px] leading-none border border-card ${judgmentDotClass(j)} ${ni ? "text-slate-600" : "text-white"} ${overall ? "border-l-2" : ""}`}
+    >
+      {judgmentGlyph(j)}
+    </td>
+  );
+}
+
+// Editable traffic-light cell: click to change the judgment and record a
+// rationale. Writes the same audit-logged QualityOverride the domain list uses,
+// pre-filled with the current judgment + rationale so a reviewer edits rather
+// than starts blank.
+function EditableRobCell({
+  report, domain, judgment, existingReason, onOverride,
+}: {
+  report: QualityReport;
+  domain: RoBDomain;
+  judgment: RoBJudgment;
+  existingReason?: string;
+  onOverride: (o: QualityOverride) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [pick, setPick] = useState<RoBJudgment>(judgment);
+  const [reason, setReason] = useState("");
+  const ni = sevRank(judgment) < 0;
+  const options = (report.scale && report.scale.length ? report.scale : JUDGMENT_OPTIONS) as RoBJudgment[];
+
+  function reset() {
+    setPick(judgment);
+    setReason(existingReason || citedRationale(domain));
+  }
+  function save() {
+    if (!reason.trim()) { toast.error("Add a brief rationale for this judgment."); return; }
+    onOverride({
+      paper_id: report.paper_id, domain_id: domain.id,
+      original_judgment: domain.judgment, new_judgment: pick,
+      reason: reason.trim(), reviewer: "", timestamp: new Date().toISOString(),
+    });
+    setOpen(false);
+  }
+
+  return (
+    <td className={`p-0 border border-card ${judgmentDotClass(judgment)}`}>
+      <Popover open={open} onOpenChange={(v) => { setOpen(v); if (v) reset(); }}>
+        <PopoverTrigger asChild>
+          <button
+            className={`w-full h-10 flex items-center justify-center font-bold text-[13px] leading-none ${ni ? "text-slate-600" : "text-white"} hover:brightness-95 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-white/70`}
+            title={`${domain.name}: ${displayJudgment(judgment)} — click to edit`}
+          >
+            {judgmentGlyph(judgment)}
+          </button>
+        </PopoverTrigger>
+        <PopoverContent className="w-80" align="center">
+          <div className="space-y-3">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">Edit judgment</div>
+            <div className="text-sm font-medium break-words capitalize">{domain.name}</div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Judgment</Label>
+              <Select value={pick} onValueChange={(v) => setPick(v as RoBJudgment)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {options.map(o => <SelectItem key={o} value={o}>{displayJudgment(o)}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">Rationale</Label>
+              <Textarea
+                value={reason} onChange={e => setReason(e.target.value)} rows={4}
+                placeholder="Why this judgment? Cite the signalling answers or a supporting quote."
+                className="text-sm"
+              />
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
+              <Button size="sm" onClick={save} disabled={!reason.trim()}>Save</Button>
+            </div>
+          </div>
+        </PopoverContent>
+      </Popover>
+    </td>
+  );
+}
+
+// Risk-of-bias figure with one sub-tab per instrument used. Single instrument →
+// no tab bar. Reused on the Diagramming page.
+export function RobvisTabbed({ reports, overrides, onOverride }: { reports: QualityReport[]; overrides: QualityOverride[]; onOverride?: (o: QualityOverride) => void }) {
+  const groups = useMemo(() => {
+    const m = new Map<string, QualityReport[]>();
+    for (const r of reports) {
+      const key = r.instrument || r.rubric || "Appraisal";
+      (m.get(key) ?? m.set(key, []).get(key)!).push(r);
+    }
+    return [...m.entries()].map(([label, rs]) => ({ label, reports: rs }));
+  }, [reports]);
+  const [active, setActive] = useState<string>("");
+  const activeGroup = groups.find(g => g.label === active) ?? groups[0] ?? null;
+
+  if (groups.length === 0) return null;
+  if (groups.length === 1) {
+    return <RobvisSummary reports={groups[0].reports} overrides={overrides} onOverride={onOverride} />;
+  }
+  return (
+    <div className="space-y-3">
+      <Tabs value={activeGroup?.label} onValueChange={setActive}>
+        <TabsList className="flex flex-wrap h-auto gap-1">
+          {groups.map(g => (
+            <TabsTrigger key={g.label} value={g.label} className="text-xs">{g.label}</TabsTrigger>
+          ))}
+        </TabsList>
+      </Tabs>
+      <RobvisSummary reports={activeGroup?.reports ?? []} overrides={overrides} onOverride={onOverride} />
+    </div>
+  );
+}
+
+export function RobvisSummary({ reports, overrides, onOverride }: { reports: QualityReport[]; overrides: QualityOverride[]; onOverride?: (o: QualityOverride) => void }) {
   const byInstrument = new Map<string, QualityReport[]>();
   for (const r of reports) {
     const key = r.instrument || r.rubric || "Appraisal";
     (byInstrument.get(key) ?? byInstrument.set(key, []).get(key)!).push(r);
   }
   return (
-    <Card className="p-4 space-y-4">
+    <Card className="p-5 space-y-6">
       <div className="flex items-center gap-2">
         <ShieldCheck className="size-4 text-primary" />
-        <h3 className="font-medium">Risk-of-bias summary (traffic light)</h3>
+        <h3 className="font-medium">Risk-of-bias summary</h3>
       </div>
+
       {[...byInstrument.entries()].map(([inst, rs]) => {
         const domains = rs[0]?.domains ?? [];
+        const n = rs.length;
+        // One entry per domain (+ an Overall row/column), with the effective
+        // judgment for every study — drives both the bars and the grid.
+        const cols = [
+          ...domains.map((d, i) => ({
+            id: d.id, num: `D${i + 1}`, name: shortDomainLabel(d.name),
+            judgments: rs.map(r => effectiveJudgment(r.paper_id, r.domains[i], overrides)),
+          })),
+          {
+            id: "__overall", num: "Overall", name: "Overall risk of bias",
+            judgments: rs.map(r => recomputeOverall(r, overrides).judgment),
+          },
+        ];
         return (
-          <div key={inst} className="space-y-1.5 overflow-x-auto">
-            <div className="text-xs font-medium text-muted-foreground">{inst} · {rs.length} paper{rs.length === 1 ? "" : "s"}</div>
-            <table className="text-xs border-separate border-spacing-0.5">
-              <thead>
-                <tr>
-                  <th className="text-left font-normal text-muted-foreground pr-2 max-w-[16rem]">Study</th>
-                  {domains.map((d, i) => (
-                    <th key={d.id} className="px-1 font-normal text-muted-foreground" title={d.name}>D{i + 1}</th>
-                  ))}
-                  <th className="px-1 font-normal text-muted-foreground">Overall</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rs.map(r => {
-                  const overall = recomputeOverall(r, overrides).judgment;
-                  return (
-                    <tr key={r.paper_id}>
-                      <td className="pr-2 truncate max-w-[16rem] align-middle" title={r.title}>{r.title}</td>
-                      {r.domains.map(d => {
-                        const j = effectiveJudgment(r.paper_id, d, overrides);
+          <div key={inst} className="space-y-4">
+            <div className="text-sm font-medium">{inst}</div>
+
+            {/* Weighted summary — proportion of studies at each level, per domain.
+                Full domain names on the left, never truncated. */}
+            <div className="space-y-1">
+              {cols.map(col => {
+                const counts = ROB_TIERS.map(t => col.judgments.filter(j => t.test(sevRank(j))).length);
+                return (
+                  <div key={col.id} className="flex items-center gap-3">
+                    <div className={`w-52 md:w-64 shrink-0 text-xs leading-tight capitalize ${col.id === "__overall" ? "font-semibold" : ""}`}>
+                      {col.name}
+                    </div>
+                    <div className="flex-1 flex h-5 rounded-sm overflow-hidden ring-1 ring-border bg-muted">
+                      {ROB_TIERS.map((t, ti) => {
+                        const c = counts[ti];
+                        if (!c) return null;
+                        const pct = Math.round((c / n) * 100);
                         return (
-                          <td key={d.id} className="text-center">
-                            <span title={`${d.name}: ${j}`} className={`inline-block size-4 rounded-full ${judgmentDotClass(j)}`} />
-                          </td>
+                          <div
+                            key={ti}
+                            className={`${t.cls} flex items-center justify-center text-[10px] font-semibold text-white`}
+                            style={{ width: `${(c / n) * 100}%` }}
+                            title={`${t.label}: ${c} of ${n} (${pct}%)`}
+                          >
+                            {pct >= 14 ? `${pct}%` : ""}
+                          </div>
                         );
                       })}
-                      <td className="text-center">
-                        <span title={`Overall: ${overall}`} className={`inline-block size-4 rounded-full ring-1 ring-foreground/20 ${judgmentDotClass(overall)}`} />
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Per-study traffic light. Full study names; every cell carries its
+                judgment symbol and (when editable) opens a judgment + rationale editor. */}
+            {onOverride && (
+              <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <Pencil className="size-3" />Click any cell to change its judgment and record a rationale.
+              </div>
+            )}
+            <div className="overflow-x-auto rounded-md border">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-muted/50 border-b">
+                    <th className="text-left font-medium text-muted-foreground px-3 py-2 min-w-[210px] align-bottom">Study</th>
+                    {domains.map(d => (
+                      <th key={d.id} className="px-1.5 py-2 font-medium text-muted-foreground text-center align-bottom capitalize text-[11px] leading-tight min-w-[92px]" title={d.name}>{shortDomainLabel(d.name)}</th>
+                    ))}
+                    <th className="px-2 py-2 font-medium text-muted-foreground text-center align-bottom border-l-2">Overall</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rs.map((r, ri) => {
+                    const overall = recomputeOverall(r, overrides).judgment;
+                    return (
+                      <tr key={r.paper_id} className={`border-b last:border-0 ${ri % 2 ? "bg-muted/10" : ""}`}>
+                        <td className="px-3 py-2 align-middle w-[24rem] max-w-[24rem]">
+                          <div className="leading-snug" title={r.title}>{r.title}</div>
+                        </td>
+                        {r.domains.map(d => {
+                          const j = effectiveJudgment(r.paper_id, d, overrides);
+                          return onOverride ? (
+                            <EditableRobCell
+                              key={d.id} report={r} domain={d} judgment={j}
+                              existingReason={latestOverride(r.paper_id, d.id, overrides)?.reason}
+                              onOverride={onOverride}
+                            />
+                          ) : (
+                            <RobCell key={d.id} j={j} title={`${d.name}: ${displayJudgment(j)}`} />
+                          );
+                        })}
+                        <RobCell j={overall} title={`Overall: ${displayJudgment(overall)}`} overall />
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
           </div>
         );
       })}
-      <div className="flex flex-wrap gap-3 text-[11px] text-muted-foreground pt-1 border-t">
-        {[["Low", "bg-emerald-500"], ["Some concerns / Unclear / Moderate", "bg-amber-500"], ["High / Serious", "bg-rose-500"], ["Critical", "bg-rose-700"], ["No information", "bg-slate-300"]].map(([l, c]) => (
-          <span key={l} className="flex items-center gap-1"><span className={`inline-block size-2.5 rounded-full ${c}`} />{l}</span>
+
+      {/* Legend — colour + symbol together. */}
+      <div className="flex flex-wrap gap-x-4 gap-y-2 text-[11px] pt-3 border-t">
+        {ROB_TIERS.map(t => (
+          <span key={t.label} className="flex items-center gap-1.5 text-muted-foreground">
+            <span className={`inline-flex items-center justify-center size-4 rounded-full text-white text-[9px] font-bold ${t.cls}`}>{t.glyph}</span>
+            {t.label}
+          </span>
         ))}
       </div>
     </Card>
