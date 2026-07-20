@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, ReactNode } fro
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride, GradeOutcome } from "./mockServices";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method } from "./apiClient";
 import { FRESH_LAUNCH } from "./launchFlags";
+import { idbGet, idbSet, idbDel } from "./idb";
 
 export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta" | "projects" | "writing";
 
@@ -559,31 +560,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!localRestored.current) return;          // wait until restore has run
     const t = setTimeout(() => {
-      if (history.length === 0) { try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } return; }
+      if (history.length === 0) {
+        try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ }
+        idbDel(LOCAL_SNAPSHOT_KEY).catch(() => { /* ignore */ });
+        return;
+      }
       // Envelope keeps the session identity with the data, so a refresh keeps
       // editing the SAME session instead of spawning a duplicate.
       const env = { data: snapshot(), sessionId: currentSessionId, sessionTitle: currentSessionTitle };
-      // Try the full snapshot; if it exceeds the localStorage quota (~5 MB), shed
-      // the heaviest, re-derivable fields one tier at a time so the structured
-      // stage outputs (extractions, quality, snowball, text-extraction) always
-      // persist rather than the whole write being dropped. Backend sessions keep
-      // everything; these drops only lean out the offline/local cache, and the
-      // shed data (full texts, planning traces, pre-dedup corpus) is re-fetchable.
-      const SHED_TIERS: string[][] = [
-        [],
-        ["fullTexts"],
-        ["fullTexts", "agenticTrace", "simulationRuns", "dbTestResults"],
-        ["fullTexts", "agenticTrace", "simulationRuns", "dbTestResults", "rawPapers"],
-      ];
-      for (const drop of SHED_TIERS) {
-        const data: any = { ...env.data };
-        for (const k of drop) delete data[k];
-        try {
-          localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ ...env, data }));
-          break;   // saved; leaner tiers not needed
-        } catch { /* over quota — try the next, leaner tier */ }
-      }
-      // If even the leanest tier overflows, the previous snapshot is left intact.
+      // Primary store: IndexedDB — a much larger quota than localStorage (~5 MB),
+      // so big full-text sets (many uploaded PDFs) persist intact across reloads.
+      idbSet(LOCAL_SNAPSHOT_KEY, env)
+        .then(() => { try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } })
+        .catch(() => {
+          // IndexedDB unavailable (rare) → fall back to localStorage, shedding the
+          // heaviest re-derivable fields one tier at a time so structured stage
+          // outputs still persist rather than the whole write being dropped.
+          const SHED_TIERS: string[][] = [
+            [],
+            ["fullTexts"],
+            ["fullTexts", "agenticTrace", "simulationRuns", "dbTestResults"],
+            ["fullTexts", "agenticTrace", "simulationRuns", "dbTestResults", "rawPapers"],
+          ];
+          for (const drop of SHED_TIERS) {
+            const data: any = { ...env.data };
+            for (const k of drop) delete data[k];
+            try { localStorage.setItem(LOCAL_SNAPSHOT_KEY, JSON.stringify({ ...env, data })); break; }
+            catch { /* over quota — try the next, leaner tier */ }
+          }
+        });
     }, 600);
     return () => clearTimeout(t);
   }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
@@ -595,24 +600,33 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       writingEnriched, writingSummary,
       currentSessionId, currentSessionTitle]);
 
+  const restoreStarted = useRef(false);
   useEffect(() => {
-    if (localRestored.current) return;
-    localRestored.current = true;
+    if (restoreStarted.current) return;
+    restoreStarted.current = true;
     // Fresh app launch → start a brand-new session on Home; don't restore the
     // last one. Past sessions remain saved and loadable from the Sessions panel.
-    if (FRESH_LAUNCH) return;
-    try {
-      const raw = localStorage.getItem(LOCAL_SNAPSHOT_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      // Back-compat: older snapshots stored the bare data object.
-      const data = parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
-      hydrate(data, false);   // reconcile with the backend copy, don't clobber
-      // Restore the session identity so auto-save updates this session rather
-      // than creating a new one on every refresh.
-      if (parsed && parsed.sessionId) setCurrentSessionId(parsed.sessionId);
-      if (parsed && parsed.sessionTitle) setCurrentSessionTitle(parsed.sessionTitle);
-    } catch { /* corrupt snapshot — ignore */ }
+    if (FRESH_LAUNCH) { localRestored.current = true; return; }
+    (async () => {
+      try {
+        // Prefer IndexedDB; fall back to (and migrate from) an old localStorage snapshot.
+        let parsed: any = await idbGet(LOCAL_SNAPSHOT_KEY).catch(() => undefined);
+        if (!parsed) {
+          try {
+            const raw = localStorage.getItem(LOCAL_SNAPSHOT_KEY);
+            if (raw) parsed = JSON.parse(raw);
+          } catch { /* ignore */ }
+        }
+        if (parsed) {
+          // Back-compat: older snapshots stored the bare data object.
+          const data = parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed;
+          hydrate(data, false);   // reconcile with the backend copy, don't clobber
+          if (parsed.sessionId) setCurrentSessionId(parsed.sessionId);
+          if (parsed.sessionTitle) setCurrentSessionTitle(parsed.sessionTitle);
+        }
+      } catch { /* corrupt snapshot — ignore */ }
+      finally { localRestored.current = true; }   // only now may auto-save run
+    })();
   }, []);
 
   const reset = () => {

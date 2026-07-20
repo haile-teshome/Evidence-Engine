@@ -1,3 +1,12 @@
+/* Sidebar nav-icon hover animations. One-shot, symmetric (start = end = rest)
+   so the icon plays a little flourish on hover and settles back cleanly. */
+@keyframes nav-pop { 0%, 100% { transform: scale(1); } 45% { transform: scale(1.28); } }
+@keyframes nav-bob { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-4px); } }
+@keyframes nav-dip { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(4px); } }
+@keyframes nav-spin { 0% { transform: rotate(0); } 100% { transform: rotate(360deg); } }
+@keyframes nav-wiggle { 0%, 100% { transform: rotate(0); } 20% { transform: rotate(-14deg); } 55% { transform: rotate(10deg); } 80% { transform: rotate(-4deg); } }
+@keyframes nav-swing { 0%, 100% { transform: rotate(0); } 30% { transform: rotate(-20deg); } 65% { transform: rotate(12deg); } }
+
 :root {
   --font-size: 16px;
   --background: #ffffff;

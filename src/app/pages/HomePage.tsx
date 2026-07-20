@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore, HistoryEntry } from "../lib/store";
 import { AIService, DataAggregator } from "../lib/mockServices";
-import type { ClarifyingQuestion } from "../lib/mockServices";
+import type { ClarifyingQuestion, Paper } from "../lib/mockServices";
+import { useStudyImport } from "../lib/useStudyImport";
+import { AttachedStudies } from "../components/AttachedStudies";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
@@ -12,7 +14,7 @@ import { PicoCards } from "../components/PicoCards";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
 
@@ -666,6 +668,9 @@ function RelevanceExplorer() {
 
 export function HomePage() {
   const s = useStore();
+  const studyImport = useStudyImport();
+  const attachRef = useRef<HTMLInputElement>(null);
+  const [attachOpen, setAttachOpen] = useState(false);
   const [input, setInput] = useState("");
   const [refining, setRefining] = useState(false);
   const [refinement, setRefinement] = useState<null | {
@@ -779,17 +784,25 @@ export function HomePage() {
       s.setUnifiedSearchQuery(analysis.query);
       markStage("query", { status: "done", detail: analysis.query ? analysis.query.slice(0, 60) + "…" : undefined });
 
-      // 2. Fetch a wider sample of papers so the relevance filter has room to pick from.
-      const fetched = await runStage("papers", signal, sig =>
-        DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig)
-      );
-      const papers = fetched?.papers || [];
-      if (fetched) {
-        const breakdown = Object.entries(fetched.sourceCounts || {})
-          .map(([k, v]) => `${k}: ${v}`)
-          .join(" · ");
-        markStage("papers", { status: "done", detail: `${papers.length} papers — ${breakdown}` });
-        s.setRawPapers(papers);
+      // 2. If the user uploaded their own studies, analyse THOSE (no database
+      //    fetch). Otherwise fetch a wide sample so the relevance filter has room.
+      const uploaded = (s.rawPapers || []).filter(p => p.source === "Local PDFs");
+      let papers: Paper[];
+      if (uploaded.length > 0) {
+        papers = uploaded;
+        markStage("papers", { status: "done", detail: `${uploaded.length} uploaded studies` });
+      } else {
+        const fetched = await runStage("papers", signal, sig =>
+          DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig)
+        );
+        papers = fetched?.papers || [];
+        if (fetched) {
+          const breakdown = Object.entries(fetched.sourceCounts || {})
+            .map(([k, v]) => `${k}: ${v}`)
+            .join(" · ");
+          markStage("papers", { status: "done", detail: `${papers.length} papers — ${breakdown}` });
+          s.setRawPapers(papers);
+        }
       }
 
       // 3. LEADS-native relevance rerank. Papers that pass the threshold get
@@ -1184,12 +1197,27 @@ export function HomePage() {
 
       {/* Chat input — fixed to bottom, matching content width */}
       <div className={`fixed bottom-0 left-72 z-30 px-6 py-4 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
-        <form onSubmit={(e) => { e.preventDefault(); handleSubmit(input); }}
-          className="max-w-4xl mx-auto flex gap-2 items-center bg-card/95 backdrop-blur border rounded-full shadow-lg pl-5 pr-2 py-2 pointer-events-auto">
-          <Input value={input} onChange={e => setInput(e.target.value)}
-            placeholder="Ask a question or refine your research goal..."
-            className="flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0 px-0" />
-          {s.history.length > 0 && (
+        <div className="max-w-4xl mx-auto pointer-events-auto">
+          <input ref={attachRef} type="file" multiple
+            accept=".pdf,.docx,.doc,.txt,.md,.csv,.tsv,.xlsx,.xls,.ris,.bib,.nbib" className="hidden"
+            onChange={e => { if (e.target.files?.length) studyImport.importFiles(Array.from(e.target.files)); e.currentTarget.value = ""; }} />
+          <form onSubmit={(e) => { e.preventDefault(); handleSubmit(input); }}
+            className="flex gap-2 items-center bg-card/95 backdrop-blur border rounded-full shadow-lg pl-2 pr-2 py-2">
+            <Button type="button" size="icon" variant="ghost" className="rounded-full shrink-0 size-9"
+              onClick={() => attachRef.current?.click()} disabled={studyImport.busy}
+              title="Attach files (PDF, Word, Excel/CSV, RIS/BibTeX) to review">
+              {studyImport.busy ? <Loader2 className="size-5 animate-spin" /> : <Plus className="size-5" />}
+            </Button>
+            {studyImport.uploadedCount > 0 && (
+              <Button type="button" size="sm" variant="ghost" className="rounded-full shrink-0 gap-1.5 px-3"
+                onClick={() => setAttachOpen(true)} title="View & preview attached studies">
+                <Paperclip className="size-4" />{studyImport.uploadedCount}
+              </Button>
+            )}
+            <Input value={input} onChange={e => setInput(e.target.value)}
+              placeholder="Ask a question or refine your research goal..."
+              className="flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0 px-0" />
+            {s.history.length > 0 && (
             <Button
               type="button"
               size="sm"
@@ -1203,8 +1231,11 @@ export function HomePage() {
             </Button>
           )}
           <Button type="submit" disabled={analyzing || !input.trim()} className="rounded-full"><Send className="size-4 mr-2" />Send</Button>
-        </form>
+          </form>
+        </div>
       </div>
+
+      <AttachedStudies open={attachOpen} onOpenChange={setAttachOpen} studyImport={studyImport} />
     </div>
   );
 }

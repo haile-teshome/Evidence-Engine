@@ -1,18 +1,17 @@
 import { Component, ReactNode, useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { PrismaFlow } from "./components/PrismaFlow";
-import { CorpusHeatmap } from "./components/CorpusHeatmap";
 import { InterraterReliability } from "./components/InterraterReliability";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { bucketAbstractExclusions, bucketFullTextExclusions } from "./lib/exclusionBucketing";
 import { Toaster } from "./components/ui/sonner";
 import { StoreProvider, useStore } from "./lib/store";
 import { AuthProvider } from "./lib/auth";
-import { BackendReadyProvider, useBackendReady } from "./lib/backendReady";
+import { BackendReadyProvider, useEngineStatus } from "./lib/backendReady";
 import { UserMenu } from "./components/UserMenu";
 import { HomePage } from "./pages/HomePage";
 import { SimulationPage } from "./pages/SimulationPage";
-import { QualityPage } from "./pages/QualityPage";
+import { QualityPage, RobvisTabbed } from "./pages/QualityPage";
 import { AbstractPage } from "./pages/AbstractPage";
 import { FullTextPage } from "./pages/FullTextPage";
 import { SnowballPage } from "./pages/SnowballPage";
@@ -42,7 +41,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> 
 
 function Shell() {
   const s = useStore();
-  const backendReady = useBackendReady();
+  const engine = useEngineStatus();
   const meta = PAGE_META[s.page];
   const Icon = meta.icon;
   // If we landed on a /?invite=TOKEN URL, route to the Projects page so the
@@ -78,13 +77,13 @@ function Shell() {
                 <SlidersHorizontal className="size-3.5" />Strategy Review
               </button>
             )}
-            {!backendReady && (
+            {!engine.done && (
               <span
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400 text-xs font-medium"
                 title="The local engine (backend + AI model) is still starting. The app is usable now; screening and search unlock once it's ready."
               >
                 <Loader2 className="size-3.5 animate-spin" />
-                Starting engine…
+                {engine.message || "Starting engine…"}
               </span>
             )}
             {s.currentProjectId && (
@@ -227,10 +226,9 @@ function Shell() {
                         Showing risk-of-bias appraisal for {heatmapReports.length}{" "}
                         {heatmapStage === "fulltext" ? "full-text-included" : "abstract-included"} paper{heatmapReports.length === 1 ? "" : "s"}.
                       </div>
-                      <CorpusHeatmap
+                      <RobvisTabbed
                         reports={heatmapReports}
                         overrides={s.qualityOverrides}
-                        excluded={s.excludedByQuality}
                         onOverride={(o) => s.addQualityOverride(o)}
                       />
                     </>

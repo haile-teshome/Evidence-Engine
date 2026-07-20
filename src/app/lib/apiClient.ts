@@ -321,6 +321,12 @@ export const AIService = {
     return r.title || "Untitled session";
   },
 
+  // Clean bibliographic metadata from an uploaded PDF's extracted text (upgrades
+  // the client-side filename heuristic). Missing fields come back empty.
+  async extractPdfMetadata(text: string, filename = "", signal?: AbortSignal): Promise<{ title: string; authors: string; year: number | null; abstract: string; doi: string }> {
+    return postJSON("/pdf/metadata", { text, filename, model: apiConfig.model }, signal);
+  },
+
   async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal): Promise<ScreenResult> {
     return postJSON<ScreenResult>("/screen/abstract", {
       paper, pico, inclusion, exclusion, model: apiConfig.model,

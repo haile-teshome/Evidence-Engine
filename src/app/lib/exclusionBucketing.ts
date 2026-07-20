@@ -78,7 +78,7 @@ export function categoriseAbstractExclusion(
     // One brief primary reason per study (matched exclusion is decisive, else
     // the first unmet inclusion), kept short so reasons aggregate.
     const primary = exc[0] ?? inc[0];
-    return shorten(primary, 38);
+    return shorten(primary, 80);
   }
 
   // 2. Fall back to PICO bucket.
@@ -99,9 +99,11 @@ export function categoriseAbstractExclusion(
     Outcome:      "Wrong outcome",
   };
 
+  // One reason per study: the highest-priority failed element in PICO order
+  // (population > intervention > comparator > outcome), since `votes` is built
+  // in that order. Keeps the PRISMA box to a single clear reason per line.
   const failed = Object.entries(votes).filter(([, v]) => v === "FAIL").map(([k]) => k);
-  if (failed.length === 1) return FAIL_LABEL[failed[0]] || "Other reason";
-  if (failed.length >= 2)  return failed.map(f => FAIL_LABEL[f] || f).join("; ");
+  if (failed.length >= 1) return FAIL_LABEL[failed[0]] || "Other reason";
 
   const values = Object.values(votes);
   const naCount      = values.filter(v => v === "NA").length;
@@ -145,7 +147,7 @@ export function categoriseFullTextExclusion(
     // criterion is decisive; otherwise the first unmet inclusion criterion.
     // (Every label is inline-editable in the diagram.)
     const primary = excFailed[0] ?? incFailed[0];
-    return shorten(primary, 38);
+    return shorten(primary, 80);
   }
 
   // 2. Fall back to PICO mismatch.
@@ -162,8 +164,10 @@ export function categoriseFullTextExclusion(
     if (pe.intervention?.match === "no") noMatches.push("intervention");
     if (pe.comparator?.match === "no")   noMatches.push("comparator");
     if (pe.outcome?.match === "no")      noMatches.push("outcome");
-    if (noMatches.length === 1) return FAIL_LABEL[noMatches[0]] || "Other reason";
-    if (noMatches.length >= 2)  return noMatches.map(m => FAIL_LABEL[m] || m).join("; ");
+    // One reason per study: the highest-priority mismatch in PICO order
+    // (population > intervention > comparator > outcome), since `noMatches` is
+    // built in that order.
+    if (noMatches.length >= 1) return FAIL_LABEL[noMatches[0]] || "Other reason";
   }
 
   if ((r.exclusion_violations ?? 0) > 0) return "Exclusion criterion met";
