@@ -586,9 +586,10 @@ export function PrismaFlow({
                 </div>
               </div>
 
-              {/* Row 2: down arrow under left, removed box on right */}
+              {/* Row 2: "removed before screening" box branches off on the right.
+                  The main flow arrow lives between this phase and Screening. */}
               <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
-                <div className="flex justify-center py-1 text-gray-400 text-base">↓</div>
+                <div />
                 <div />
                 <div className={BOX_STYLE}>
                   <div className="font-semibold mb-0.5">
@@ -602,8 +603,16 @@ export function PrismaFlow({
             </div>
           </div>
 
+          {/* Flow arrow between Identification and Screening. */}
+          <div className="flex items-stretch my-1">
+            <div className={PHASE_BAR} style={{ visibility: "hidden", writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Screening</div>
+            <div className="flex-1 px-2.5 py-2">
+              <div className="grid grid-cols-[5fr_16px_6fr] gap-2">{ARROW}<div /><div /></div>
+            </div>
+          </div>
+
           {/* ── SCREENING ──────────────────────────────────────────────── */}
-          <div className={`mt-2 ${SECTION_PANEL}`}>
+          <div className={SECTION_PANEL}>
             <div className={`${PHASE_BAR} self-stretch`} style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Screening</div>
             <div className="flex-1 p-2.5 space-y-0">
               {/* Row: screened → excluded */}
@@ -630,7 +639,7 @@ export function PrismaFlow({
               </div>
 
               {/* Down arrow, centered under the left (flow) column */}
-              <div className="grid grid-cols-[5fr_16px_6fr] py-0.5">{ARROW}</div>
+              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 py-2.5">{ARROW}<div /><div /></div>
 
               {/* Row: sought for retrieval → not retrieved */}
               <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
@@ -650,7 +659,7 @@ export function PrismaFlow({
               </div>
 
               {/* Down arrow, centered under the left (flow) column */}
-              <div className="grid grid-cols-[5fr_16px_6fr] py-0.5">{ARROW}</div>
+              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 py-2.5">{ARROW}<div /><div /></div>
 
               {/* Row: assessed for eligibility → excluded at full text.
                   Reasons + counts only — no per-study disclosure. */}
@@ -681,7 +690,15 @@ export function PrismaFlow({
           </div>
 
           {/* ── INCLUDED ───────────────────────────────────────────────── */}
-          <div className="pl-[2.6rem] pr-2.5"><div className="grid grid-cols-[5fr_16px_6fr]">{ARROW}<div /><div /></div></div>
+          {/* Between-phase arrow: mirror the panel layout (invisible phase-bar
+              spacer + p-2.5 + the same gap-2 grid) so it lines up exactly under
+              the flow column, instead of an approximate padding. */}
+          <div className="flex items-stretch my-1">
+            <div className={PHASE_BAR} style={{ visibility: "hidden", writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Included</div>
+            <div className="flex-1 px-2.5 py-2">
+              <div className="grid grid-cols-[5fr_16px_6fr] gap-2">{ARROW}<div /><div /></div>
+            </div>
+          </div>
           <div className={`mt-1 ${SECTION_PANEL}`}>
             <div className={`${PHASE_BAR} self-stretch`} style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Included</div>
             <div className="flex-1 p-2.5 space-y-2">

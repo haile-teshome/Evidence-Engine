@@ -8,11 +8,65 @@ import { AIService } from "../lib/mockServices";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Label } from "./ui/label";
-import { Plus, FolderOpen, Trash2, Cloud, CloudOff, Loader2, Check } from "lucide-react";
+import { Plus, FolderOpen, Trash2, Cloud, CloudOff, Loader2, Check, Pin } from "lucide-react";
 import { toast } from "sonner";
 
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// Deterministic short summary of a research goal — strips conversational lead-ins
+// ("I want to know about the relationship between …") instead of slicing the
+// question verbatim. Mirrors the backend heuristic; used for the instant title
+// before the LLM's nicer one arrives.
+const GOAL_LEADINS = /^(?:i\s+(?:want|would\s+like|need|wish|aim|plan|hope|am\s+looking)\s+to\s+(?:know|understand|find\s+out|learn|explore|investigate|examine|study|review|assess|evaluate|research|determine|see)(?:\s+(?:about|whether|if|how|what|the))?|what\s+(?:is|are|was|were)|how\s+(?:does|do|did|can|to)|can\s+you|could\s+you|please|tell\s+me\s+about|i'?m\s+interested\s+in|(?:a\s+)?(?:study|systematic\s+review|review|analysis|investigation|meta[-\s]analysis)\s+(?:of|on|about)|the\s+(?:relationship|association|effect|effects|impact|role|link|correlation)\s+(?:between|of|on)|explore|investigate|examine|assess|evaluate|determine|understand|is\s+there\s+(?:a|an)?)\s+/i;
+
+function summarizeGoal(goal: string): string {
+  let g = (goal || "").trim().replace(/[?.!\s]+$/, "");
+  for (let i = 0; i < 3; i++) {
+    const stripped = g.replace(GOAL_LEADINS, "").replace(/^[\s?.!,:]+/, "").trim();
+    if (stripped === g || !stripped) break;
+    g = stripped;
+  }
+  if (!g) g = (goal || "").trim();
+  let short = g.split(/\s+/).slice(0, 8).join(" ").replace(/[\s?.!,:]+$/, "");
+  if (short.length > 60) short = short.slice(0, 60).replace(/\s\S*$/, "");
+  if (!short) return "Untitled session";
+  return short.charAt(0).toUpperCase() + short.slice(1);
+}
+
+const PINNED_KEY = "ee:pinnedSessions";
+function loadPinned(): Set<string> {
+  try { return new Set(JSON.parse(localStorage.getItem(PINNED_KEY) || "[]")); } catch { return new Set(); }
+}
+
+// A single-line label that stays on one line, and on hover scrolls horizontally
+// to reveal the full text (marquee-on-hover), then resets on leave.
+function ScrollingText({ text }: { text: string }) {
+  const spanRef = useRef<HTMLSpanElement>(null);
+  const [tx, setTx] = useState(0);
+  return (
+    <div
+      className="flex-1 min-w-0 overflow-hidden"
+      title={text}
+      onMouseEnter={() => {
+        const el = spanRef.current;
+        const parent = el?.parentElement;
+        if (!el || !parent) return;
+        const over = el.scrollWidth - parent.clientWidth;
+        setTx(over > 2 ? over : 0);
+      }}
+      onMouseLeave={() => setTx(0)}
+    >
+      <span
+        ref={spanRef}
+        className="inline-block whitespace-nowrap transition-transform ease-linear"
+        style={{ transform: `translateX(-${tx}px)`, transitionDuration: `${Math.max(tx * 15, 0)}ms` }}
+      >
+        {text}
+      </span>
+    </div>
+  );
 }
 
 type SyncStatus = "idle" | "saving" | "synced" | "error";
@@ -26,6 +80,14 @@ export function SessionsPanel() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [syncError, setSyncError] = useState<string | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  // Inline rename (double-click a session to edit its name).
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  // Pinned sessions float to the top; persisted locally per browser.
+  const [pinned, setPinned] = useState<Set<string>>(loadPinned);
+  // Single vs double click: delay the load so a double-click can cancel it and
+  // enter edit mode instead.
+  const clickTimer = useRef<number | null>(null);
   // Show the "sync failed" toast at most once per session to avoid spamming.
   const errorToastShown = useRef(false);
 
@@ -138,7 +200,7 @@ export function SessionsPanel() {
         const title =
           s.currentSessionTitle && s.currentSessionTitle !== "Untitled session"
             ? s.currentSessionTitle
-            : (firstGoal.slice(0, 50) + (firstGoal.length > 50 ? "…" : "")) || "Untitled session";
+            : summarizeGoal(firstGoal) || "Untitled session";
         await saveSession(id, title, s.snapshot());
         await refresh();
       } catch (e) {
@@ -163,7 +225,7 @@ export function SessionsPanel() {
         const id = s.currentSessionId || genId();
         const firstGoal = s.history[0]?.goal || "";
         // Use a string-slice title up front so we never block on the LLM.
-        const fallbackTitle = firstGoal.slice(0, 50) + (firstGoal.length > 50 ? "…" : "");
+        const fallbackTitle = summarizeGoal(firstGoal);
         let title = s.currentSessionTitle && s.currentSessionTitle !== "Untitled session"
           ? s.currentSessionTitle
           : fallbackTitle || "Untitled session";
@@ -250,6 +312,44 @@ export function SessionsPanel() {
     );
   }
 
+  // Persist a new name. For the active session we save the live snapshot; for
+  // others we reload their data first so the rename doesn't clobber it.
+  async function commitRename() {
+    const id = editingId;
+    const t = editValue.trim();
+    setEditingId(null);
+    if (!id || !t) return;
+    setSessions(prev => prev.map(x => (x.id === id ? { ...x, title: t } : x)));
+    if (id === s.currentSessionId) s.setCurrentSessionTitle(t);
+    try {
+      if (id === s.currentSessionId) await saveSession(id, t, s.snapshot());
+      else { const sess = await loadSession(id); await saveSession(id, t, sess.data); }
+    } catch { refresh(); }
+  }
+
+  function handleRowClick(id: string) {
+    if (clickTimer.current) return;                       // dbl-click in progress
+    clickTimer.current = window.setTimeout(() => { clickTimer.current = null; onLoad(id); }, 220);
+  }
+  function handleRowDblClick(id: string, title: string) {
+    if (clickTimer.current) { clearTimeout(clickTimer.current); clickTimer.current = null; }
+    setEditingId(id);
+    setEditValue(title);
+  }
+
+  function togglePin(id: string, e: React.MouseEvent) {
+    e.stopPropagation();
+    setPinned(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      try { localStorage.setItem(PINNED_KEY, JSON.stringify([...next])); } catch { /* ignore */ }
+      return next;
+    });
+  }
+
+  // Pinned sessions first; stable sort preserves the original (recency) order otherwise.
+  const orderedSessions = [...sessions].sort((a, b) => (pinned.has(a.id) ? 0 : 1) - (pinned.has(b.id) ? 0 : 1));
+
   return (
     <Card className="p-3 space-y-2">
       <div className="flex items-center justify-between">
@@ -265,16 +365,40 @@ export function SessionsPanel() {
             Sessions auto-save to your account.
           </div>
         )}
-        {sessions.map(m => {
+        {orderedSessions.map(m => {
           const active = m.id === s.currentSessionId;
+          const editing = editingId === m.id;
+          const isPinned = pinned.has(m.id);
           return (
             <div key={m.id}
-              className={`group flex items-center gap-1 text-xs rounded px-2 py-1.5 cursor-pointer ${active ? "bg-primary/10 border border-primary/30" : "hover:bg-muted"}`}
-              onClick={() => onLoad(m.id)}>
+              className={`group flex items-center gap-1 text-xs rounded px-2 py-1.5 ${editing ? "" : "cursor-pointer"} ${active ? "bg-primary/10 border border-primary/30" : "hover:bg-muted"}`}
+              onClick={() => { if (!editing) handleRowClick(m.id); }}
+              onDoubleClick={() => handleRowDblClick(m.id, m.title)}
+              title={editing ? undefined : "Double-click to rename"}>
               <FolderOpen className="size-3 shrink-0 text-muted-foreground" />
-              <div className="flex-1 truncate">{m.title}</div>
+              {editing ? (
+                <input
+                  autoFocus
+                  value={editValue}
+                  onClick={e => e.stopPropagation()}
+                  onChange={e => setEditValue(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+                    else if (e.key === "Escape") { setEditingId(null); }
+                  }}
+                  onBlur={commitRename}
+                  className="flex-1 min-w-0 bg-transparent border-b border-primary/50 outline-none px-0.5"
+                />
+              ) : (
+                <ScrollingText text={m.title} />
+              )}
+              <button onClick={(e) => togglePin(m.id, e)}
+                className={`shrink-0 ${isPinned ? "text-primary" : "opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground"}`}
+                title={isPinned ? "Unpin" : "Pin to top"}>
+                <Pin className={`size-3 ${isPinned ? "fill-primary" : ""}`} />
+              </button>
               <button onClick={(e) => onDelete(m.id, e)}
-                className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive">
+                className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive shrink-0">
                 <Trash2 className="size-3" />
               </button>
             </div>
