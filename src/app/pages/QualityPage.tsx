@@ -25,6 +25,7 @@ import {
 } from "../lib/apiClient";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { ReferenceTools } from "../components/ReferenceTools";
 
 const JUDGMENT_OPTIONS: RoBJudgment[] = [
   "Low", "Some Concerns", "High", "No information", "Not applicable",
@@ -428,6 +429,7 @@ export function QualityPage() {
 
   return (
     <div className="space-y-4">
+      <ReferenceTools />
       {!reports && (
         <>
           <Alert>
