@@ -10,6 +10,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 
 const PROJECT = path.dirname(fileURLToPath(import.meta.url));
@@ -341,6 +342,42 @@ const MIME = {
   ".map": "application/json", ".csv": "text/csv", ".wasm": "application/wasm", ".txt": "text/plain",
 };
 
+// Text-ish assets worth gzipping (images/fonts/wasm are already compressed).
+const COMPRESSIBLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".svg", ".map", ".csv", ".txt"]);
+
+// Send one static file with the same performance headers a real static server
+// gives you: gzip when the client accepts it, long-lived immutable caching for
+// content-hashed assets (and no-cache for index.html), and ETag revalidation.
+// Without these the browser re-downloads the whole (multi-MB, uncompressed)
+// bundle on every load, which is why the launcher felt slower than the app in a
+// normal browser.
+function sendFile(file, stat, req, res) {
+  const ext = path.extname(file).toLowerCase();
+  const etag = `W/"${stat.size.toString(16)}-${Math.round(stat.mtimeMs).toString(16)}"`;
+  const isHtml = ext === ".html";
+  // Vite emits content-hashed filenames under /assets/, so those are safe to
+  // cache forever; index.html must always be revalidated so new builds show up.
+  const hashed = file.includes(`${path.sep}assets${path.sep}`) && !isHtml;
+  const headers = {
+    "Content-Type": MIME[ext] || "application/octet-stream",
+    "ETag": etag,
+    "Cache-Control": isHtml ? "no-cache" : hashed ? "public, max-age=31536000, immutable" : "public, max-age=3600",
+  };
+  if (req.headers["if-none-match"] === etag) { res.writeHead(304, headers); res.end(); return; }
+  const acceptsGzip = /\bgzip\b/.test(req.headers["accept-encoding"] || "");
+  const onErr = () => { if (!res.headersSent) res.writeHead(500); res.end(); };
+  if (acceptsGzip && COMPRESSIBLE.has(ext)) {
+    headers["Content-Encoding"] = "gzip";
+    headers["Vary"] = "Accept-Encoding";
+    res.writeHead(200, headers);
+    fs.createReadStream(file).on("error", onErr).pipe(zlib.createGzip()).on("error", onErr).pipe(res);
+  } else {
+    headers["Content-Length"] = stat.size;
+    res.writeHead(200, headers);
+    fs.createReadStream(file).on("error", onErr).pipe(res);
+  }
+}
+
 // Serve the prebuilt SPA from distDir and reverse-proxy /api/* to the backend.
 // Runs in-process (dies with the launcher). Using this instead of `vite preview`
 // means the packaged bundle needs no node_modules at runtime — only the built
@@ -361,9 +398,13 @@ function serveFrontend(distDir, port) {
     let file = path.join(distDir, rel);
     if (!file.startsWith(distDir)) { res.writeHead(403); res.end(); return; }   // no traversal
     fs.stat(file, (err, st) => {
-      if (err || !st.isFile()) file = path.join(distDir, "index.html");   // SPA fallback
-      res.writeHead(200, { "Content-Type": MIME[path.extname(file).toLowerCase()] || "application/octet-stream" });
-      fs.createReadStream(file).on("error", () => { if (!res.headersSent) res.writeHead(500); res.end(); }).pipe(res);
+      // Missing file → SPA fallback to index.html (which we must re-stat).
+      if (err || !st.isFile()) {
+        file = path.join(distDir, "index.html");
+        fs.stat(file, (e2, st2) => { if (e2 || !st2.isFile()) { res.writeHead(404); res.end(); return; } sendFile(file, st2, req, res); });
+        return;
+      }
+      sendFile(file, st, req, res);
     });
   });
   server.on("error", (e) => log("Frontend server error: " + e.message));
@@ -650,6 +691,14 @@ async function main() {
       `--remote-debugging-port=${DEBUG_PORT}`,
       "--no-first-run", "--no-default-browser-check",
       "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
+      // Force hardware acceleration. A second Chrome instance with its own
+      // profile can fall back to software rendering, which makes clicking and
+      // scrolling feel sluggish next to a normal tab. These make the app window
+      // render on the GPU like a normal tab does.
+      "--ignore-gpu-blocklist",
+      "--enable-gpu-rasterization",
+      "--enable-zero-copy",
+      "--enable-accelerated-2d-canvas",
     ], { stdio: "ignore" });
     heldWindow = win;   // keep a live reference so the child isn't garbage-collected
     win.on("error", () => { openDefaultBrowser(APP_LAUNCH_URL); keepAlive(); });
