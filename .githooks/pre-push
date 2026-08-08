@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# Docs-freshness gate. Blocks a push when source code changed since the
+# documentation was last synced, so docs/ never silently drifts from the app.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Bypass in an emergency:   git push --no-verify
+#
+# The sync workflow itself is the /sync-docs command in Claude Code, which
+# proposes edits to docs/index.html for you to approve, then advances the
+# marker in docs/.docs-sync.
+
+set -euo pipefail
+
+MARKER_FILE="docs/.docs-sync"
+DOCS_DIR="docs/"
+
+# Paths whose changes should be reflected in the documentation.
+WATCH_REGEX='^(Backend/|src/app/|launch\.mjs|README|GETTING-STARTED)'
+
+# Where is the docs marker pointing? Fall back to empty tree if absent.
+if [ -f "$MARKER_FILE" ]; then
+  LAST_SYNCED="$(tr -d '[:space:]' < "$MARKER_FILE")"
+else
+  LAST_SYNCED=""
+fi
+
+# Resolve the range of commits actually being pushed. git feeds ref updates on
+# stdin: <local ref> <local sha> <remote ref> <remote sha>. We take the newest
+# local sha and diff it against the last-synced marker so amended/rebased
+# histories still compare correctly.
+RANGE_TIP=""
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [ "$local_sha" = "0000000000000000000000000000000000000000" ] && continue
+  RANGE_TIP="$local_sha"
+done
+# If stdin was empty (e.g. invoked manually), use HEAD.
+[ -z "$RANGE_TIP" ] && RANGE_TIP="$(git rev-parse HEAD)"
+
+# Nothing to compare against: first push, let it through.
+if [ -z "$LAST_SYNCED" ] || ! git cat-file -e "${LAST_SYNCED}^{commit}" 2>/dev/null; then
+  echo "pre-push: no valid docs marker yet, skipping docs-freshness check."
+  exit 0
+fi
+
+# Already in sync.
+if [ "$LAST_SYNCED" = "$RANGE_TIP" ]; then
+  exit 0
+fi
+
+# Did any watched source change between the marker and the push tip?
+SRC_CHANGED="$(git diff --name-only "$LAST_SYNCED" "$RANGE_TIP" -- 2>/dev/null | grep -E "$WATCH_REGEX" || true)"
+
+# Were the docs themselves touched in that same range?
+DOCS_CHANGED="$(git diff --name-only "$LAST_SYNCED" "$RANGE_TIP" -- "$DOCS_DIR" 2>/dev/null || true)"
+
+if [ -n "$SRC_CHANGED" ] && [ -z "$DOCS_CHANGED" ]; then
+  echo ""
+  echo "  ┌────────────────────────────────────────────────────────────┐"
+  echo "  │  Documentation is out of date.                             │"
+  echo "  └────────────────────────────────────────────────────────────┘"
+  echo ""
+  echo "  Source changed since the docs were last synced, but docs/ was"
+  echo "  not updated in this push. Files that changed:"
+  echo ""
+  echo "$SRC_CHANGED" | sed 's/^/      /'
+  echo ""
+  echo "  To update the docs (approve-each-edit):"
+  echo "      1. In Claude Code, run:  /sync-docs"
+  echo "      2. Review and approve the proposed edits to docs/index.html"
+  echo "      3. Commit, then push again"
+  echo ""
+  echo "  Emergency bypass (lets docs drift):  git push --no-verify"
+  echo ""
+  exit 1
+fi
+
+exit 0
