@@ -11,7 +11,7 @@ import { BackendReadyProvider, useEngineStatus } from "./lib/backendReady";
 import { UserMenu } from "./components/UserMenu";
 import { HomePage } from "./pages/HomePage";
 import { SimulationPage } from "./pages/SimulationPage";
-import { QualityPage, RobvisTabbed } from "./pages/QualityPage";
+import { QualityPage, RiskOfBiasSummary } from "./pages/QualityPage";
 import { AbstractPage } from "./pages/AbstractPage";
 import { FullTextPage } from "./pages/FullTextPage";
 import { SnowballPage } from "./pages/SnowballPage";
@@ -226,7 +226,7 @@ function Shell() {
                         Showing risk-of-bias appraisal for {heatmapReports.length}{" "}
                         {heatmapStage === "fulltext" ? "full-text-included" : "abstract-included"} paper{heatmapReports.length === 1 ? "" : "s"}.
                       </div>
-                      <RobvisTabbed
+                      <RiskOfBiasSummary
                         reports={heatmapReports}
                         overrides={s.qualityOverrides}
                         onOverride={(o) => s.addQualityOverride(o)}

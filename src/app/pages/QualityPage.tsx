@@ -26,6 +26,7 @@ import {
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { ReferenceTools } from "../components/ReferenceTools";
+import { biasPlotSvg, BiasData } from "../lib/biasPlot";
 
 const JUDGMENT_OPTIONS: RoBJudgment[] = [
   "Low", "Some Concerns", "High", "No information", "Not applicable",
@@ -676,15 +677,20 @@ export function QualityPage() {
             </div>
           </Card>
 
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
             <Button variant="outline" onClick={() => runAssess()} disabled={running}>Re-run Appraisal</Button>
             <Button variant="outline" onClick={() => exportAssessments(reports, overrides)}>
               <FileDown className="size-4 mr-2" />Export (CSV + JSON)
+            </Button>
+            <Button variant="outline" onClick={() => exportBiasFigure(reports, overrides)}>
+              <FileDown className="size-4 mr-2" />Figure (SVG)
             </Button>
             <Button variant="outline" onClick={() => s.setPage("prisma")}>
               <ArrowRight className="size-4 mr-2" />Continue to Diagramming
             </Button>
           </div>
+
+          <GradePanel />
         </>
       )}
     </div>
@@ -1228,7 +1234,7 @@ function AuditLogPanel({
 
 
 // ---------------------------------------------------------------------------
-// robvis-style traffic-light summary, generated from the stored per-domain
+// Traffic-light risk-of-bias summary, generated from the stored per-domain
 // judgments. Papers are grouped by instrument (each tool has its own domains).
 // ---------------------------------------------------------------------------
 // Risk-of-bias tiers shared by the summary bars, the traffic-light dots, and the
@@ -1340,7 +1346,7 @@ function EditableRobCell({
 
 // Risk-of-bias figure with one sub-tab per instrument used. Single instrument →
 // no tab bar. Reused on the Diagramming page.
-export function RobvisTabbed({ reports, overrides, onOverride }: { reports: QualityReport[]; overrides: QualityOverride[]; onOverride?: (o: QualityOverride) => void }) {
+export function RiskOfBiasSummary({ reports, overrides, onOverride }: { reports: QualityReport[]; overrides: QualityOverride[]; onOverride?: (o: QualityOverride) => void }) {
   const groups = useMemo(() => {
     const m = new Map<string, QualityReport[]>();
     for (const r of reports) {
@@ -1354,7 +1360,7 @@ export function RobvisTabbed({ reports, overrides, onOverride }: { reports: Qual
 
   if (groups.length === 0) return null;
   if (groups.length === 1) {
-    return <RobvisSummary reports={groups[0].reports} overrides={overrides} onOverride={onOverride} />;
+    return <RiskOfBiasMatrix reports={groups[0].reports} overrides={overrides} onOverride={onOverride} />;
   }
   return (
     <div className="space-y-3">
@@ -1365,12 +1371,12 @@ export function RobvisTabbed({ reports, overrides, onOverride }: { reports: Qual
           ))}
         </TabsList>
       </Tabs>
-      <RobvisSummary reports={activeGroup?.reports ?? []} overrides={overrides} onOverride={onOverride} />
+      <RiskOfBiasMatrix reports={activeGroup?.reports ?? []} overrides={overrides} onOverride={onOverride} />
     </div>
   );
 }
 
-export function RobvisSummary({ reports, overrides, onOverride }: { reports: QualityReport[]; overrides: QualityOverride[]; onOverride?: (o: QualityOverride) => void }) {
+export function RiskOfBiasMatrix({ reports, overrides, onOverride }: { reports: QualityReport[]; overrides: QualityOverride[]; onOverride?: (o: QualityOverride) => void }) {
   const byInstrument = new Map<string, QualityReport[]>();
   for (const r of reports) {
     const key = r.instrument || r.rubric || "Appraisal";
@@ -1516,6 +1522,37 @@ function gradeCertaintyClass(c: string): string {
     : "bg-rose-100 text-rose-700 border-rose-200";
 }
 
+function _gradeLevelLabel(v: number): string {
+  return v <= -2 ? "very serious" : v === -1 ? "serious" : "not serious";
+}
+function sofHtml(outcomes: GradeOutcome[]): string {
+  const e = (s: any) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const ep = outcomes.map(o =>
+    `<tr><td>${e(o.outcome)}</td><td>${e(o.studies || "")}</td>` +
+    GRADE_DOWNGRADE_DOMAINS.map(k => `<td>${_gradeLevelLabel(o.downgrades[k] || 0)}</td>`).join("") +
+    `<td><b>${gradeCertainty(o)}</b></td></tr>`).join("");
+  const sof = outcomes.map(o =>
+    `<tr><td>${e(o.outcome)}</td><td>${e(o.participants || "?")} (${e(o.studies || "?")})</td><td>${e(o.relative || "")}</td><td>${e(o.absolute || "")}</td><td><b>${gradeCertainty(o)}</b></td><td>${e(o.comment || "")}</td></tr>`).join("");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Summary of Findings</title>
+<style>body{font-family:system-ui,sans-serif;margin:2rem;color:#0f172a}h1{font-size:1.3rem}h2{font-size:1.05rem;margin-top:1.5rem}table{border-collapse:collapse;width:100%;margin:.6rem 0;font-size:13px}th,td{border:1px solid #cbd5e1;padding:6px 9px;text-align:left;vertical-align:top}th{background:#f1f5f9}</style>
+</head><body>
+<h1>Summary of Findings</h1>
+<h2>GRADE evidence profile</h2>
+<table><thead><tr><th>Outcome</th><th>Studies</th><th>Risk of bias</th><th>Inconsistency</th><th>Indirectness</th><th>Imprecision</th><th>Publication bias</th><th>Certainty</th></tr></thead><tbody>${ep}</tbody></table>
+<h2>Summary of findings</h2>
+<table><thead><tr><th>Outcome</th><th>Participants (studies)</th><th>Relative effect</th><th>Absolute effect</th><th>Certainty (GRADE)</th><th>Comments</th></tr></thead><tbody>${sof}</tbody></table>
+</body></html>`;
+}
+function exportSoF(outcomes: GradeOutcome[]) {
+  if (!outcomes.length) { toast.error("Add outcomes first."); return; }
+  const q = (x: any) => `"${String(x ?? "").replace(/"/g, '""')}"`;
+  const head = ["Outcome", "Participants (studies)", "Relative effect", "Absolute effect", "Certainty (GRADE)", "Comments"];
+  const rows = outcomes.map(o => [o.outcome, `${o.participants || "?"} (${o.studies || "?"})`, o.relative || "", o.absolute || "", gradeCertainty(o), o.comment || ""]);
+  _dl("summary-of-findings.csv", [head, ...rows].map(r => r.map(q).join(",")).join("\r\n"), "text/csv");
+  _dl("summary-of-findings.html", sofHtml(outcomes), "text/html");
+  toast.success("Exported Summary of Findings (CSV + HTML).");
+}
+
 function GradePanel() {
   const s = useStore();
   const outcomes = s.gradeOutcomes;
@@ -1602,10 +1639,50 @@ function GradePanel() {
                   </div>
                 )}
               </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-2 border-t">
+                <label className="text-[11px] space-y-0.5"><span className="text-muted-foreground">Participants</span><Input className="h-7 text-xs" value={o.participants || ""} onChange={e => update(o.id, { participants: e.target.value })} placeholder="1,240" /></label>
+                <label className="text-[11px] space-y-0.5"><span className="text-muted-foreground">Studies</span><Input className="h-7 text-xs" value={o.studies || ""} onChange={e => update(o.id, { studies: e.target.value })} placeholder="6 RCTs" /></label>
+                <label className="text-[11px] space-y-0.5"><span className="text-muted-foreground">Relative effect</span><Input className="h-7 text-xs" value={o.relative || ""} onChange={e => update(o.id, { relative: e.target.value })} placeholder="RR 0.82 (0.71 to 0.95)" /></label>
+                <label className="text-[11px] space-y-0.5"><span className="text-muted-foreground">Absolute effect</span><Input className="h-7 text-xs" value={o.absolute || ""} onChange={e => update(o.id, { absolute: e.target.value })} placeholder="38 fewer / 1,000" /></label>
+                <label className="text-[11px] space-y-0.5 col-span-2 md:col-span-4"><span className="text-muted-foreground">Plain-language finding</span><Input className="h-7 text-xs" value={o.comment || ""} onChange={e => update(o.id, { comment: e.target.value })} placeholder="e.g. probably reduces mortality slightly" /></label>
+              </div>
             </div>
           );
         })}
       </div>
+
+      {outcomes.length > 0 && (
+        <div className="space-y-2 border-t pt-3">
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-medium">Summary of Findings</div>
+            <Button size="sm" variant="outline" onClick={() => exportSoF(outcomes)}><FileDown className="size-3.5 mr-1.5" />Export (CSV + HTML)</Button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs border-collapse">
+              <thead><tr className="border-b text-left text-muted-foreground">
+                <th className="py-1 pr-3 font-medium">Outcome</th>
+                <th className="py-1 pr-3 font-medium">Participants (studies)</th>
+                <th className="py-1 pr-3 font-medium">Relative</th>
+                <th className="py-1 pr-3 font-medium">Absolute</th>
+                <th className="py-1 pr-3 font-medium">Certainty</th>
+                <th className="py-1 font-medium">Comment</th>
+              </tr></thead>
+              <tbody>
+                {outcomes.map(o => (
+                  <tr key={o.id} className="border-b last:border-0 align-top">
+                    <td className="py-1 pr-3">{o.outcome}</td>
+                    <td className="py-1 pr-3">{o.participants || "?"} ({o.studies || "?"})</td>
+                    <td className="py-1 pr-3">{o.relative || ""}</td>
+                    <td className="py-1 pr-3">{o.absolute || ""}</td>
+                    <td className="py-1 pr-3"><span className={`px-1.5 py-0.5 rounded border text-[11px] ${gradeCertaintyClass(gradeCertainty(o))}`}>{gradeCertainty(o)}</span></td>
+                    <td className="py-1">{o.comment || ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -1635,4 +1712,32 @@ function exportAssessments(reports: QualityReport[], overrides: QualityOverride[
   }
   _dl("quality_assessments.csv", rows.join("\n"), "text/csv");
   toast.success(`Exported ${reports.length} appraisals (CSV + JSON).`);
+}
+
+// Traffic-light risk-of-bias figure(s), one SVG per instrument group (their
+// domains differ), built from the effective post-override judgments.
+function exportBiasFigure(reports: QualityReport[], overrides: QualityOverride[]) {
+  const byInst = new Map<string, QualityReport[]>();
+  for (const r of reports) {
+    const k = r.instrument || r.rubric || "Appraisal";
+    (byInst.get(k) ?? byInst.set(k, []).get(k)!).push(r);
+  }
+  let count = 0;
+  for (const [inst, rs] of byInst) {
+    const domains = rs[0]?.domains ?? [];
+    if (!domains.length) continue;
+    const data: BiasData = {
+      domainNames: domains.map(d => d.name),
+      rows: rs.map(r => ({
+        label: r.title,
+        judgments: domains.map((_, i) => effectiveJudgment(r.paper_id, r.domains[i], overrides)),
+        overall: recomputeOverall(r, overrides).judgment,
+      })),
+    };
+    const slug = inst.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "appraisal";
+    _dl(`risk-of-bias-${slug}.svg`, biasPlotSvg(data, `Risk of bias: ${inst}`), "image/svg+xml");
+    count++;
+  }
+  if (!count) { toast.error("No risk-of-bias domains to plot yet."); return; }
+  toast.success(`Exported ${count} risk-of-bias figure${count === 1 ? "" : "s"} (SVG).`);
 }

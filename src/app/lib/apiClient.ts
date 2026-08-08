@@ -138,6 +138,12 @@ export type GradeOutcome = {
   downgrades: Record<string, number>;   // domain -> 0 | -1 | -2
   upgrades: Record<string, number>;      // factor -> 0 | +1 | +2 (observational only)
   notes?: Record<string, string>;
+  // Effect data for the Summary-of-Findings table (all free text, optional).
+  participants?: string;   // e.g. "1,240"
+  studies?: string;        // e.g. "6 RCTs"
+  relative?: string;       // relative effect, e.g. "RR 0.82 (0.71 to 0.95)"
+  absolute?: string;       // absolute effect, e.g. "38 fewer per 1,000"
+  comment?: string;        // plain-language finding
 };
 
 export const GRADE_DOWNGRADE_DOMAINS = ["risk_of_bias", "inconsistency", "indirectness", "imprecision", "publication_bias"] as const;
