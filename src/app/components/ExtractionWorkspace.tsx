@@ -12,6 +12,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
 import { Badge } from "./ui/badge";
+import { Skeleton } from "./ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import { Loader2, Wand2, Save, Check, Download, Plus, Trash2, GitMerge, ClipboardList, Users } from "lucide-react";
@@ -164,7 +165,20 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
   }
 
   if (loading) {
-    return <Card className="p-8 flex items-center justify-center text-muted-foreground"><Loader2 className="size-5 animate-spin" /></Card>;
+    return (
+      <Card className="p-4 space-y-3">
+        <Skeleton className="h-5 w-72" />
+        <Skeleton className="h-8 w-40" />
+        <div className="flex gap-4 pt-1">
+          <div className="w-64 shrink-0 space-y-2">
+            {[0, 1, 2, 3, 4].map(i => <Skeleton key={i} className="h-10 w-full" />)}
+          </div>
+          <div className="flex-1 space-y-2">
+            {[0, 1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-8 w-full" />)}
+          </div>
+        </div>
+      </Card>
+    );
   }
 
   return (
