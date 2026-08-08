@@ -4407,3 +4407,108 @@ Return ONLY the protocol text in Markdown."""
     except Exception as e:
         print(f"[writing_protocol] {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Research-integrity check: flag included studies that have been retracted or
+# carry an expression of concern, using OpenAlex (is_retracted, sourced from
+# Retraction Watch) and Crossref update relationships. Both are already queried
+# elsewhere, so this needs no new credentials.
+# ---------------------------------------------------------------------------
+
+class IntegrityPaper(BaseModel):
+    paper_id: str
+    doi: Optional[str] = None
+    title: Optional[str] = None
+
+
+class IntegrityRequest(BaseModel):
+    papers: List[IntegrityPaper] = []
+
+
+def _norm_doi(s: Optional[str]) -> str:
+    if not s:
+        return ""
+    m = re.search(r"10\.\d{4,9}/[^\s\"<>]+", s.strip().lower())
+    return m.group(0) if m else ""
+
+
+def _openalex_retracted(doi: str, title: Optional[str]) -> Optional[dict]:
+    """Return {status, detail, doi} from OpenAlex, or None if not resolvable."""
+    try:
+        if doi:
+            r = requests.get(f"https://api.openalex.org/works/doi:{doi}",
+                             params={"mailto": Config.ENTREZ_EMAIL, "select": "id,is_retracted,doi"}, timeout=8)
+            if r.status_code == 200:
+                w = r.json()
+                return {"status": "retracted" if w.get("is_retracted") else "ok",
+                        "detail": "Listed as retracted in OpenAlex" if w.get("is_retracted") else "",
+                        "doi": doi, "source": "OpenAlex"}
+        elif title:
+            r = requests.get("https://api.openalex.org/works",
+                             params={"search": title, "per_page": 1, "select": "id,is_retracted,doi,title",
+                                     "mailto": Config.ENTREZ_EMAIL}, timeout=8)
+            if r.status_code == 200:
+                res = (r.json().get("results") or [])
+                if res:
+                    w = res[0]
+                    return {"status": "retracted" if w.get("is_retracted") else "ok",
+                            "detail": "Listed as retracted in OpenAlex (matched by title)" if w.get("is_retracted") else "",
+                            "doi": _norm_doi(w.get("doi")), "source": "OpenAlex"}
+    except Exception as e:
+        print(f"[integrity/openalex] {e}")
+    return None
+
+
+def _crossref_update(doi: str) -> Optional[dict]:
+    """Return a retraction/concern flag from Crossref update-to relations."""
+    if not doi:
+        return None
+    try:
+        r = requests.get(f"https://api.crossref.org/works/{doi}", params={"mailto": Config.ENTREZ_EMAIL}, timeout=8)
+        if r.status_code != 200:
+            return None
+        types = [(u.get("type") or "").lower() for u in (r.json().get("message", {}).get("update-to") or [])]
+        if any("retract" in t for t in types):
+            return {"status": "retracted", "detail": "Crossref lists a retraction", "source": "Crossref"}
+        if any("concern" in t for t in types):
+            return {"status": "concern", "detail": "Crossref lists an expression of concern", "source": "Crossref"}
+        if any(("correct" in t or "erratum" in t) for t in types):
+            return {"status": "correction", "detail": "Crossref lists a correction or erratum", "source": "Crossref"}
+    except Exception as e:
+        print(f"[integrity/crossref] {e}")
+    return None
+
+
+def _check_integrity_one(p: IntegrityPaper) -> dict:
+    doi = _norm_doi(p.doi)
+    out = {"paper_id": p.paper_id, "status": "unknown", "detail": "No DOI to check", "source": "", "doi": doi}
+    oa = _openalex_retracted(doi, p.title)
+    if oa:
+        out.update(oa)
+        doi = out.get("doi") or doi
+    # A concern/correction is only added if OpenAlex did not already flag a retraction.
+    if out["status"] in ("ok", "unknown") and doi:
+        cr = _crossref_update(doi)
+        if cr:
+            out.update(cr)
+        elif out["status"] == "unknown":
+            out.update(status="ok", detail="No retraction found")
+    return out
+
+
+@app.post("/api/integrity/check")
+def integrity_check(req: IntegrityRequest):
+    papers = req.papers[:300]
+    results: List[dict] = []
+    if not papers:
+        return {"results": results}
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {ex.submit(_check_integrity_one, p): p for p in papers}
+        for f in as_completed(futs):
+            p = futs[f]
+            try:
+                results.append(f.result())
+            except Exception as e:
+                results.append({"paper_id": p.paper_id, "status": "unknown", "detail": str(e), "source": "", "doi": ""})
+    return {"results": results}
