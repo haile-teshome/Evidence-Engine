@@ -9,7 +9,8 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { Search, Download, Minus } from "lucide-react";
+import { Search, Download, Minus, Zap } from "lucide-react";
+import { RapidScreen } from "../components/RapidScreen";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -220,6 +221,7 @@ export function AbstractPage() {
   const overrideCount = r ? r.filter(x => x.Decision !== effectiveAbstractDecision(x, s.abstractOverrides)).length : 0;
 
   const [projectRefresh, setProjectRefresh] = useState(0);
+  const [rapidOpen, setRapidOpen] = useState(false);
 
   return (
     <div className="space-y-4">
@@ -257,18 +259,37 @@ export function AbstractPage() {
             <StatBox label="Time" value={formatDuration(s.screeningDuration)} />
           </div>
 
+          <RapidScreen
+            open={rapidOpen}
+            onClose={() => setRapidOpen(false)}
+            label="Rapid screen: abstracts"
+            items={r.map(x => ({
+              id: x.paper_id, title: x.Title, source: x.Source, url: x.URL, text: x.Abstract,
+              aiInclude: x.Decision === "INCLUDE", reason: x.Reason,
+              override: s.abstractOverrides[x.paper_id]
+                ? (s.abstractOverrides[x.paper_id] === "INCLUDE" ? "include" : "exclude")
+                : undefined,
+            }))}
+            onDecide={(id, d) => s.setAbstractOverride(id, d === "include" ? "INCLUDE" : "EXCLUDE")}
+          />
+
           <Card className="p-4">
             <div className="flex items-center justify-between mb-3 gap-3">
               <h3 className="font-medium">Screening Results</h3>
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)}
-                className="h-7 px-2 shrink-0"
-                title="Download results as Excel (XLSX)"
-              >
-                <Download className="size-4" />
-              </Button>
+              <div className="flex items-center gap-2 shrink-0">
+                <Button size="sm" variant="outline" onClick={() => setRapidOpen(true)} className="h-7" title="Review records fast with the keyboard">
+                  <Zap className="size-3.5 mr-1.5" />Rapid screen
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)}
+                  className="h-7 px-2"
+                  title="Download results as Excel (XLSX)"
+                >
+                  <Download className="size-4" />
+                </Button>
+              </div>
             </div>
             {overrideCount > 0 && (
               <div className="text-xs text-muted-foreground mb-2">
