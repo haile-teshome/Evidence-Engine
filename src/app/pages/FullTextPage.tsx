@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService, formatDuration, FullTextResult } from "../lib/mockServices";
+import { RapidScreen } from "../components/RapidScreen";
 import {
   categoriseFullTextExclusion,
   effectiveAbstractDecision,
@@ -11,7 +13,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { FlaskConical, Check, Minus, X as XIcon, Download } from "lucide-react";
+import { FlaskConical, Check, Minus, X as XIcon, Download, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -19,6 +21,7 @@ export function FullTextPage() {
   const s = useStore();
   const task = s.tasks["full-text-screen"];
   const running = task?.status === "running";
+  const [rapidOpen, setRapidOpen] = useState(false);
 
   if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first.</AlertDescription></Alert>;
 
@@ -136,6 +139,9 @@ export function FullTextPage() {
                     <Button size="sm" variant="outline" onClick={() => run(passed, false)} disabled={running}>
                       <FlaskConical className="size-4 mr-1.5" />{running ? "Screening…" : "Re-run all"}
                     </Button>
+                    <Button size="sm" variant="outline" onClick={() => setRapidOpen(true)} title="Review records fast with the keyboard">
+                      <Zap className="size-3.5 mr-1.5" />Rapid review
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -147,6 +153,20 @@ export function FullTextPage() {
                     </Button>
                   </div>
                 </div>
+                <RapidScreen
+                  open={rapidOpen}
+                  onClose={() => setRapidOpen(false)}
+                  label="Rapid review: full text"
+                  items={ft.map(x => ({
+                    id: x.paper_id, title: x.Title, source: x.Source, url: x.URL,
+                    text: s.fullTexts[x.paper_id]?.text || x.Abstract,
+                    aiInclude: x.Decision === "Include", reason: x.Reason,
+                    override: s.fullTextOverrides[x.paper_id]
+                      ? (s.fullTextOverrides[x.paper_id] === "Include" ? "include" : "exclude")
+                      : undefined,
+                  }))}
+                  onDecide={(id, d) => s.setFullTextOverride(id, d === "include" ? "Include" : "Exclude")}
+                />
                 {task && task.status === "running" && (
                   <div className="mb-3">
                     <TaskProgressCard

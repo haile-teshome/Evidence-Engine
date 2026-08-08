@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { QueryDiff } from "../components/QueryDiff";
 import { AnalysisProgress, Stage as ProgStage } from "../components/AnalysisProgress";
 import { SearchLog } from "../components/SearchLog";
+import { LivingUpdates } from "../components/LivingUpdates";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -675,6 +676,7 @@ export function SimulationPage() {
       )}
 
       <SearchLog />
+      <LivingUpdates />
     </div>
   );
 }
