@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Participant, ProjectRole, AutoAssignResult,
   listParticipants, addParticipant, updateParticipant, removeParticipant,
   autoAssign, listProjectPapers,
+  exportProjectBundle, importIntoProject, reproReport,
 } from "../lib/projects";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
@@ -10,8 +11,15 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Badge } from "./ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { Users, Plus, Trash2, Shuffle, X, Loader2, UserPlus } from "lucide-react";
+import { Users, Plus, Trash2, Shuffle, X, Loader2, UserPlus, Download, Upload, FileText, Share2 } from "lucide-react";
 import { toast } from "sonner";
+
+function downloadFile(name: string, content: string, mime: string) {
+  const url = URL.createObjectURL(new Blob([content], { type: mime }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.click();
+  URL.revokeObjectURL(url);
+}
 
 type Strategy = "dual" | "overlap" | "weighted" | "manual";
 
@@ -30,6 +38,39 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
   const [includeCalib, setIncludeCalib] = useState(true);
   const [assigning, setAssigning] = useState(false);
   const [result, setResult] = useState<AutoAssignResult | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
+  const importRef = useRef<HTMLInputElement>(null);
+
+  const safeName = projectName.replace(/[^a-z0-9]+/gi, "-").toLowerCase().replace(/^-+|-+$/g, "") || "project";
+
+  async function exportBundle() {
+    setShareBusy(true);
+    try {
+      const b = await exportProjectBundle(projectId);
+      downloadFile(`${safeName}-bundle.json`, JSON.stringify(b, null, 2), "application/json");
+      toast.success("Project bundle exported");
+    } catch (e: any) { toast.error(e?.message || "Export failed"); }
+    finally { setShareBusy(false); }
+  }
+  async function exportReport() {
+    setShareBusy(true);
+    try {
+      const b = await exportProjectBundle(projectId);
+      downloadFile(`${safeName}-reproducibility.md`, reproReport(b), "text/markdown");
+      toast.success("Reproducibility report exported");
+    } catch (e: any) { toast.error(e?.message || "Export failed"); }
+    finally { setShareBusy(false); }
+  }
+  async function onImport(file: File) {
+    setShareBusy(true);
+    try {
+      const bundle = JSON.parse(await file.text());
+      const { merged } = await importIntoProject(projectId, bundle);
+      const total = Object.values(merged).reduce((a, b) => a + b, 0);
+      toast.success(`Merged ${total} record(s): ${Object.entries(merged).filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(", ") || "nothing new"}`);
+    } catch (e: any) { toast.error(e?.message || "Import failed. Is this an Evidence Engine bundle?"); }
+    finally { setShareBusy(false); if (importRef.current) importRef.current.value = ""; }
+  }
 
   async function reload() {
     setLoading(true);
@@ -174,6 +215,27 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Share & reproducibility */}
+          <div className="space-y-2 border-t pt-3">
+            <Label className="text-xs flex items-center gap-1.5"><Share2 className="size-3.5" />Share &amp; reproducibility</Label>
+            <p className="text-xs text-muted-foreground">
+              Export a bundle to hand this project to a reviewer, then import their returned bundle to merge their decisions and extractions. The reproducibility report is a complete, timestamped record of the review.
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" onClick={exportBundle} disabled={shareBusy}>
+                {shareBusy ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Download className="size-3.5 mr-1.5" />}Export bundle (.json)
+              </Button>
+              <Button size="sm" variant="outline" onClick={exportReport} disabled={shareBusy}>
+                <FileText className="size-3.5 mr-1.5" />Reproducibility report (.md)
+              </Button>
+              <Button size="sm" variant="outline" onClick={() => importRef.current?.click()} disabled={shareBusy}>
+                <Upload className="size-3.5 mr-1.5" />Import returned bundle
+              </Button>
+              <input ref={importRef} type="file" accept=".json,application/json" className="hidden"
+                onChange={e => { const f = e.target.files?.[0]; if (f) onImport(f); }} />
+            </div>
           </div>
         </>
       )}

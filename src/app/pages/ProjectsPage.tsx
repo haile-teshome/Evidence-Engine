@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useStore } from "../lib/store";
 import { useAuth } from "../lib/auth";
 import {
   Project, ProjectMember, ScreeningMode, ProjectRole, Invite, AssignmentStrategy,
   listProjects, createProject, getProject, createInvite, setMemberRole,
   lockProject, acceptInvite, previewInvite, setProjectPapers, assignPapers, listProjectPapers,
+  importNewProject,
 } from "../lib/projects";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { ConflictsSection } from "../components/ConflictsSection";
@@ -17,7 +18,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Textarea } from "../components/ui/textarea";
-import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy } from "lucide-react";
+import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy, Upload } from "lucide-react";
 import { toast } from "sonner";
 
 export function ProjectsPage() {
@@ -29,6 +30,19 @@ export function ProjectsPage() {
   const [acceptToken, setAcceptToken] = useState("");
   const [manage, setManage] = useState<{ id: string; name: string } | null>(null);
   const [acceptPreview, setAcceptPreview] = useState<{ invite: Invite; project: { id: string; name: string } | null } | null>(null);
+  const importRef = useRef<HTMLInputElement>(null);
+
+  async function importBundleFile(file: File) {
+    try {
+      const bundle = JSON.parse(await file.text());
+      const project = await importNewProject(bundle);
+      toast.success(`Imported "${project.name}" as a new project`);
+      await refresh();
+      openProject(project);
+    } catch (e: any) {
+      toast.error(e?.message || "Import failed. Is this an Evidence Engine bundle?");
+    }
+  }
 
   async function refresh() {
     setLoading(true);
@@ -139,7 +153,12 @@ export function ProjectsPage() {
             A project is a shared systematic review with multiple reviewers, blinded screening, and adjudication.
           </div>
         </div>
-        <Button onClick={() => setShowCreate(true)}><Plus className="size-4 mr-2" />New project</Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => importRef.current?.click()}><Upload className="size-4 mr-2" />Import bundle</Button>
+          <input ref={importRef} type="file" accept=".json,application/json" className="hidden"
+            onChange={e => { const f = e.target.files?.[0]; if (f) importBundleFile(f); if (importRef.current) importRef.current.value = ""; }} />
+          <Button onClick={() => setShowCreate(true)}><Plus className="size-4 mr-2" />New project</Button>
+        </div>
       </div>
 
       {showCreate && <CreateProjectCard onCreated={(p) => { setShowCreate(false); refresh(); openProject(p); }} onCancel={() => setShowCreate(false)} />}
