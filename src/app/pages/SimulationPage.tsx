@@ -224,6 +224,13 @@ export function SimulationPage() {
   const [selectedDb, setSelectedDb] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(false);
 
+  // Auto-load the canonical query (generated on Research Strategy) into the
+  // base-query box when it is still empty, so Planning opens ready to edit.
+  useEffect(() => {
+    if (!s.unifiedSearchQuery && s.query) s.setUnifiedSearchQuery(s.query);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [s.query]);
+
   useEffect(() => {
     s.setPerDbQueries(prev => {
       const next = { ...prev };

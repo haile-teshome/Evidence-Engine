@@ -10,6 +10,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Badge } from "./ui/badge";
+import { Skeleton } from "./ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Users, Plus, Trash2, Shuffle, X, Loader2, UserPlus, Download, Upload, FileText, Share2 } from "lucide-react";
 import { toast } from "sonner";
@@ -130,7 +131,17 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-8 text-muted-foreground"><Loader2 className="size-5 animate-spin" /></div>
+        <div className="space-y-3 py-1">
+          <Skeleton className="h-3 w-24" />
+          {[0, 1, 2].map(i => (
+            <div key={i} className="flex items-center gap-2">
+              <Skeleton className="h-8 flex-1" />
+              <Skeleton className="h-8 w-32" />
+              <Skeleton className="h-8 w-16" />
+            </div>
+          ))}
+          <Skeleton className="h-8 w-40" />
+        </div>
       ) : (
         <>
           {/* Reviewers */}

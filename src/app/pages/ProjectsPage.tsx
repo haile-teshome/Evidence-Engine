@@ -16,6 +16,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
+import { Skeleton } from "../components/ui/skeleton";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Textarea } from "../components/ui/textarea";
 import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy, Upload } from "lucide-react";
@@ -172,7 +173,19 @@ export function ProjectsPage() {
 
       <Card className="p-4">
         <div className="font-medium mb-3">All projects ({projects.length})</div>
-        {loading && <div className="text-sm text-muted-foreground">Loading…</div>}
+        {loading && (
+          <div className="space-y-2">
+            {[0, 1, 2].map(i => (
+              <div key={i} className="p-3 border rounded flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1 space-y-2">
+                  <Skeleton className="h-4 w-1/2" />
+                  <Skeleton className="h-3 w-2/3" />
+                </div>
+                <Skeleton className="h-7 w-16 shrink-0" />
+              </div>
+            ))}
+          </div>
+        )}
         {!loading && projects.length === 0 && (
           <Alert>
             <AlertDescription>
