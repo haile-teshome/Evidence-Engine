@@ -14,6 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/
 import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { ExtractionWorkspace } from "../components/ExtractionWorkspace";
 import ExcelJS from "exceljs";
 
 type Format = "CSV Export" | "JSON Export" | "Excel Export";
@@ -26,11 +27,17 @@ export function ExtractionPage() {
   const task = s.tasks["table-extract"];
   const running = task?.status === "running";
 
-  if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first to unlock Table Extraction.</AlertDescription></Alert>;
+  // In a project, dual data extraction is available regardless of the
+  // single-user table-extraction state below.
+  const projectBlock = s.currentProjectId
+    ? <ExtractionWorkspace projectId={s.currentProjectId} role={s.currentProjectRole} />
+    : null;
+
+  if (!s.results) return <div className="space-y-3">{projectBlock}{!projectBlock && <Alert><AlertDescription>Complete Abstract Screening first to unlock Table Extraction.</AlertDescription></Alert>}</div>;
 
   // Honour reviewer overrides from abstract screening.
   const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
-  if (passed.length === 0) return <Alert><AlertDescription>No included papers available for extraction.</AlertDescription></Alert>;
+  if (passed.length === 0) return <div className="space-y-3">{projectBlock}{!projectBlock && <Alert><AlertDescription>No included papers available for extraction.</AlertDescription></Alert>}</div>;
 
   async function extract() {
     const { abort } = s.startTask("table-extract", [{ id: "tbl", label: "Extracting tables", status: "running" }]);
@@ -106,6 +113,7 @@ export function ExtractionPage() {
 
   return (
     <div className="space-y-3">
+      {projectBlock}
       {/* ── Single compact header: counts + format + run + export ───────────── */}
       <Card className="p-3">
         <div className="flex items-end gap-3 flex-wrap">

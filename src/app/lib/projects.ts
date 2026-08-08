@@ -243,6 +243,49 @@ export async function setCalibration(
   return r.calibration || [];
 }
 
+// ---- Data extraction (dual, independent) --------------------------------
+
+export type ExtractionFieldType = "text" | "number" | "category" | "date";
+export type ExtractionField = { id: string; label: string; group: string; type: ExtractionFieldType; options: string[] };
+export type ExtractionTemplate = { fields: ExtractionField[]; is_default: boolean };
+export type Extraction = {
+  paper_id: string; reviewer_user_id: string; values: Record<string, any>;
+  submitted: boolean; ai_prefilled?: boolean; extracted_at: string; created_at?: string;
+};
+export type ExtractionFinal = { paper_id: string; values: Record<string, any>; reconciled_by: string; rationale: string; reconciled_at: string };
+export type ExtractionConflict = { paper_id: string; fields: string[]; extractions: Extraction[] };
+
+export async function getExtractionTemplate(pid: string): Promise<ExtractionTemplate> {
+  const r = await apiFetch(`/projects/${pid}/extraction-template`);
+  return { fields: r.fields || [], is_default: !!r.is_default };
+}
+export async function setExtractionTemplate(pid: string, fields: ExtractionField[]): Promise<ExtractionField[]> {
+  const r = await apiFetch(`/projects/${pid}/extraction-template`, { method: "PUT", body: JSON.stringify({ fields }) });
+  return r.fields || [];
+}
+export async function listExtractions(pid: string): Promise<{ extractions: Extraction[]; finals: ExtractionFinal[]; blinded?: boolean }> {
+  const r = await apiFetch(`/projects/${pid}/extractions`);
+  return { extractions: r.extractions || [], finals: r.finals || [], blinded: !!r.blinded };
+}
+export async function submitExtraction(
+  pid: string,
+  input: { paper_id: string; values: Record<string, any>; submitted?: boolean; ai_prefilled?: boolean },
+): Promise<Extraction> {
+  const r = await apiFetch(`/projects/${pid}/extractions`, { method: "POST", body: JSON.stringify(input) });
+  return r.extraction;
+}
+export async function listExtractionConflicts(pid: string): Promise<ExtractionConflict[]> {
+  const r = await apiFetch(`/projects/${pid}/extraction-conflicts`);
+  return r.conflicts || [];
+}
+export async function reconcileExtraction(
+  pid: string,
+  input: { paper_id: string; values: Record<string, any>; rationale?: string },
+): Promise<ExtractionFinal> {
+  const r = await apiFetch(`/projects/${pid}/extraction-reconciliations`, { method: "POST", body: JSON.stringify(input) });
+  return r.final;
+}
+
 // ---- Decisions, conflicts, adjudications --------------------------------
 
 export async function listDecisions(

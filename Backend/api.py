@@ -2806,6 +2806,68 @@ def _retrieve_relevant_chunks(text: str, query: str, top_k: int = 6, chunk_chars
     return "\n\n---\n\n".join(selected)
 
 
+class ExtractFieldsRequest(BaseModel):
+    text: str
+    fields: List[Dict[str, Any]]           # [{id,label,type,options}]
+    title: Optional[str] = None
+    model: Optional[str] = None
+
+
+@app.post("/api/extract/fields")
+def extract_fields(req: ExtractFieldsRequest):
+    """Pre-fill a structured extraction template from a paper's full text in a
+    single model call. Returns {values: {field_id: value}}. Values are a first
+    draft only; the reviewer confirms or corrects every one. Missing or
+    not-reported fields come back as an empty string."""
+    from langchain_core.messages import HumanMessage
+
+    text = (req.text or "").strip()
+    fields = [f for f in (req.fields or []) if f.get("id")]
+    if not text or not fields:
+        return {"values": {}}
+
+    text_for_llm = text[:30000]
+    field_lines = []
+    for f in fields:
+        fid = f.get("id")
+        label = f.get("label") or fid
+        ftype = f.get("type") or "text"
+        opts = f.get("options") or []
+        hint = f" (one of: {', '.join(opts)})" if ftype == "category" and opts else ""
+        if ftype == "number":
+            hint = " (a number only)"
+        field_lines.append(f'  "{fid}": <{label}{hint}>')
+    fields_block = ",\n".join(field_lines)
+
+    prompt = f"""You are extracting structured data from a scientific paper for a systematic
+review. Use ONLY the paper text below; do not use outside knowledge. If a field
+is not reported in the paper, return an empty string "" for it. Do not guess.
+
+{('PAPER TITLE: ' + req.title) if req.title else ''}
+
+PAPER TEXT:
+{text_for_llm}
+
+Return ONLY a JSON object with exactly these keys and nothing else:
+{{
+{fields_block}
+}}"""
+
+    model_name = resolve_for_thinking(req.model)
+    model = AIService.get_model(model_name)
+    values: Dict[str, Any] = {}
+    if model:
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            data = AIService._extract_json(r.content) or {}
+            if isinstance(data, dict):
+                allowed = {f["id"] for f in fields}
+                values = {k: ("" if v is None else v) for k, v in data.items() if k in allowed}
+        except Exception as e:
+            print(f"[extract_fields] LLM call failed: {e}")
+    return {"values": values}
+
+
 @app.post("/api/extract/text")
 def extract_text(req: ExtractTextRequest):
     """LLM-driven extraction that answers `query` against the supplied full
