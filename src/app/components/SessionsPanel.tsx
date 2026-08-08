@@ -296,6 +296,7 @@ export function SessionsPanel() {
     s.searchLog,
     s.protocol,
     s.protocolDeviations,
+    s.prismaChecklist,
     // Search-planning outputs (per-database queries + optimization runs).
     s.perDbQueries,
     s.unifiedSearchQuery,

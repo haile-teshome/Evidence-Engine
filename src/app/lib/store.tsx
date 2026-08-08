@@ -175,6 +175,7 @@ type Ctx = {
   searchLog: SearchLogEntry[]; setSearchLog: React.Dispatch<React.SetStateAction<SearchLogEntry[]>>;
   protocol: ReviewProtocol | null; setProtocol: (v: ReviewProtocol | null) => void;
   protocolDeviations: ProtocolDeviation[]; setProtocolDeviations: React.Dispatch<React.SetStateAction<ProtocolDeviation[]>>;
+  prismaChecklist: Record<string, { status: string; note: string }>; setPrismaChecklist: React.Dispatch<React.SetStateAction<Record<string, { status: string; note: string }>>>;
 
   // Relevance reranking: LEADS-scored papers from the home-analysis pipeline.
   // Threshold is user-tunable in the sidebar; rerankResults holds the full
@@ -332,6 +333,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [searchLog, setSearchLog] = useState<SearchLogEntry[]>([]);
   const [protocol, setProtocol] = useState<ReviewProtocol | null>(null);
   const [protocolDeviations, setProtocolDeviations] = useState<ProtocolDeviation[]>([]);
+  const [prismaChecklist, setPrismaChecklist] = useState<Record<string, { status: string; note: string }>>({});
 
   const [abstractOverrides, setAbstractOverrides] = useState<Record<string, "INCLUDE" | "EXCLUDE">>({});
   const setAbstractOverride = (paperId: string, decision: "INCLUDE" | "EXCLUDE") => {
@@ -483,7 +485,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     excludedByQuality: Array.from(excludedByQuality),
     qualityOverrides,
     gradeOutcomes,
-    searchLog, protocol, protocolDeviations,
+    searchLog, protocol, protocolDeviations, prismaChecklist,
     abstractOverrides,
     fullTextOverrides,
     rerankThreshold, rerankResults,
@@ -542,6 +544,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setSearchLog(prev => pick(d.searchLog, prev, []) ?? []);
     if (authoritative) setProtocol(d.protocol ?? null); else if (d.protocol) setProtocol(d.protocol);
     setProtocolDeviations(prev => pick(d.protocolDeviations, prev, []) ?? []);
+    setPrismaChecklist(prev => pick(d.prismaChecklist, prev, {}) ?? {});
     setAbstractOverrides(d.abstractOverrides && typeof d.abstractOverrides === "object" ? d.abstractOverrides : {});
     setFullTextOverrides(d.fullTextOverrides && typeof d.fullTextOverrides === "object" ? d.fullTextOverrides : {});
     if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
@@ -607,7 +610,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
       sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
-      searchLog, protocol, protocolDeviations, abstractOverrides,
+      searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
       snowballResults, snowballScreened, extractedPapers, prisma,
       simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
@@ -649,7 +652,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setSimulation(null); setDbTestResults(null); setAgenticTrace(null); setAgenticSummary(null);
     setRawPapers(null); setUniquePapers(null); setDuplicatesCount(0);
     setQualityReports(null); setQualityArchive([]); setExcludedByQuality(new Set()); setQualityOverrides([]); setGradeOutcomes([]);
-    setSearchLog([]); setProtocol(null); setProtocolDeviations([]);
+    setSearchLog([]); setProtocol(null); setProtocolDeviations([]); setPrismaChecklist({});
     setAbstractOverrides({}); setFullTextOverrides({});
     setRerankThreshold(-0.2); setRerankResults(null);
     setMetaOutcome(""); setMetaMeasure(""); setMetaTau2Method("DL");
@@ -676,6 +679,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
     gradeOutcomes, setGradeOutcomes,
     searchLog, setSearchLog, protocol, setProtocol, protocolDeviations, setProtocolDeviations,
+    prismaChecklist, setPrismaChecklist,
     abstractOverrides, setAbstractOverride, clearAbstractOverride, setAbstractOverrides,
     fullTextOverrides, setFullTextOverride, clearFullTextOverride, setFullTextOverrides,
     rerankThreshold, setRerankThreshold, rerankResults, setRerankResults,

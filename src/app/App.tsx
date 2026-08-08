@@ -1,6 +1,7 @@
 import { Component, ReactNode, useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { PrismaFlow } from "./components/PrismaFlow";
+import { PrismaChecklist } from "./components/PrismaChecklist";
 import { InterraterReliability } from "./components/InterraterReliability";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { bucketAbstractExclusions, bucketFullTextExclusions } from "./lib/exclusionBucketing";
@@ -192,6 +193,7 @@ function Shell() {
                   <TabsTrigger value="irr" disabled={!s.currentProjectId}>
                     Inter-rater reliability
                   </TabsTrigger>
+                  <TabsTrigger value="checklist">PRISMA checklist</TabsTrigger>
                 </TabsList>
                 <TabsContent value="prisma">
                   <PrismaFlow
@@ -246,6 +248,9 @@ function Shell() {
                       Inter-rater reliability is only meaningful inside a multi-reviewer project. Open a project from the <strong>Projects</strong> tab to populate this view.
                     </div>
                   )}
+                </TabsContent>
+                <TabsContent value="checklist">
+                  <PrismaChecklist />
                 </TabsContent>
               </Tabs>
             );
