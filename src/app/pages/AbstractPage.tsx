@@ -173,6 +173,22 @@ export function AbstractPage() {
       const totalExcluded = Object.values(reasons).reduce((a, b) => a + b, 0);
       const sourceCounts: Record<string, number> = {};
       (s.rawPapers || []).forEach(p => { sourceCounts[p.source] = (sourceCounts[p.source] || 0) + 1; });
+      // PRISMA-S: record this search run (per-database query + records retrieved),
+      // deduped so re-screening the same corpus does not add a duplicate entry.
+      const logRows = Object.keys(sourceCounts).map(src => ({
+        source: src,
+        query: s.perDbQueries[src] || s.unifiedSearchQuery || s.query || "",
+        count: sourceCounts[src],
+      }));
+      if (logRows.length) {
+        const sig = logRows.map(r => `${r.source}|${r.query}|${r.count}`).sort().join("~");
+        s.setSearchLog(prev => {
+          const last = prev[prev.length - 1];
+          const lastSig = last ? last.rows.map(r => `${r.source}|${r.query}|${r.count}`).sort().join("~") : "";
+          if (sig === lastSig) return prev;
+          return [...prev, { id: Date.now().toString(36), ranAt: new Date().toISOString(), rows: logRows }];
+        });
+      }
       s.setPrisma(p => ({
         ...p,
         identified: s.rawPapers?.length || queue.length,

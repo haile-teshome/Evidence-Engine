@@ -146,6 +146,15 @@ export type GradeOutcome = {
   comment?: string;        // plain-language finding
 };
 
+// PRISMA-S search audit log: one timestamped record per search run, with the
+// exact query and record count per database.
+export type SearchLogRow = { source: string; query: string; count: number };
+export type SearchLogEntry = { id: string; ranAt: string; label?: string; rows: SearchLogRow[] };
+
+// Register-first protocol + deviations from it (transparent reporting).
+export type ReviewProtocol = { text: string; generatedAt: string; registered?: boolean; registrationId?: string };
+export type ProtocolDeviation = { id: string; date: string; section: string; change: string; reason: string };
+
 export const GRADE_DOWNGRADE_DOMAINS = ["risk_of_bias", "inconsistency", "indirectness", "imprecision", "publication_bias"] as const;
 export const GRADE_UPGRADE_FACTORS = ["large_effect", "dose_response", "plausible_confounding"] as const;
 const GRADE_ORDER = ["Very low", "Low", "Moderate", "High"];
@@ -331,6 +340,15 @@ export const AIService = {
   // the client-side filename heuristic). Missing fields come back empty.
   async extractPdfMetadata(text: string, filename = "", signal?: AbortSignal): Promise<{ title: string; authors: string; year: number | null; abstract: string; doi: string }> {
     return postJSON("/pdf/metadata", { text, filename, model: apiConfig.model }, signal);
+  },
+
+  // Draft a register-first PROSPERO-style protocol from the PICO + criteria.
+  async generateProtocol(
+    input: { title?: string; pico?: any; inclusion?: string[]; exclusion?: string[]; sources?: string[] },
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const r = await postJSON<{ protocol: string }>("/writing/protocol", { ...input, model: apiConfig.model }, signal);
+    return r.protocol || "";
   },
 
   // Pre-fill a structured extraction template from a paper's full text in one

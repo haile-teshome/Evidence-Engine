@@ -4351,3 +4351,59 @@ def writing_ask(req: AskRequest):
     except Exception as e:
         print(f"[writing_ask] {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ProtocolRequest(BaseModel):
+    title: str = ""
+    pico: Optional[Dict[str, Any]] = None
+    inclusion: List[str] = []
+    exclusion: List[str] = []
+    sources: List[str] = []
+    model: str = ""
+
+
+@app.post("/api/writing/protocol")
+def writing_protocol(req: ProtocolRequest):
+    """Draft a register-first systematic-review protocol (PROSPERO-style
+    sections) from the PICO and eligibility criteria. Original methods prose;
+    the reviewer edits it before registering. Placeholders are labelled where a
+    detail was not supplied; no results are invented."""
+    from langchain_core.messages import HumanMessage
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if not model:
+        raise HTTPException(status_code=503, detail="No model available")
+    pico = req.pico or {}
+    prompt = f"""You are drafting a systematic-review PROTOCOL to be registered BEFORE the
+review begins. Use the details supplied; where a detail is missing, write a
+clearly-labelled placeholder the author can complete (e.g. "[to be specified]").
+Do not invent results or findings. Write clear methods prose using Markdown
+headings, covering these sections in order:
+
+1. Title
+2. Background and rationale
+3. Review question and objectives
+4. Eligibility criteria (Population, Intervention, Comparator, Outcomes, Study designs)
+5. Information sources and search strategy
+6. Study selection process (screening and dual review)
+7. Data extraction
+8. Risk-of-bias assessment
+9. Data synthesis and certainty of evidence (GRADE)
+10. Timeline and planned amendments
+
+DETAILS
+Title: {req.title or "(untitled review)"}
+Population: {pico.get('population', '')}
+Intervention: {pico.get('intervention', '')}
+Comparator: {pico.get('comparator', '')}
+Outcome: {pico.get('outcome', '')}
+Inclusion criteria: {'; '.join(req.inclusion) or '(none supplied)'}
+Exclusion criteria: {'; '.join(req.exclusion) or '(none supplied)'}
+Information sources: {', '.join(req.sources) or '(open-access databases)'}
+
+Return ONLY the protocol text in Markdown."""
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        return {"protocol": (r.content or "").strip()}
+    except Exception as e:
+        print(f"[writing_protocol] {e}")
+        raise HTTPException(status_code=500, detail=str(e))

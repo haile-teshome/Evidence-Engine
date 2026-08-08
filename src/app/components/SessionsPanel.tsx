@@ -293,6 +293,9 @@ export function SessionsPanel() {
     s.extractedPapers,
     s.textExtractions,
     s.gradeOutcomes,
+    s.searchLog,
+    s.protocol,
+    s.protocolDeviations,
     // Search-planning outputs (per-database queries + optimization runs).
     s.perDbQueries,
     s.unifiedSearchQuery,
