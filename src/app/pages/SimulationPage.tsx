@@ -11,6 +11,7 @@ import { ChevronDown, Bot, Play, X, History, GitCompare, Trash2, FlaskConical, W
 import { toast } from "sonner";
 import { QueryDiff } from "../components/QueryDiff";
 import { AnalysisProgress, Stage as ProgStage } from "../components/AnalysisProgress";
+import { SearchLog } from "../components/SearchLog";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -672,6 +673,8 @@ export function SimulationPage() {
           </CollapsibleContent>
         </Collapsible>
       )}
+
+      <SearchLog />
     </div>
   );
 }

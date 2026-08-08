@@ -17,6 +17,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../componen
 import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2 } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
+import { ProtocolPanel } from "../components/ProtocolPanel";
 
 function ReferencesBySource({ refs, idPrefix }: { refs: { title: string; url: string; source: string; id: string }[]; idPrefix?: string }) {
   // The backend re-orders papers so that papers from the same source are
@@ -906,6 +907,7 @@ export function HomePage() {
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
+      {s.history.length > 0 && <ProtocolPanel />}
       {s.history.length === 0 && !analyzing && (
         <Alert><AlertDescription>👋 Welcome! Describe your research goal below to generate a strategy and see initial findings.</AlertDescription></Alert>
       )}
