@@ -286,6 +286,79 @@ export async function reconcileExtraction(
   return r.final;
 }
 
+// ---- Portable bundles (federation + reproducibility) --------------------
+
+export type ProjectBundle = {
+  bundle_version: number; kind: string; generated_at: string;
+  project: Project; members?: ProjectMember[]; participants: Participant[];
+  papers: ProjectPaper[]; tags: any; extraction_template: ExtractionField[];
+  assignments: any[]; decisions: any[]; adjudications: any[];
+  extractions: Extraction[]; extraction_finals: ExtractionFinal[]; rob_assessments: any[];
+};
+
+export async function exportProjectBundle(pid: string): Promise<ProjectBundle> {
+  return apiFetch(`/projects/${pid}/export`);
+}
+export async function importIntoProject(pid: string, bundle: ProjectBundle): Promise<{ merged: Record<string, number> }> {
+  return apiFetch(`/projects/${pid}/import`, { method: "POST", body: JSON.stringify({ bundle }) });
+}
+export async function importNewProject(bundle: ProjectBundle): Promise<Project> {
+  const r = await apiFetch(`/projects/import`, { method: "POST", body: JSON.stringify({ bundle }) });
+  return r.project;
+}
+
+/** Human-readable reproducibility record (Markdown) built from a bundle, so a
+ *  reviewer or journal can reconstruct exactly what was done. */
+export function reproReport(b: ProjectBundle): string {
+  const p = b.project || ({} as Project);
+  const pico = (p.pico || {}) as Pico;
+  const tpl = b.extraction_template || [];
+  const decByPaper = new Map<string, any[]>();
+  for (const d of b.decisions || []) {
+    if (!decByPaper.has(d.paper_id)) decByPaper.set(d.paper_id, []);
+    decByPaper.get(d.paper_id)!.push(d);
+  }
+  const adjByPaper = new Map((b.adjudications || []).map(a => [a.paper_id, a]));
+  const finalByPaper = new Map((b.extraction_finals || []).map(f => [f.paper_id, f]));
+  const L: string[] = [];
+  L.push(`# ${p.name || "Systematic review"}: reproducibility record`, "");
+  L.push(`Generated ${b.generated_at}. Screening mode: ${p.screening_mode}. Bundle version ${b.bundle_version}.`, "");
+  L.push("## Question (PICO)");
+  L.push(`- Population: ${pico.population || "n/a"}`);
+  L.push(`- Intervention: ${pico.intervention || "n/a"}`);
+  L.push(`- Comparator: ${pico.comparator || "n/a"}`);
+  L.push(`- Outcome: ${pico.outcome || "n/a"}`, "");
+  L.push("## Eligibility criteria");
+  (p.inclusion || []).forEach(c => L.push(`- Include: ${c}`));
+  (p.exclusion || []).forEach(c => L.push(`- Exclude: ${c}`));
+  L.push("");
+  L.push("## Reviewers");
+  (b.participants || []).forEach(r => L.push(`- ${r.name} (${r.role}, weight ${r.weight})`));
+  L.push("");
+  L.push(`## Records (${(b.papers || []).length})`, "");
+  for (const paper of b.papers || []) {
+    L.push(`### ${paper.title}`);
+    if (paper.doi) L.push(`DOI: ${paper.doi}`);
+    else if (paper.url) L.push(paper.url);
+    const decs = decByPaper.get(paper.paper_id) || [];
+    for (const d of decs) {
+      L.push(`- ${d.stage} decision: ${d.decision} by ${d.reviewer_user_id} at ${d.decided_at}${d.reason ? `; reason: ${d.reason}` : ""}${d.is_override ? " (override)" : ""}`);
+    }
+    const adj = adjByPaper.get(paper.paper_id);
+    if (adj) L.push(`- adjudicated: ${adj.final_decision} by ${adj.adjudicator_user_id} at ${adj.decided_at}${adj.rationale ? `; rationale: ${adj.rationale}` : ""}`);
+    const fin = finalByPaper.get(paper.paper_id);
+    if (fin && Object.keys(fin.values || {}).length) {
+      L.push(`- extracted (reconciled):`);
+      for (const f of tpl) {
+        const v = (fin.values || {})[f.id];
+        if (v !== undefined && v !== "") L.push(`  - ${f.label}: ${v}`);
+      }
+    }
+    L.push("");
+  }
+  return L.join("\n");
+}
+
 // ---- Decisions, conflicts, adjudications --------------------------------
 
 export async function listDecisions(

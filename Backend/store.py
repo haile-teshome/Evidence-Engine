@@ -1141,3 +1141,171 @@ def post_extraction_reconciliation(pid: str, body: ExtractionReconcile, request:
     }
     kv_set(key, rec)
     return {"final": rec}
+
+
+# ---------------------------------------------------------------------------
+# Portable project bundles (federation + reproducibility)
+# ---------------------------------------------------------------------------
+# One versioned JSON serialisation of a whole project. It powers three things:
+#   * Federation: the author exports a bundle, a reviewer imports it as a new
+#     local project, works on it, exports their copy, and the author merges the
+#     returned contributions back in.
+#   * Reproducibility: the same export is a complete, timestamped record of the
+#     review (search, criteria, papers, every decision + reason + who + when,
+#     adjudications, extractions) that a journal or auditor can reconstruct.
+# The bundle is plain JSON; the author owns the file. There is no central server.
+
+BUNDLE_VERSION = 1
+BUNDLE_KIND = "evidence-engine-project"
+
+
+def _gather_project(pid: str) -> dict:
+    project = kv_get(f"project:{pid}")
+    if not project:
+        raise HTTPException(status_code=404, detail="Not found")
+    tpl = kv_get(f"extraction_template:{pid}")
+    return {
+        "bundle_version": BUNDLE_VERSION,
+        "kind": BUNDLE_KIND,
+        "generated_at": _now(),
+        "project": project,
+        "members": kv_get_by_prefix(f"project_member:{pid}:"),
+        "participants": kv_get_by_prefix(f"project_participant:{pid}:"),
+        "papers": kv_get(f"project_papers:{pid}") or [],
+        "tags": kv_get(f"project_tags:{pid}") or {},
+        "extraction_template": (tpl or {}).get("fields") or DEFAULT_EXTRACTION_FIELDS,
+        "assignments": kv_get_by_prefix(f"paper_assignment:{pid}:"),
+        "decisions": kv_get_by_prefix(f"decision:{pid}:"),
+        "adjudications": kv_get_by_prefix(f"adjudication:{pid}:"),
+        "extractions": kv_get_by_prefix(f"extraction:{pid}:"),
+        "extraction_finals": kv_get_by_prefix(f"extraction_final:{pid}:"),
+        "rob_assessments": kv_get_by_prefix(f"rob_assessment:{pid}:"),
+    }
+
+
+@router.get("/projects/{pid}/export")
+def export_project(pid: str, request: Request):
+    """Full project bundle: the federation hand-off file and, equally, the
+    reproducibility record. Any member may export."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ROLES)
+    return _gather_project(pid)
+
+
+class BundleImport(BaseModel):
+    bundle: Optional[dict] = None
+
+
+def _write_contributions(pid: str, b: dict) -> dict:
+    """Upsert reviewer contributions and shared structures from a bundle into
+    project `pid`, keyed by their natural (paper, reviewer, stage) keys so the
+    merge is idempotent and never clobbers unrelated records."""
+    counts = {k: 0 for k in (
+        "decisions", "adjudications", "extractions", "extraction_finals",
+        "rob_assessments", "participants", "assignments", "papers",
+    )}
+    for d in b.get("decisions") or []:
+        if not d.get("paper_id"):
+            continue
+        stage = d.get("stage") or "abstract"
+        ruid = d.get("reviewer_user_id") or "imported"
+        kv_set(f"decision:{pid}:{stage}:{d['paper_id']}:{ruid}", {**d, "stage": stage, "reviewer_user_id": ruid})
+        counts["decisions"] += 1
+    for a in b.get("adjudications") or []:
+        if not a.get("paper_id"):
+            continue
+        stage = a.get("stage") or "abstract"
+        kv_set(f"adjudication:{pid}:{stage}:{a['paper_id']}", {**a, "stage": stage})
+        counts["adjudications"] += 1
+    for e in b.get("extractions") or []:
+        if not e.get("paper_id"):
+            continue
+        ruid = e.get("reviewer_user_id") or "imported"
+        kv_set(f"extraction:{pid}:{e['paper_id']}:{ruid}", {**e, "reviewer_user_id": ruid})
+        counts["extractions"] += 1
+    for f in b.get("extraction_finals") or []:
+        if not f.get("paper_id"):
+            continue
+        kv_set(f"extraction_final:{pid}:{f['paper_id']}", f)
+        counts["extraction_finals"] += 1
+    for r in b.get("rob_assessments") or []:
+        if not r.get("paper_id"):
+            continue
+        ruid = r.get("reviewer_user_id") or "imported"
+        kv_set(f"rob_assessment:{pid}:{r['paper_id']}:{ruid}", {**r, "reviewer_user_id": ruid})
+        counts["rob_assessments"] += 1
+    for p in b.get("participants") or []:
+        if not p.get("id"):
+            continue
+        kv_set(f"project_participant:{pid}:{p['id']}", {**p, "project_id": pid})
+        counts["participants"] += 1
+    for a in b.get("assignments") or []:
+        if not (a.get("paper_id") and a.get("user_id")):
+            continue
+        kv_set(f"paper_assignment:{pid}:{a['paper_id']}:{a['user_id']}", {**a, "project_id": pid})
+        counts["assignments"] += 1
+    # Union new papers by paper_id; never drop existing ones.
+    papers = kv_get(f"project_papers:{pid}") or []
+    seen = {p.get("paper_id") for p in papers}
+    for p in b.get("papers") or []:
+        if p.get("paper_id") and p["paper_id"] not in seen:
+            papers.append(p)
+            seen.add(p["paper_id"])
+            counts["papers"] += 1
+    kv_set(f"project_papers:{pid}", papers)
+    return counts
+
+
+@router.post("/projects/{pid}/import")
+def import_into_project(pid: str, body: BundleImport, request: Request):
+    """Merge a returned bundle's reviewer contributions into an existing
+    project. The author's project record and template are left as-is."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    if not kv_get(f"project:{pid}"):
+        raise HTTPException(status_code=404, detail="Not found")
+    b = body.bundle or {}
+    if b.get("kind") != BUNDLE_KIND:
+        raise HTTPException(status_code=400, detail="Not an Evidence Engine project bundle")
+    counts = _write_contributions(pid, b)
+    # Adopt the template only if this project has none yet.
+    if not kv_get(f"extraction_template:{pid}") and b.get("extraction_template"):
+        kv_set(f"extraction_template:{pid}", {"fields": b["extraction_template"]})
+    return {"merged": counts}
+
+
+@router.post("/projects/import")
+def import_new_project(body: BundleImport, request: Request):
+    """Create a NEW local project from a bundle (a reviewer receiving the
+    author's hand-off, or restoring a reproducibility export). The importer
+    becomes the lead of their local copy."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    b = body.bundle or {}
+    if b.get("kind") != BUNDLE_KIND:
+        raise HTTPException(status_code=400, detail="Not an Evidence Engine project bundle")
+    src = b.get("project") or {}
+    now = _now()
+    pid = _new_id("prj")
+    project = {
+        "id": pid,
+        "name": (src.get("name") or "Imported project"),
+        "owner_user_id": uid,
+        "pico": src.get("pico") or {"population": "", "intervention": "", "comparator": "", "outcome": ""},
+        "inclusion": src.get("inclusion") or [],
+        "exclusion": src.get("exclusion") or [],
+        "screening_mode": src.get("screening_mode") or "dual_blinded",
+        "visibility": "invite",
+        "locked_at": None,
+        "created_at": now,
+        "updated_at": now,
+        "imported_from": src.get("id"),
+    }
+    kv_set(f"project:{pid}", project)
+    kv_set(f"project_member:{pid}:{uid}", {"project_id": pid, "user_id": uid, "role": "lead", "joined_at": now})
+    kv_set(f"user_project:{uid}:{pid}", {"project_id": pid, "joined_at": now, "role": "lead"})
+    if b.get("tags"):
+        kv_set(f"project_tags:{pid}", b["tags"])
+    if b.get("extraction_template"):
+        kv_set(f"extraction_template:{pid}", {"fields": b["extraction_template"]})
+    _write_contributions(pid, b)
+    return {"project": project}
