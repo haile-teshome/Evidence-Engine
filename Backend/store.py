@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -946,3 +947,197 @@ def get_rob_conflicts(pid: str, request: Request):
         if disagreements:
             conflicts.append({"paper_id": paper_id, "domains": disagreements, "assessments": assessments})
     return {"conflicts": conflicts}
+
+
+# ---------------------------------------------------------------------------
+# Dual independent data extraction
+# ---------------------------------------------------------------------------
+# Two reviewers extract the same structured fields for each included study,
+# independently; disagreements are reconciled into one agreed value per field.
+# Mirrors the screening decisions/conflicts/adjudication flow, but keyed by
+# (paper, field) rather than a single include/exclude decision. Key layout:
+#   extraction_template:{pid}            -> {fields:[{id,label,group,type,options}]}
+#   extraction:{pid}:{paper}:{uid}       -> one reviewer's values for a paper
+#   extraction_final:{pid}:{paper}       -> the reconciled (agreed) values
+
+DEFAULT_EXTRACTION_FIELDS = [
+    {"id": "study_design", "label": "Study design", "group": "Study", "type": "category",
+     "options": ["RCT", "Cohort", "Case-control", "Cross-sectional", "Case series", "Other"]},
+    {"id": "country", "label": "Country / setting", "group": "Study", "type": "text", "options": []},
+    {"id": "year", "label": "Publication year", "group": "Study", "type": "number", "options": []},
+    {"id": "funding", "label": "Funding source", "group": "Study", "type": "text", "options": []},
+    {"id": "n_total", "label": "Total sample size", "group": "Population", "type": "number", "options": []},
+    {"id": "population", "label": "Population / condition", "group": "Population", "type": "text", "options": []},
+    {"id": "intervention", "label": "Intervention", "group": "Intervention", "type": "text", "options": []},
+    {"id": "comparator", "label": "Comparator", "group": "Intervention", "type": "text", "options": []},
+    {"id": "outcome_name", "label": "Primary outcome", "group": "Outcomes", "type": "text", "options": []},
+    {"id": "effect_size", "label": "Effect estimate", "group": "Outcomes", "type": "text", "options": []},
+    {"id": "ci", "label": "95% CI", "group": "Outcomes", "type": "text", "options": []},
+    {"id": "timepoint", "label": "Timepoint", "group": "Outcomes", "type": "text", "options": []},
+]
+
+
+def _extraction_template(pid: str) -> dict:
+    tpl = kv_get(f"extraction_template:{pid}")
+    if not tpl or not tpl.get("fields"):
+        return {"fields": DEFAULT_EXTRACTION_FIELDS, "is_default": True}
+    return {"fields": tpl["fields"], "is_default": False}
+
+
+@router.get("/projects/{pid}/extraction-template")
+def get_extraction_template(pid: str, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ROLES)
+    return _extraction_template(pid)
+
+
+class ExtractionTemplatePut(BaseModel):
+    fields: List[dict] = []
+
+
+@router.put("/projects/{pid}/extraction-template")
+def put_extraction_template(pid: str, body: ExtractionTemplatePut, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    fields = []
+    for f in (body.fields or []):
+        fid = (f.get("id") or "").strip() or _new_id("fld")
+        ftype = f.get("type") if f.get("type") in ("text", "number", "category", "date") else "text"
+        fields.append({
+            "id": fid,
+            "label": (f.get("label") or fid).strip(),
+            "group": (f.get("group") or "General").strip(),
+            "type": ftype,
+            "options": [str(o).strip() for o in (f.get("options") or []) if str(o).strip()],
+        })
+    kv_set(f"extraction_template:{pid}", {"fields": fields})
+    return {"fields": fields, "is_default": False}
+
+
+def _summarise_extraction(e: dict) -> dict:
+    return {
+        "paper_id": e.get("paper_id"),
+        "reviewer_user_id": e.get("reviewer_user_id"),
+        "submitted": e.get("submitted"),
+        "extracted_at": e.get("extracted_at"),
+    }
+
+
+@router.get("/projects/{pid}/extractions")
+def get_extractions(pid: str, request: Request):
+    """All per-reviewer extractions plus reconciled finals. In dual_blinded mode
+    a reviewer only sees others' values for a paper once they have submitted
+    their own, mirroring the screening blinding rule."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    role = _require_role(pid, uid, ROLES)
+    project = kv_get(f"project:{pid}")
+    if not project:
+        raise HTTPException(status_code=404, detail="Not found")
+    allx = kv_get_by_prefix(f"extraction:{pid}:")
+    finals = kv_get_by_prefix(f"extraction_final:{pid}:")
+    is_blinded = project.get("screening_mode") == "dual_blinded" and role == "reviewer"
+    if not is_blinded:
+        return {"extractions": allx, "finals": finals}
+    my_papers = {e["paper_id"] for e in allx if e.get("reviewer_user_id") == uid and e.get("submitted")}
+    exposed = [
+        e if (e.get("reviewer_user_id") == uid or e["paper_id"] in my_papers) else _summarise_extraction(e)
+        for e in allx
+    ]
+    exposed_finals = [f for f in finals if f["paper_id"] in my_papers]
+    return {"extractions": exposed, "finals": exposed_finals, "blinded": True}
+
+
+class ExtractionCreate(BaseModel):
+    paper_id: Optional[str] = None
+    values: Optional[dict] = None
+    submitted: Optional[bool] = True
+    ai_prefilled: Optional[bool] = False
+
+
+@router.post("/projects/{pid}/extractions")
+def post_extraction(pid: str, body: ExtractionCreate, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead", "reviewer", "adjudicator"])
+    project = kv_get(f"project:{pid}")
+    if not project:
+        raise HTTPException(status_code=404, detail="Not found")
+    if project.get("locked_at"):
+        raise HTTPException(status_code=409, detail="Project is locked for analysis")
+    if not body.paper_id:
+        raise HTTPException(status_code=400, detail="paper_id required")
+    key = f"extraction:{pid}:{body.paper_id}:{uid}"
+    existing = kv_get(key)
+    now = _now()
+    rec = {
+        "paper_id": body.paper_id,
+        "reviewer_user_id": uid,
+        "values": body.values or {},
+        "submitted": bool(body.submitted),
+        "ai_prefilled": bool(body.ai_prefilled),
+        "extracted_at": now,
+        "created_at": (existing or {}).get("created_at") or now,
+    }
+    kv_set(key, rec)
+    return {"extraction": rec}
+
+
+def _norm_value(v: Any) -> str:
+    if v is None:
+        return ""
+    return re.sub(r"\s+", " ", str(v)).strip().lower()
+
+
+@router.get("/projects/{pid}/extraction-conflicts")
+def get_extraction_conflicts(pid: str, request: Request):
+    """Per-paper, per-field disagreements between submitted extractions,
+    excluding fields already reconciled into the final record."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead", "adjudicator"])
+    field_ids = [f["id"] for f in _extraction_template(pid)["fields"]]
+    by_paper: dict = {}
+    for e in kv_get_by_prefix(f"extraction:{pid}:"):
+        if e.get("submitted"):
+            by_paper.setdefault(e["paper_id"], []).append(e)
+    finals = {f["paper_id"]: f for f in kv_get_by_prefix(f"extraction_final:{pid}:")}
+    out = []
+    for paper_id, exts in by_paper.items():
+        if len(exts) < 2:
+            continue
+        final_vals = (finals.get(paper_id) or {}).get("values") or {}
+        conflict_fields = []
+        for fid in field_ids:
+            norm = {_norm_value((e.get("values") or {}).get(fid)) for e in exts}
+            if len(norm) > 1 and fid not in final_vals:
+                conflict_fields.append(fid)
+        if conflict_fields:
+            out.append({"paper_id": paper_id, "fields": conflict_fields, "extractions": exts})
+    return {"conflicts": out}
+
+
+class ExtractionReconcile(BaseModel):
+    paper_id: Optional[str] = None
+    values: Optional[dict] = None
+    rationale: Optional[str] = None
+
+
+@router.post("/projects/{pid}/extraction-reconciliations")
+def post_extraction_reconciliation(pid: str, body: ExtractionReconcile, request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead", "adjudicator"])
+    if not body.paper_id:
+        raise HTTPException(status_code=400, detail="paper_id required")
+    key = f"extraction_final:{pid}:{body.paper_id}"
+    existing = kv_get(key)
+    now = _now()
+    merged = dict((existing or {}).get("values") or {})
+    merged.update(body.values or {})
+    rec = {
+        "paper_id": body.paper_id,
+        "values": merged,
+        "reconciled_by": uid,
+        "rationale": body.rationale or "",
+        "reconciled_at": now,
+        "created_at": (existing or {}).get("created_at") or now,
+    }
+    kv_set(key, rec)
+    return {"final": rec}

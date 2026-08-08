@@ -327,6 +327,22 @@ export const AIService = {
     return postJSON("/pdf/metadata", { text, filename, model: apiConfig.model }, signal);
   },
 
+  // Pre-fill a structured extraction template from a paper's full text in one
+  // call. Returns { field_id: value }; a first draft the reviewer confirms.
+  async extractFields(
+    text: string,
+    fields: { id: string; label: string; type: string; options?: string[] }[],
+    title = "",
+    signal?: AbortSignal,
+  ): Promise<Record<string, any>> {
+    const r = await postJSON<{ values: Record<string, any> }>(
+      "/extract/fields",
+      { text, fields, title, model: apiConfig.model },
+      signal,
+    );
+    return r.values || {};
+  },
+
   async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal): Promise<ScreenResult> {
     return postJSON<ScreenResult>("/screen/abstract", {
       paper, pico, inclusion, exclusion, model: apiConfig.model,
