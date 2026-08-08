@@ -26,6 +26,7 @@ import {
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { ReferenceTools } from "../components/ReferenceTools";
+import { IntegrityCheck } from "../components/IntegrityCheck";
 import { biasPlotSvg, BiasData } from "../lib/biasPlot";
 
 const JUDGMENT_OPTIONS: RoBJudgment[] = [
@@ -431,6 +432,7 @@ export function QualityPage() {
   return (
     <div className="space-y-4">
       <ReferenceTools />
+      <IntegrityCheck />
       {!reports && (
         <>
           <Alert>

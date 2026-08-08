@@ -342,6 +342,15 @@ export const AIService = {
     return postJSON("/pdf/metadata", { text, filename, model: apiConfig.model }, signal);
   },
 
+  // Flag included studies that are retracted or carry an expression of concern.
+  async checkIntegrity(
+    papers: { paper_id: string; doi?: string; title?: string }[],
+    signal?: AbortSignal,
+  ): Promise<{ paper_id: string; status: string; detail: string; source: string; doi: string }[]> {
+    const r = await postJSON<{ results: any[] }>("/integrity/check", { papers }, signal);
+    return r.results || [];
+  },
+
   // Draft a register-first PROSPERO-style protocol from the PICO + criteria.
   async generateProtocol(
     input: { title?: string; pico?: any; inclusion?: string[]; exclusion?: string[]; sources?: string[] },
