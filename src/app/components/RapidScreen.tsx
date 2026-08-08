@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Dialog, DialogContent } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
-import { Check, X, SkipForward, Undo2, Bot } from "lucide-react";
+import { Check, X, SkipForward, Undo2, Bot, Sparkles, CheckCircle2 } from "lucide-react";
+import { activeRank } from "../lib/activeLearning";
 
 // One record to review, normalized so the same rapid reviewer drives both
 // abstract and full-text screening (which use different decision casings).
@@ -29,25 +30,39 @@ export function RapidScreen({
   onDecide: (id: string, decision: "include" | "exclude") => void;
   label?: string;
 }) {
+  // Optional active-learning mode: rank the unscreened queue by a model that
+  // learns from the reviewer's own labels, and estimate recall to suggest when
+  // it is safe to stop. Off by default (the queue keeps its static order).
+  const [learn, setLearn] = useState(false);
+  const al = useMemo(() => activeRank(items), [items]);
+
   const queue = useMemo(() => {
+    if (learn) {
+      const byId = new Map(items.map(it => [it.id, it]));
+      return al.order.map(id => byId.get(id)).filter(Boolean) as typeof items;
+    }
     return [...items].sort((a, b) => {
       const aRev = a.override ? 1 : 0, bRev = b.override ? 1 : 0;
       if (aRev !== bRev) return aRev - bRev;
       return (a.aiInclude ? 0 : 1) - (b.aiInclude ? 0 : 1);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items, open]);
+  }, [items, open, learn, al]);
 
   const [i, setI] = useState(0);
   useEffect(() => { if (open) setI(0); }, [open]);
+  useEffect(() => { setI(0); }, [learn]);
 
   const cur = queue[i];
   const reviewed = items.filter(x => x.override).length;
+  const safeToStop = learn && al.reviewed > 0 && (al.predictedRemaining === 0 || (al.estRecall != null && al.estRecall >= 0.95));
 
   const next = () => setI(v => Math.min(queue.length - 1, v + 1));
   const back = () => setI(v => Math.max(0, v - 1));
-  const decide = (d: "include" | "exclude") => { if (cur) { onDecide(cur.id, d); next(); } };
-  const acceptAI = () => { if (cur) { onDecide(cur.id, cur.aiInclude ? "include" : "exclude"); next(); } };
+  // In active-learning mode a decision removes the item from the ranked queue,
+  // so return to the top (the next most-relevant record); otherwise advance.
+  const decide = (d: "include" | "exclude") => { if (cur) { onDecide(cur.id, d); learn ? setI(0) : next(); } };
+  const acceptAI = () => { if (cur) { onDecide(cur.id, cur.aiInclude ? "include" : "exclude"); learn ? setI(0) : next(); } };
 
   useEffect(() => {
     if (!open) return;
@@ -72,13 +87,31 @@ export function RapidScreen({
     <Dialog open={open} onOpenChange={v => !v && onClose()}>
       <DialogContent className="w-[92vw] max-w-[860px] h-[88vh] flex flex-col p-0 gap-0">
         <div className="px-5 py-3 border-b space-y-2">
-          <div className="flex items-center justify-between text-sm">
-            <span className="font-medium">{label}</span>
-            <span className="text-muted-foreground">{reviewed} of {items.length} reviewed · card {Math.min(i + 1, queue.length)} / {queue.length}</span>
+          <div className="flex items-center justify-between gap-2 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="font-medium">{label}</span>
+              <button
+                onClick={() => setLearn(v => !v)}
+                title="Rank the queue by a model that learns from your labels, and estimate recall to suggest when to stop"
+                className={`text-[11px] px-2 py-0.5 rounded border inline-flex items-center gap-1 ${learn ? "bg-primary text-primary-foreground border-primary" : "hover:bg-muted"}`}
+              >
+                <Sparkles className="size-3" />Active learning {learn ? "on" : "off"}
+              </button>
+            </div>
+            <span className="text-muted-foreground">{reviewed} of {items.length} reviewed{queue.length ? ` · card ${Math.min(i + 1, queue.length)} / ${queue.length}` : ""}</span>
           </div>
           <div className="h-1.5 rounded-full bg-muted overflow-hidden">
             <div className="h-full bg-primary transition-all" style={{ width: `${items.length ? (reviewed / items.length) * 100 : 0}%` }} />
           </div>
+          {learn && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
+              <span>{al.includesFound} includes found</span>
+              <span>~{al.predictedRemaining} predicted relevant remaining</span>
+              {al.estRecall != null && <span>est. recall {Math.round(al.estRecall * 100)}%</span>}
+              {!al.trained && <span className="text-amber-600">learning: label a few includes and excludes</span>}
+              {safeToStop && <span className="inline-flex items-center gap-1 text-emerald-600 font-medium"><CheckCircle2 className="size-3.5" />safe to stop</span>}
+            </div>
+          )}
         </div>
 
         {!cur ? (
