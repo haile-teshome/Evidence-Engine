@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Retrieval sources · Evidence Engine Docs</title>
+<link rel="stylesheet" href="assets/docs.css" />
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute;overflow:hidden" aria-hidden="true">
+  <defs>
+    <symbol id="ic-window" viewBox="0 0 24 24"><rect x="2.5" y="4" width="19" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><line x1="2.5" y1="8.4" x2="21.5" y2="8.4" stroke="currentColor" stroke-width="1.5"/><circle cx="5.4" cy="6.2" r=".85" fill="currentColor"/><circle cx="8" cy="6.2" r=".85" fill="currentColor"/></symbol>
+    <symbol id="ic-server" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="7" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="3" y="13" width="18" height="7" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="6.8" cy="7.5" r="1" fill="currentColor"/><circle cx="6.8" cy="16.5" r="1" fill="currentColor"/></symbol>
+    <symbol id="ic-db" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7.5" ry="2.8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.5 6v12c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8V6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M4.5 12c0 1.6 3.4 2.8 7.5 2.8s7.5-1.2 7.5-2.8" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="ic-doc" viewBox="0 0 24 24"><path d="M6 2.5h8l4 4v15H6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 2.5v4h4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><line x1="9" y1="12" x2="15" y2="12" stroke="currentColor" stroke-width="1.3"/><line x1="9" y1="15" x2="15" y2="15" stroke="currentColor" stroke-width="1.3"/></symbol>
+    <symbol id="ic-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.3" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 20c0-3.7 2.9-6 6.5-6s6.5 2.3 6.5 6" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+    <symbol id="ic-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="2.9" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M3.2 19c0-3.2 2.6-5.2 5.8-5.2s5.8 2 5.8 5.2" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M16 5.6c1.7.3 2.9 1.8 2.9 3.5 0 .8-.3 1.6-.8 2.2M17 13.8c2.2.4 3.8 2.1 3.8 4.7" fill="none" stroke="currentColor" stroke-width="1.5"/></symbol>
+    <symbol id="ic-cloud" viewBox="0 0 24 24"><path d="M7 18h10a4 4 0 000-8 5.5 5.5 0 00-10.6-1.6A3.7 3.7 0 007 18z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></symbol>
+    <symbol id="ic-lock" viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="9.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M8 10.5V7.5a4 4 0 018 0v3" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+    <symbol id="ic-shield" viewBox="0 0 24 24"><path d="M12 2.5l8 3v6c0 5-3.4 8.7-8 10.5-4.6-1.8-8-5.5-8-10.5v-6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M8.5 12l2.3 2.3 4.7-4.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="ic-atom" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2" fill="currentColor"/><ellipse cx="12" cy="12" rx="10" ry="4" fill="none" stroke="currentColor" stroke-width="1.4"/><ellipse cx="12" cy="12" rx="10" ry="4" fill="none" stroke="currentColor" stroke-width="1.4" transform="rotate(60 12 12)"/><ellipse cx="12" cy="12" rx="10" ry="4" fill="none" stroke="currentColor" stroke-width="1.4" transform="rotate(120 12 12)"/></symbol>
+    <symbol id="ic-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.3" fill="none" stroke="currentColor" stroke-width="1.7"/><line x1="15.3" y1="15.3" x2="21" y2="21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="ic-graph" viewBox="0 0 24 24"><path d="M6.6 7.3l4 8.4M17 8.4l-3.6 7M7.4 6.2h9.2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="5" cy="6" r="2.3" fill="var(--panel-2)" stroke="currentColor" stroke-width="1.5"/><circle cx="19" cy="7" r="2.3" fill="var(--panel-2)" stroke="currentColor" stroke-width="1.5"/><circle cx="12" cy="17.5" r="2.3" fill="var(--panel-2)" stroke="currentColor" stroke-width="1.5"/></symbol>
+    <symbol id="ic-check" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"/><rect x="9" y="2.6" width="6" height="3.2" rx="1" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12l2 2 4-4.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="ic-scale" viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M5 7h14M5 7l-2.5 5a2.5 2.5 0 005 0zM19 7l-2.5 5a2.5 2.5 0 005 0z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M5 7l7-2 7 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></symbol>
+    <symbol id="ic-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12 2.5v3M12 18.5v3M21.5 12h-3M5.5 12h-3M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1M18.7 18.7l-2.1-2.1M7.4 7.4L5.3 5.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></symbol>
+    <symbol id="ic-llama" viewBox="0 0 24 24"><path fill="currentColor" d="M7.6 3.3c.7 0 1.2.6 1.3 1.3l.4 2.7h5.4l.4-2.7c.1-.7.6-1.3 1.3-1.3.8 0 1.4.7 1.3 1.5l-.5 3.5c.9.7 1.4 1.8 1.4 3v6.6c0 1-.8 1.7-1.7 1.7h-.9V16l-1.7.9L13 16v3.6H8.5c-.9 0-1.7-.7-1.7-1.7v-6.6c0-1.2.5-2.3 1.4-3l-.5-3.5c-.1-.8.5-1.5 1.3-1.5z"/><circle cx="10.3" cy="10.8" r=".85" fill="var(--panel-2)"/><circle cx="13.7" cy="10.8" r=".85" fill="var(--panel-2)"/></symbol>
+    <symbol id="ic-anthropic" viewBox="0 0 24 24"><g fill="#CC785C"><rect x="11" y="2.5" width="2" height="19" rx="1"/><rect x="2.5" y="11" width="19" height="2" rx="1"/><rect x="11" y="2.5" width="2" height="19" rx="1" transform="rotate(45 12 12)"/><rect x="11" y="2.5" width="2" height="19" rx="1" transform="rotate(-45 12 12)"/></g></symbol>
+    <symbol id="ic-openai" viewBox="0 0 24 24"><path fill="none" stroke="#10A37F" stroke-width="1.7" stroke-linejoin="round" d="M12 3l7.4 4.3v9.4L12 21l-7.4-4.3V7.3z"/><path fill="none" stroke="#10A37F" stroke-width="1.4" d="M12 7v10M7.9 9.5l8.2 5M16.1 9.5l-8.2 5"/></symbol>
+    <symbol id="ic-google" viewBox="0 0 24 24"><path fill="none" stroke="#4285F4" stroke-width="2.3" d="M12 6.6a5.4 5.4 0 100 10.8"/><path fill="none" stroke="#EA4335" stroke-width="2.3" d="M12 6.6a5.4 5.4 0 015.4 5.4"/><path fill="none" stroke="#FBBC05" stroke-width="2.3" d="M6.6 12a5.4 5.4 0 003 4.8"/><path fill="none" stroke="#34A853" stroke-width="2.3" d="M12 17.4a5.4 5.4 0 004.8-3"/><line x1="12.2" y1="12" x2="17.6" y2="12" stroke="#4285F4" stroke-width="2.3"/></symbol>
+    <symbol id="ic-journal" viewBox="0 0 24 24"><rect x="4.5" y="3.5" width="15" height="17" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.6"/><line x1="8" y1="3.5" x2="8" y2="20.5" stroke="currentColor" stroke-width="1.4"/><line x1="11" y1="8" x2="16.5" y2="8" stroke="currentColor" stroke-width="1.3"/><line x1="11" y1="11" x2="16.5" y2="11" stroke="currentColor" stroke-width="1.3"/></symbol>
+  </defs>
+</svg>
+<div class="layout">
+  <aside>
+    <a class="brand" href="index.html" style="text-decoration:none">
+      <div class="logo">EE</div>
+      <div><b>Evidence Engine</b><span>Developer documentation</span></div>
+    </a>
+    <input class="search" id="search" placeholder="Filter sections…" aria-label="Filter sections" />
+    <nav id="nav">
+      <div class="group">Overview</div>
+      <a href="index.html">Introduction</a>
+      <a href="principles.html">Design principles</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="request-lifecycle.html">Request lifecycle</a>
+      <a href="quickstart.html">Quickstart</a>
+      <div class="group">Concepts</div>
+      <a href="pipeline.html">The review pipeline</a>
+      <a href="screening-model.html">Screening model</a>
+      <a href="data-privacy.html">Data &amp; privacy</a>
+      <div class="group">Pipeline stages</div>
+      <a href="home.html">Research Strategy</a>
+      <a href="planning.html">Search Planning</a>
+      <a href="quality.html">Quality Assessment</a>
+      <a href="abstract.html">Abstract Screening</a>
+      <a href="acquisition.html">Full-Text Acquisition</a>
+      <a href="fulltext.html">Full-Text Evidence</a>
+      <a href="snowball.html">Citation Snowballing</a>
+      <a href="extraction.html">Table &amp; Text Extraction</a>
+      <a href="diagramming.html">Diagramming</a>
+      <a href="meta.html">Meta-analysis</a>
+      <a href="writing.html">Writing Assistant</a>
+      <div class="group">Collaboration</div>
+      <a href="projects.html">Projects &amp; reviewers</a>
+      <a href="assignment.html">Assignment strategies</a>
+      <a href="calibration.html">Calibration &amp; tags</a>
+      <a href="conflicts.html">Conflicts &amp; adjudication</a>
+      <a href="federation.html">Federation model</a>
+      <div class="group">API reference</div>
+      <a href="api-conventions.html">Conventions</a>
+      <a href="api-pipeline.html">Pipeline API</a>
+      <a href="api-projects.html">Projects API</a>
+      <a href="api-examples.html">Worked examples</a>
+      <div class="group">Platform internals</div>
+      <a href="store-schema.html">Data store schema</a>
+      <a href="config.html">Configuration</a>
+      <a href="sources.html" class="active">Retrieval sources</a>
+      <a href="ai-layer.html">AI / model layer</a>
+      <a href="launcher.html">Desktop launcher</a>
+      <div class="group">Development</div>
+      <a href="repo.html">Repo layout</a>
+      <a href="dev-setup.html">Local dev setup</a>
+      <a href="testing.html">Testing</a>
+      <a href="doc-sync.html">Docs auto-update</a>
+      <a href="contributing.html">Contributing</a>
+      <a href="troubleshooting.html">Troubleshooting</a>
+      <a href="roadmap.html">Roadmap</a>
+      <a href="changelog.html">Changelog</a>
+    </nav>
+  </aside>
+  <main>
+    <div class="topbar">
+      <span class="pill" id="version-pill">v0.0.1</span>
+      <button class="theme-btn" id="theme-btn">Toggle theme</button>
+    </div>
+    <section id="sources">
+      <h2><a class="anchor-h" href="sources.html">Retrieval sources</a></h2>
+      <p>Ten open-access connectors plus your own uploaded PDFs, defined in <code>SERVICE_MAP</code> (<code>Backend/data_services.py</code>). The canonical PubMed-style query is adapted to each engine's native syntax before fetching.</p>
+      <p><span class="tag">PubMed</span><span class="tag">Europe PMC</span><span class="tag">Semantic Scholar</span><span class="tag">OpenAlex</span><span class="tag">CrossRef</span><span class="tag">arXiv</span><span class="tag">bioRxiv</span><span class="tag">medRxiv</span><span class="tag">DOAJ</span><span class="tag">CORE</span><span class="tag">Local PDFs</span></p>
+      <figure class="diagram"><div class="scroll">
+      <svg viewBox="0 0 720 272" width="720" role="img" aria-label="The canonical query is adapted per source and fanned out to ten open-access literature databases.">
+        <defs><marker id="src-ah" markerWidth="9" markerHeight="9" refX="7.5" refY="3" orient="auto"><path class="ah" d="M0,0 L8,3 L0,6 Z"/></marker></defs>
+        <path class="edge" d="M144,140 L158,140" marker-end="url(#src-ah)"/>
+        <path class="edge strong" d="M284,140 C300,140 306,132 314,128" marker-end="url(#src-ah)"/>
+        <!-- query -->
+        <rect class="node" x="12" y="112" width="132" height="56" rx="10"/>
+        <text class="title" x="78" y="138" text-anchor="middle" style="font-size:11.5px">Canonical query</text>
+        <text class="mono" x="78" y="156" text-anchor="middle">PubMed-style</text>
+        <!-- adapter -->
+        <rect class="node accent" x="158" y="108" width="126" height="64" rx="10"/>
+        <text class="title" x="221" y="139" text-anchor="middle" style="font-size:11.5px">Per-source adapt</text>
+        <text class="sub" x="221" y="157" text-anchor="middle">native syntax</text>
+        <!-- sources panel -->
+        <rect class="node" x="314" y="14" width="394" height="244" rx="12"/>
+        <text class="sub" x="511" y="34" text-anchor="middle" style="fill:var(--text);font-weight:700">10 open-access sources</text>
+        <!-- col A -->
+        <g>
+          <rect class="node" x="326" y="46" width="180" height="32" rx="7"/><use href="#ic-journal" x="334" y="53" width="18" height="18" style="color:#326295"/><text class="sub" x="360" y="67" style="fill:var(--text)">PubMed / MEDLINE</text>
+          <rect class="node" x="326" y="84" width="180" height="32" rx="7"/><use href="#ic-journal" x="334" y="91" width="18" height="18" style="color:#007c82"/><text class="sub" x="360" y="105" style="fill:var(--text)">Europe PMC</text>
+          <rect class="node" x="326" y="122" width="180" height="32" rx="7"/><use href="#ic-journal" x="334" y="129" width="18" height="18" style="color:#1857b6"/><text class="sub" x="360" y="143" style="fill:var(--text)">Semantic Scholar</text>
+          <rect class="node" x="326" y="160" width="180" height="32" rx="7"/><use href="#ic-journal" x="334" y="167" width="18" height="18" style="color:#f57f17"/><text class="sub" x="360" y="181" style="fill:var(--text)">OpenAlex</text>
+          <rect class="node" x="326" y="198" width="180" height="32" rx="7"/><use href="#ic-journal" x="334" y="205" width="18" height="18" style="color:#3eb1c8"/><text class="sub" x="360" y="219" style="fill:var(--text)">CrossRef</text>
+        </g>
+        <!-- col B -->
+        <g>
+          <rect class="node" x="516" y="46" width="180" height="32" rx="7"/><use href="#ic-journal" x="524" y="53" width="18" height="18" style="color:#b31b1b"/><text class="sub" x="550" y="67" style="fill:var(--text)">arXiv</text>
+          <rect class="node" x="516" y="84" width="180" height="32" rx="7"/><use href="#ic-journal" x="524" y="91" width="18" height="18" style="color:#be2528"/><text class="sub" x="550" y="105" style="fill:var(--text)">bioRxiv</text>
+          <rect class="node" x="516" y="122" width="180" height="32" rx="7"/><use href="#ic-journal" x="524" y="129" width="18" height="18" style="color:#1a6091"/><text class="sub" x="550" y="143" style="fill:var(--text)">medRxiv</text>
+          <rect class="node" x="516" y="160" width="180" height="32" rx="7"/><use href="#ic-journal" x="524" y="167" width="18" height="18" style="color:#cd2027"/><text class="sub" x="550" y="181" style="fill:var(--text)">DOAJ</text>
+          <rect class="node" x="516" y="198" width="180" height="32" rx="7"/><use href="#ic-journal" x="524" y="205" width="18" height="18" style="color:#c1272d"/><text class="sub" x="550" y="219" style="fill:var(--text)">CORE</text>
+        </g>
+      </svg>
+      </div><figcaption>The canonical query is translated to each engine's native syntax, then fanned out to ten open-access sources. Results are merged and deduplicated in Quality Assessment. Your own uploaded PDFs join as an eleventh source.</figcaption></figure>
+      <table>
+        <tr><th>Source</th><th>Approx. index</th><th>Notes</th></tr>
+        <tr><td>OpenAlex</td><td>~250M works</td><td>Broadest single source; no key needed</td></tr>
+        <tr><td>CORE</td><td>~290M OA records</td><td>Best-effort; a key is recommended</td></tr>
+        <tr><td>Semantic Scholar</td><td>~220M papers</td><td>Rate-limited without a key</td></tr>
+        <tr><td>CrossRef</td><td>~160M DOIs</td><td>Bibliographic, no full text</td></tr>
+        <tr><td>Europe PMC</td><td>~44M</td><td>Superset of PubMed plus preprints; wide abstract coverage</td></tr>
+        <tr><td>PubMed / MEDLINE</td><td>~38M</td><td>Requires <code>ENTREZ_EMAIL</code></td></tr>
+        <tr><td>DOAJ</td><td>~10M OA articles</td><td>Open-access journals</td></tr>
+        <tr><td>arXiv / bioRxiv / medRxiv</td><td>~3M preprints</td><td>STEM and biomedical preprints only</td></tr>
+      </table>
+      <div class="warn"><b>Two caveats.</b> A single search returns a bounded slice, not the whole result set: <code>max_per_source</code> defaults to 10, with per-API page ceilings (OpenAlex ≤ 200, CrossRef ≤ 100, DOAJ ≤ 100). Deeper sweeps need pagination, which is on the roadmap. Institutional databases (Scopus, Embase, Web of Science) are intentionally excluded because they require paid access.</div></section>
+      <div class="prevnext"><a class="prv" href="config.html">← Configuration</a><a class="nxt" href="ai-layer.html">AI / model layer →</a></div>
+    <footer>
+      Evidence Engine developer documentation.
+      <a href="index.html">Home</a> · single-page version in <code>docs/_source.html</code>.
+    </footer>
+  </main>
+</div>
+<script src="assets/docs.js"></script>
+</body>
+</html>
