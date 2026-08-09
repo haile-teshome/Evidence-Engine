@@ -9,7 +9,6 @@ import { Badge } from "../components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Input } from "../components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
@@ -216,15 +215,40 @@ export function ExtractionPage() {
 }
 
 function GridTable({ data }: { data: string[][] }) {
+  if (!data.length) return null;
+  const [head, ...body] = data;
+  const cols = Math.max(head?.length || 0, ...body.map(r => r.length));
+  const isNum = (v: string) => {
+    const t = String(v ?? "").trim();
+    return t !== "" && !isNaN(Number(t.replace(/[,%$\s]/g, "")));
+  };
+  const cell = (v: string) => (v == null || String(v).trim() === "" ? "" : v);
   return (
-    <Table>
-      <TableHeader><TableRow>{data[0]?.map((h, j) => <TableHead key={j}>{h}</TableHead>)}</TableRow></TableHeader>
-      <TableBody>
-        {data.slice(1).map((row, ri) => (
-          <TableRow key={ri}>{row.map((c, ci) => <TableCell key={ci}>{c}</TableCell>)}</TableRow>
+    <table className="w-full text-xs border-collapse">
+      <thead className="sticky top-0 z-10">
+        <tr>
+          {Array.from({ length: cols }).map((_, j) => (
+            <th key={j} className="bg-muted text-left font-semibold text-foreground px-3 py-2 border-b border-r last:border-r-0 whitespace-nowrap">
+              {cell(head?.[j] ?? "")}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {body.map((row, ri) => (
+          <tr key={ri} className={ri % 2 ? "bg-muted/25" : "bg-card"}>
+            {Array.from({ length: cols }).map((_, ci) => {
+              const v = cell(row[ci] ?? "");
+              return (
+                <td key={ci} className={`px-3 py-1.5 border-b border-r last:border-r-0 align-top break-words ${isNum(v) ? "text-right tabular-nums whitespace-nowrap" : "whitespace-pre-wrap"}`}>
+                  {v || <span className="text-muted-foreground/40">—</span>}
+                </td>
+              );
+            })}
+          </tr>
         ))}
-      </TableBody>
-    </Table>
+      </tbody>
+    </table>
   );
 }
 
