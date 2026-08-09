@@ -10,8 +10,9 @@ import { Checkbox } from "../components/ui/checkbox";
 import { Input } from "../components/ui/input";
 import {
   Network, Plus, Minus, Trash2, Search, FileText, ArrowDownLeft, ArrowUpRight,
-  CheckCircle2, XCircle, ExternalLink, Layers, ChevronDown, ChevronsDownUp, ChevronsUpDown,
+  CheckCircle2, XCircle, ExternalLink, Layers, ChevronDown, ChevronsDownUp, ChevronsUpDown, FlaskConical,
 } from "lucide-react";
+import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -78,12 +79,12 @@ export function SnowballPage() {
   }
 
   if (!s.fullTextResults) {
-    return <Alert><AlertDescription>Complete Full-Text Evidence screening first to unlock Citation Snowballing.</AlertDescription></Alert>;
+    return <EmptyState icon={FlaskConical} title="No full-text results yet" description="Run full-text evaluation first; snowballing expands from the included studies." action={{ label: "Go to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
   }
   // Honour reviewer overrides: papers the user kept by checking the
   // full-text Keep box should seed snowballing even if the AI excluded them.
   const seeds = s.fullTextResults.filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include");
-  if (seeds.length === 0) return <Alert><AlertDescription>No papers passed full-text screening. Cannot perform snowballing.</AlertDescription></Alert>;
+  if (seeds.length === 0) return <EmptyState icon={FlaskConical} title="No papers passed full-text screening" description="Snowballing needs at least one included study. Adjust criteria and re-run full-text evaluation." action={{ label: "Back to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
 
   async function start() {
     const { abort } = s.startTask("snowball", [{ id: "snow", label: "Fetching citations", status: "running" }]);

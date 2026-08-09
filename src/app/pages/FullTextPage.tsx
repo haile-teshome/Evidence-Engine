@@ -13,7 +13,8 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { FlaskConical, Check, Minus, X as XIcon, Download, Zap } from "lucide-react";
+import { FlaskConical, Check, Minus, X as XIcon, Download, Zap, FileSearch } from "lucide-react";
+import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -23,13 +24,13 @@ export function FullTextPage() {
   const running = task?.status === "running";
   const [rapidOpen, setRapidOpen] = useState(false);
 
-  if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first.</AlertDescription></Alert>;
+  if (!s.results) return <EmptyState icon={FileSearch} title="No screening results yet" description="Run abstract screening first to unlock per-criterion full-text evaluation." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
 
   // The queue uses EFFECTIVE abstract decisions, so a paper the reviewer
   // rescued at the abstract stage (by checking its Keep box) now joins the
   // full-text queue, and one they dropped is removed.
   const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
-  if (passed.length === 0) return <Alert><AlertDescription>No papers passed abstract screening. Adjust your criteria and rerun.</AlertDescription></Alert>;
+  if (passed.length === 0) return <EmptyState icon={FileSearch} title="No papers passed abstract screening" description="Adjust your inclusion criteria and re-run abstract screening." action={{ label: "Back to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
 
   // Screen `targets`. When `append`, keep the existing results and add the new
   // rows (used to screen papers added after the first run, e.g. via snowball);
