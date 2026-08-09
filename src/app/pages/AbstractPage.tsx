@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
 import { categoriseAbstractExclusion, effectiveAbstractDecision } from "../lib/exclusionBucketing";
@@ -9,7 +9,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { Search, Download, Minus, Zap } from "lucide-react";
+import { Search, Download, Minus, Zap, ChevronRight, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
 import { RapidScreen } from "../components/RapidScreen";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -222,6 +222,13 @@ export function AbstractPage() {
 
   const [projectRefresh, setProjectRefresh] = useState(0);
   const [rapidOpen, setRapidOpen] = useState(false);
+  const [maxOpen, setMaxOpen] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleRow = (id: string) => setExpanded(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
 
   return (
     <div className="space-y-4">
@@ -280,6 +287,9 @@ export function AbstractPage() {
                 <Button size="sm" variant="outline" onClick={() => setRapidOpen(true)} className="h-7" title="Review records fast with the keyboard">
                   <Zap className="size-3.5 mr-1.5" />Rapid screen
                 </Button>
+                <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2" title="Expand the table to full screen">
+                  <Maximize2 className="size-4" />
+                </Button>
                 <Button
                   size="sm"
                   variant="ghost"
@@ -297,7 +307,14 @@ export function AbstractPage() {
                 Decision column reflects the reviewer's choice.
               </div>
             )}
-            <div className="rounded-md border max-h-[600px] overflow-auto">
+            <div className={maxOpen ? "fixed inset-0 z-50 bg-background p-4 flex flex-col gap-2" : ""}>
+              {maxOpen && (
+                <div className="flex items-center justify-between shrink-0">
+                  <h3 className="font-medium">Screening Results ({r.length})</h3>
+                  <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
+                </div>
+              )}
+              <div className={`rounded-md border overflow-auto ${maxOpen ? "flex-1 min-h-0" : "max-h-[600px]"}`}>
               <table className="w-full text-sm border-collapse">
                 <thead className="bg-muted sticky top-0 z-30">
                   <tr className="text-left">
@@ -318,8 +335,10 @@ export function AbstractPage() {
                     const eff = effectiveAbstractDecision(row, s.abstractOverrides);
                     const isOverridden = eff !== row.Decision;
                     const keep = eff === "INCLUDE";
+                    const isOpen = expanded.has(row.paper_id);
                     return (
-                      <tr key={row.paper_id} className="border-b last:border-b-0 align-top bg-card hover:bg-muted">
+                      <Fragment key={row.paper_id}>
+                      <tr className="border-b last:border-b-0 align-top bg-card hover:bg-muted">
                         <td className="px-3 py-2 sticky left-0 z-20 border-r bg-inherit text-center">
                           <Checkbox
                             checked={keep}
@@ -357,9 +376,14 @@ export function AbstractPage() {
                           <DecisionCell value={eff} overridden={isOverridden} aiValue={row.Decision} />
                         </td>
                         <td className="px-3 py-2 sticky left-[180px] z-20 border-r min-w-[260px] max-w-[260px] bg-inherit shadow-[6px_0_8px_-6px_rgba(0,0,0,0.18)]">
-                          <a href={row.URL} target="_blank" rel="noreferrer" className="hover:underline break-words">
-                            {row.Title}
-                          </a>
+                          <div className="flex items-start gap-1.5">
+                            <button onClick={() => toggleRow(row.paper_id)} className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground" title={isOpen ? "Hide details" : "Show abstract and PICO detail"} aria-expanded={isOpen}>
+                              {isOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                            </button>
+                            <a href={row.URL} target="_blank" rel="noreferrer" className="hover:underline break-words">
+                              {row.Title}
+                            </a>
+                          </div>
                         </td>
                         <td className="px-3 py-2 bg-inherit"><Badge variant="outline">{row.Source}</Badge></td>
                         <td className="px-3 py-2 text-center bg-inherit">
@@ -378,10 +402,42 @@ export function AbstractPage() {
                           {row.Reason}
                         </td>
                       </tr>
+                      {isOpen && (
+                        <tr className="border-b bg-muted/20">
+                          <td colSpan={9} className="p-0">
+                            <div className="sticky left-0 w-[min(900px,90vw)] px-4 py-3 space-y-3">
+                              <div>
+                                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Abstract</div>
+                                <p className="text-sm leading-relaxed whitespace-pre-wrap">{row.Abstract || <span className="text-muted-foreground">No abstract available.</span>}</p>
+                              </div>
+                              {pa && (
+                                <div>
+                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Per-PICO assessment</div>
+                                  <div className="grid md:grid-cols-2 gap-2">
+                                    {([["Population", pa.population], ["Intervention", pa.intervention], ["Comparator", pa.comparator], ["Outcome", pa.outcome]] as const).map(([lbl, f]) => (
+                                      <div key={lbl} className="text-xs rounded border bg-card p-2 space-y-1">
+                                        <div className="flex items-center justify-between">
+                                          <span className="font-medium">{lbl}</span>
+                                          <Badge variant="outline" className="text-[10px]">{f?.vote ?? "NA"}</Badge>
+                                        </div>
+                                        {f?.reasoning && <p className="text-muted-foreground">{f.reasoning}</p>}
+                                        {f?.evidence && <p className="italic text-foreground/70">“{f.evidence}”</p>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                  {pa.overall_reasoning && <p className="text-xs text-muted-foreground mt-2">{pa.overall_reasoning}</p>}
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
                     );
                   })}
                 </tbody>
               </table>
+              </div>
             </div>
             {passed.length > 0 && (
               <Alert className="mt-3"><AlertDescription>{passed.length} papers passed abstract screening. Continue to Full-Text Evidence.</AlertDescription></Alert>

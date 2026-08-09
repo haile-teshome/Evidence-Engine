@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService, formatDuration, FullTextResult } from "../lib/mockServices";
 import { RapidScreen } from "../components/RapidScreen";
@@ -13,7 +13,7 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { FlaskConical, Check, Minus, X as XIcon, Download, Zap, FileSearch } from "lucide-react";
+import { FlaskConical, Check, Minus, X as XIcon, Download, Zap, FileSearch, ChevronRight, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -23,6 +23,13 @@ export function FullTextPage() {
   const task = s.tasks["full-text-screen"];
   const running = task?.status === "running";
   const [rapidOpen, setRapidOpen] = useState(false);
+  const [maxOpen, setMaxOpen] = useState(false);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const toggleRow = (id: string) => setExpanded(prev => {
+    const n = new Set(prev);
+    n.has(id) ? n.delete(id) : n.add(id);
+    return n;
+  });
 
   if (!s.results) return <EmptyState icon={FileSearch} title="No screening results yet" description="Run abstract screening first to unlock per-criterion full-text evaluation." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
 
@@ -143,6 +150,9 @@ export function FullTextPage() {
                     <Button size="sm" variant="outline" onClick={() => setRapidOpen(true)} title="Review records fast with the keyboard">
                       <Zap className="size-3.5 mr-1.5" />Rapid review
                     </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2" title="Expand the table to full screen">
+                      <Maximize2 className="size-4" />
+                    </Button>
                     <Button
                       size="sm"
                       variant="ghost"
@@ -185,7 +195,14 @@ export function FullTextPage() {
               </>
             );
           })()}
-          <div className="rounded-md border max-h-[600px] overflow-auto">
+          <div className={maxOpen ? "fixed inset-0 z-50 bg-background p-4 flex flex-col gap-2" : ""}>
+            {maxOpen && (
+              <div className="flex items-center justify-between shrink-0">
+                <h3 className="font-medium">Full-Text Results ({ft.length})</h3>
+                <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
+              </div>
+            )}
+            <div className={`rounded-md border overflow-auto ${maxOpen ? "flex-1 min-h-0" : "max-h-[600px]"}`}>
             <table className="w-full text-sm border-collapse">
               <thead className="bg-muted sticky top-0 z-30">
                 <tr className="text-left">
@@ -209,8 +226,10 @@ export function FullTextPage() {
                   const eff = effectiveFullTextDecision(row, s.fullTextOverrides);
                   const isOverridden = eff !== row.Decision;
                   const keep = eff === "Include";
+                  const isOpen = expanded.has(row.paper_id);
                   return (
-                  <tr key={row.paper_id} className="border-b last:border-b-0 align-top bg-card hover:bg-muted">
+                  <Fragment key={row.paper_id}>
+                  <tr className="border-b last:border-b-0 align-top bg-card hover:bg-muted">
                     <td className="px-3 py-2 sticky left-0 z-20 border-r bg-inherit text-center">
                       <Checkbox
                         checked={keep}
@@ -238,9 +257,14 @@ export function FullTextPage() {
                       </div>
                     </td>
                     <td className="px-3 py-2 sticky left-[180px] z-20 border-r min-w-[300px] max-w-[300px] bg-inherit shadow-[6px_0_8px_-6px_rgba(0,0,0,0.18)]">
-                      <a href={row.URL} target="_blank" rel="noreferrer" className="hover:underline break-words">
-                        {row.Title}
-                      </a>
+                      <div className="flex items-start gap-1.5">
+                        <button onClick={() => toggleRow(row.paper_id)} className="mt-0.5 shrink-0 text-muted-foreground hover:text-foreground" title={isOpen ? "Hide details" : "Show abstract and full text"} aria-expanded={isOpen}>
+                          {isOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                        </button>
+                        <a href={row.URL} target="_blank" rel="noreferrer" className="hover:underline break-words">
+                          {row.Title}
+                        </a>
+                      </div>
                     </td>
                     {(["population", "intervention", "comparator", "outcome"] as const).map((k, idx) => {
                       const pe = row.picoEvidence?.[k];
@@ -330,10 +354,30 @@ export function FullTextPage() {
                     })}
                     <td className="px-3 py-2 text-foreground/90 min-w-[320px] bg-inherit">{row.Reason}</td>
                   </tr>
+                  {isOpen && (
+                    <tr className="border-b bg-muted/20">
+                      <td colSpan={8 + allCriteria.length} className="p-0">
+                        <div className="sticky left-0 w-[min(900px,90vw)] px-4 py-3 space-y-3">
+                          <div>
+                            <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Abstract</div>
+                            <p className="text-sm leading-relaxed whitespace-pre-wrap">{row.Abstract || <span className="text-muted-foreground">No abstract available.</span>}</p>
+                          </div>
+                          {s.fullTexts[row.paper_id]?.text && (
+                            <div>
+                              <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Full text (acquired)</div>
+                              <p className="text-sm leading-relaxed whitespace-pre-wrap max-h-64 overflow-y-auto text-foreground/90">{s.fullTexts[row.paper_id]!.text}</p>
+                            </div>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                   );
                 })}
               </tbody>
             </table>
+            </div>
           </div>
         </Card>
       )}
