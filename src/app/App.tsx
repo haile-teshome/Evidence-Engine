@@ -1,4 +1,4 @@
-import { Component, ReactNode, useEffect } from "react";
+import { Component, ReactNode, Suspense, lazy, useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { PrismaFlow } from "./components/PrismaFlow";
 import { PrismaChecklist } from "./components/PrismaChecklist";
@@ -10,19 +10,24 @@ import { StoreProvider, useStore } from "./lib/store";
 import { AuthProvider } from "./lib/auth";
 import { BackendReadyProvider, useEngineStatus } from "./lib/backendReady";
 import { UserMenu } from "./components/UserMenu";
-import { HomePage } from "./pages/HomePage";
-import { SimulationPage } from "./pages/SimulationPage";
+// QualityPage stays static because RiskOfBiasSummary (used inline on the
+// Diagramming page) is a named export from the same module. The rest are
+// code-split so the initial bundle is small and each stage loads on demand.
 import { QualityPage, RiskOfBiasSummary } from "./pages/QualityPage";
-import { AbstractPage } from "./pages/AbstractPage";
-import { FullTextPage } from "./pages/FullTextPage";
-import { SnowballPage } from "./pages/SnowballPage";
-import { ExtractionPage } from "./pages/ExtractionPage";
-import { AcquisitionPage } from "./pages/AcquisitionPage";
-import { TextExtractionPage } from "./pages/TextExtractionPage";
-import { MetaAnalysisPage } from "./pages/MetaAnalysisPage";
-import { ProjectsPage } from "./pages/ProjectsPage";
-import { WritingPage } from "./pages/WritingPage";
-import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Users, PenLine, SlidersHorizontal, Loader2 } from "lucide-react";
+import { Skeleton } from "./components/ui/skeleton";
+const HomePage = lazy(() => import("./pages/HomePage").then(m => ({ default: m.HomePage })));
+const SimulationPage = lazy(() => import("./pages/SimulationPage").then(m => ({ default: m.SimulationPage })));
+const AbstractPage = lazy(() => import("./pages/AbstractPage").then(m => ({ default: m.AbstractPage })));
+const FullTextPage = lazy(() => import("./pages/FullTextPage").then(m => ({ default: m.FullTextPage })));
+const SnowballPage = lazy(() => import("./pages/SnowballPage").then(m => ({ default: m.SnowballPage })));
+const ExtractionPage = lazy(() => import("./pages/ExtractionPage").then(m => ({ default: m.ExtractionPage })));
+const AcquisitionPage = lazy(() => import("./pages/AcquisitionPage").then(m => ({ default: m.AcquisitionPage })));
+const TextExtractionPage = lazy(() => import("./pages/TextExtractionPage").then(m => ({ default: m.TextExtractionPage })));
+const MetaAnalysisPage = lazy(() => import("./pages/MetaAnalysisPage").then(m => ({ default: m.MetaAnalysisPage })));
+const ProjectsPage = lazy(() => import("./pages/ProjectsPage").then(m => ({ default: m.ProjectsPage })));
+const WritingPage = lazy(() => import("./pages/WritingPage").then(m => ({ default: m.WritingPage })));
+import { CommandPalette } from "./components/CommandPalette";
+import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Users, PenLine, SlidersHorizontal, Loader2, Check, RotateCcw } from "lucide-react";
 
 const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> = {
   home: { title: "Research Strategy", subtitle: "PICO-driven question framing and search design", icon: Home },
@@ -60,6 +65,7 @@ function Shell() {
   return (
     <div className="flex min-h-screen bg-background text-foreground">
       <Toaster richColors position="top-right" />
+      <CommandPalette />
       <Sidebar />
       <main className="flex-1 overflow-x-clip">
         <header className="border-b bg-card/50 backdrop-blur sticky top-0 z-20 px-6 py-4">
@@ -101,10 +107,19 @@ function Shell() {
                 <span className="text-muted-foreground">{s.currentProjectRole}</span>
               </button>
             )}
+            {s.lastSavedAt && (
+              <span
+                className="hidden sm:inline-flex items-center gap-1 text-[11px] text-muted-foreground"
+                title={`Saved locally at ${new Date(s.lastSavedAt).toLocaleTimeString()}`}
+              >
+                <Check className="size-3 text-emerald-500" />Saved
+              </span>
+            )}
             <UserMenu />
           </div>
         </header>
-        <div className="max-w-6xl mx-auto p-6">
+        <div key={s.page} className="max-w-6xl mx-auto p-6 animate-in fade-in duration-200 motion-reduce:animate-none">
+          <Suspense fallback={<div className="space-y-3"><Skeleton className="h-8 w-64" /><Skeleton className="h-32 w-full" /><Skeleton className="h-32 w-full" /></div>}>
           {s.page === "home" && <HomePage />}
           {s.page === "simulation" && <SimulationPage />}
           {s.page === "projects" && <ProjectsPage />}
@@ -257,6 +272,7 @@ function Shell() {
           })()}
           {s.page === "meta" && <MetaAnalysisPage />}
           {s.page === "writing" && <WritingPage />}
+          </Suspense>
         </div>
       </main>
     </div>
@@ -271,9 +287,16 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
     if (this.state.error) {
       return (
         <div className="min-h-screen flex items-center justify-center p-6 bg-background text-foreground">
-          <div className="max-w-md space-y-2">
-            <h2>Something went wrong</h2>
-            <pre className="text-xs bg-muted p-3 rounded whitespace-pre-wrap">{this.state.error.message}</pre>
+          <div className="max-w-md w-full text-center space-y-3 rounded-xl border bg-card p-8 shadow-sm">
+            <div className="grid place-items-center size-12 rounded-full bg-destructive/10 text-destructive mx-auto">
+              <RotateCcw className="size-6" />
+            </div>
+            <h2 className="font-medium">Something went wrong</h2>
+            <p className="text-sm text-muted-foreground">Your work is autosaved. Reloading usually fixes this and returns you where you left off.</p>
+            <pre className="text-[11px] text-left bg-muted p-3 rounded whitespace-pre-wrap max-h-40 overflow-auto">{this.state.error.message}</pre>
+            <button onClick={() => window.location.reload()} className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90">
+              <RotateCcw className="size-4" />Reload
+            </button>
           </div>
         </div>
       );

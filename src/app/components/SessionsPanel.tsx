@@ -10,6 +10,7 @@ import { Button } from "./ui/button";
 import { Label } from "./ui/label";
 import { Plus, FolderOpen, Trash2, Cloud, CloudOff, Loader2, Check, Pin } from "lucide-react";
 import { toast } from "sonner";
+import { Skeleton } from "./ui/skeleton";
 
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
@@ -76,6 +77,7 @@ export function SessionsPanel() {
   const { user } = useAuth();
   const backendReady = useBackendReady();
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [loadingSessions, setLoadingSessions] = useState(false);
   const [busy, setBusy] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -100,6 +102,7 @@ export function SessionsPanel() {
 
   async function refresh() {
     if (!user) { setSessions([]); return; }
+    setLoadingSessions(true);
     try {
       const items = await listSessions();
       setSessions(items);
@@ -119,6 +122,8 @@ export function SessionsPanel() {
           { duration: 8000 },
         );
       }
+    } finally {
+      setLoadingSessions(false);
     }
   }
   // Wait for the backend to finish starting before hitting it, so a cold start
@@ -179,10 +184,26 @@ export function SessionsPanel() {
 
   async function onDelete(id: string, e: React.MouseEvent) {
     e.stopPropagation();
+    const meta = sessions.find(x => x.id === id);
+    // Capture the full session first so the delete can be undone.
+    let snapshot: any = null;
+    try { snapshot = await loadSession(id); } catch { /* best-effort */ }
     try {
       await deleteSession(id);
       if (s.currentSessionId === id) s.reset();
-      refresh();
+      setSessions(prev => prev.filter(x => x.id !== id));   // optimistic
+      toast.success(`Deleted "${meta?.title || "session"}"`, {
+        action: snapshot ? {
+          label: "Undo",
+          onClick: async () => {
+            try {
+              await saveSession(id, meta?.title || snapshot.title || "Untitled session", snapshot.data);
+              refresh();
+              toast.success("Session restored");
+            } catch { toast.error("Could not restore the session"); }
+          },
+        } : undefined,
+      });
     } catch (e: any) { toast.error(e.message || "Delete failed"); }
   }
 
@@ -364,7 +385,12 @@ export function SessionsPanel() {
         <Plus className="size-3 mr-1" />New
       </Button>
       <div className="space-y-1 max-h-48 overflow-y-auto">
-        {sessions.length === 0 && (
+        {loadingSessions && sessions.length === 0 && (
+          <div className="space-y-1.5 py-1">
+            {[0, 1, 2].map(i => <Skeleton key={i} className="h-7 w-full" />)}
+          </div>
+        )}
+        {!loadingSessions && sessions.length === 0 && (
           <div className="text-xs text-muted-foreground">
             Sessions auto-save to your account.
           </div>

@@ -17,6 +17,7 @@ import { Label } from "../components/ui/label";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Badge } from "../components/ui/badge";
 import { Skeleton } from "../components/ui/skeleton";
+import { timeAgo } from "../lib/format";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Textarea } from "../components/ui/textarea";
 import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy, Upload } from "lucide-react";
@@ -202,14 +203,14 @@ export function ProjectsPage() {
             >
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="font-medium truncate">{p.name}</div>
+                  <div className="font-medium truncate" title={p.name}>{p.name}</div>
                   <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-2 flex-wrap">
                     <ModeBadge mode={p.screening_mode} />
                     <Badge variant="outline" className="text-[10px]">{p.my_role}</Badge>
                     {p.locked_at && <Badge variant="outline" className="text-[10px] bg-amber-50 text-amber-700 border-amber-200">
                       <Lock className="size-3 mr-0.5 inline" />Locked
                     </Badge>}
-                    <span>Updated {new Date(p.updated_at).toLocaleDateString()}</span>
+                    <span title={new Date(p.updated_at).toLocaleString()}>Updated {timeAgo(p.updated_at)}</span>
                   </div>
                 </div>
                 <div className="flex items-center gap-1 shrink-0">

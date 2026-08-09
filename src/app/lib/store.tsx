@@ -176,6 +176,7 @@ type Ctx = {
   protocol: ReviewProtocol | null; setProtocol: (v: ReviewProtocol | null) => void;
   protocolDeviations: ProtocolDeviation[]; setProtocolDeviations: React.Dispatch<React.SetStateAction<ProtocolDeviation[]>>;
   prismaChecklist: Record<string, { status: string; note: string }>; setPrismaChecklist: React.Dispatch<React.SetStateAction<Record<string, { status: string; note: string }>>>;
+  lastSavedAt: number | null;
 
   // Relevance reranking: LEADS-scored papers from the home-analysis pipeline.
   // Threshold is user-tunable in the sidebar; rerankResults holds the full
@@ -334,6 +335,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [protocol, setProtocol] = useState<ReviewProtocol | null>(null);
   const [protocolDeviations, setProtocolDeviations] = useState<ProtocolDeviation[]>([]);
   const [prismaChecklist, setPrismaChecklist] = useState<Record<string, { status: string; note: string }>>({});
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
 
   const [abstractOverrides, setAbstractOverrides] = useState<Record<string, "INCLUDE" | "EXCLUDE">>({});
   const setAbstractOverride = (paperId: string, decision: "INCLUDE" | "EXCLUDE") => {
@@ -587,7 +589,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Primary store: IndexedDB, a much larger quota than localStorage (~5 MB),
       // so big full-text sets (many uploaded PDFs) persist intact across reloads.
       idbSet(LOCAL_SNAPSHOT_KEY, env)
-        .then(() => { try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } })
+        .then(() => { setLastSavedAt(Date.now()); try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } })
         .catch(() => {
           // IndexedDB unavailable (rare) → fall back to localStorage, shedding the
           // heaviest re-derivable fields one tier at a time so structured stage
@@ -679,7 +681,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
     gradeOutcomes, setGradeOutcomes,
     searchLog, setSearchLog, protocol, setProtocol, protocolDeviations, setProtocolDeviations,
-    prismaChecklist, setPrismaChecklist,
+    prismaChecklist, setPrismaChecklist, lastSavedAt,
     abstractOverrides, setAbstractOverride, clearAbstractOverride, setAbstractOverrides,
     fullTextOverrides, setFullTextOverride, clearFullTextOverride, setFullTextOverrides,
     rerankThreshold, setRerankThreshold, rerankResults, setRerankResults,

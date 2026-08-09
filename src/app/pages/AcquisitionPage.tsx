@@ -20,8 +20,9 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import {
   FileDown, CheckCircle2, AlertTriangle, ExternalLink, RefreshCcw, Upload, FileUp, FileText, X, Search,
-  BookOpen, Code2, FileType2,
+  BookOpen, Code2, FileType2, FileSearch,
 } from "lucide-react";
+import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -194,7 +195,7 @@ export function AcquisitionPage() {
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
 
-  if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first to unlock full-text acquisition.</AlertDescription></Alert>;
+  if (!s.results) return <EmptyState icon={FileSearch} title="No included papers yet" description="Run abstract screening first, then acquire the full text for included papers here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
   // Honour reviewer overrides: papers the user marked Keep at abstract
   // screening get their full text fetched here even if the AI excluded them.
   const included = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
