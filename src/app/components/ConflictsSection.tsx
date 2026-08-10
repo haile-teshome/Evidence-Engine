@@ -85,13 +85,13 @@ export function ConflictsSection({ projectId }: { projectId: string }) {
       </div>
 
       <div className="text-xs text-muted-foreground">
-        Papers where two or more reviewers disagree. The adjudicator's decision becomes the effective decision for the project.
+        Articles where two or more reviewers disagree. The adjudicator's decision becomes the effective decision for the project.
       </div>
 
       {!loading && conflicts.length === 0 && (
         <Alert>
           <AlertDescription className="text-xs">
-            No outstanding conflicts at this stage. As reviewers complete papers, disagreements will appear here.
+            No outstanding conflicts at this stage. As reviewers complete articles, disagreements will appear here.
           </AlertDescription>
         </Alert>
       )}

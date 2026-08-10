@@ -115,7 +115,7 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
         include_calibration: includeCalib,
       });
       setResult(r);
-      toast.success(`Assigned ${r.assigned} paper-slots across ${r.per_reviewer.length} reviewers`);
+      toast.success(`Assigned ${r.assigned} article-slots across ${r.per_reviewer.length} reviewers`);
     } catch (e: any) { toast.error(e?.message || "Assignment failed"); }
     finally { setAssigning(false); }
   }
@@ -125,7 +125,7 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="font-medium flex items-center gap-2"><Users className="size-4 text-primary" />Team &amp; assignment: {projectName}</h3>
-          <p className="text-xs text-muted-foreground mt-0.5">{paperCount.toLocaleString()} papers · {reviewers.length} reviewer{reviewers.length === 1 ? "" : "s"}. Define reviewers and split the papers across them.</p>
+          <p className="text-xs text-muted-foreground mt-0.5">{paperCount.toLocaleString()} articles · {reviewers.length} reviewer{reviewers.length === 1 ? "" : "s"}. Define reviewers and split the articles across them.</p>
         </div>
         <Button variant="ghost" size="icon" onClick={onClose}><X className="size-4" /></Button>
       </div>
@@ -160,7 +160,7 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
                       <SelectItem value="lead">Lead</SelectItem>
                     </SelectContent>
                   </Select>
-                  <div className="flex items-center gap-1" title="Relative share of papers (weighted assignment)">
+                  <div className="flex items-center gap-1" title="Relative share of articles (weighted assignment)">
                     <span className="text-[10px] text-muted-foreground">wt</span>
                     <Input type="number" min={0} step={0.5} value={p.weight}
                       onChange={e => patch(p.id, { weight: Math.max(0, parseFloat(e.target.value) || 0) })}
@@ -187,18 +187,18 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
 
           {/* Assignment */}
           <div className="space-y-3 border-t pt-3">
-            <Label className="text-xs">Auto-assign papers</Label>
+            <Label className="text-xs">Auto-assign articles</Label>
             <div className="flex flex-wrap items-center gap-3">
               <Select value={strategy} onValueChange={v => setStrategy(v as Strategy)}>
                 <SelectTrigger className="h-8 w-52"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="dual">Dual: every paper by N reviewers</SelectItem>
+                  <SelectItem value="dual">Dual: every article by N reviewers</SelectItem>
                   <SelectItem value="overlap">Overlap %: split, with QC double-check</SelectItem>
                   <SelectItem value="weighted">Weighted split: by reviewer weight</SelectItem>
                 </SelectContent>
               </Select>
               {strategy === "dual" && (
-                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">Reviewers / paper
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">Reviewers / article
                   <Input type="number" min={1} max={Math.max(1, reviewers.length)} value={perPaper} onChange={e => setPerPaper(Math.max(1, parseInt(e.target.value) || 1))} className="h-8 w-16" />
                 </label>
               )}
@@ -218,7 +218,7 @@ export function ProjectWorkspace({ projectId, projectName, onClose }: { projectI
 
             {result && (
               <div className="rounded-md border bg-muted/20 p-3 text-sm space-y-1.5">
-                <div className="text-xs text-muted-foreground">{result.assigned} paper-slots assigned{result.calibration ? ` · ${result.calibration} calibration paper(s) to all` : ""}</div>
+                <div className="text-xs text-muted-foreground">{result.assigned} article-slots assigned{result.calibration ? ` · ${result.calibration} calibration article(s) to all` : ""}</div>
                 <div className="flex flex-wrap gap-2">
                   {result.per_reviewer.map(r => (
                     <Badge key={r.id} variant="secondary">{r.name}: {r.count}</Badge>

@@ -15,6 +15,7 @@ import {
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 
 type SnowballType = "Both" | "Backward (References)" | "Forward (Cited by)";
 
@@ -84,7 +85,7 @@ export function SnowballPage() {
   // Honour reviewer overrides: papers the user kept by checking the
   // full-text Keep box should seed snowballing even if the AI excluded them.
   const seeds = s.fullTextResults.filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include");
-  if (seeds.length === 0) return <EmptyState icon={FlaskConical} title="No papers passed full-text screening" description="Snowballing needs at least one included study. Adjust criteria and re-run full-text evaluation." action={{ label: "Back to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
+  if (seeds.length === 0) return <EmptyState icon={FlaskConical} title="No articles passed full-text screening" description="Snowballing needs at least one included study. Adjust criteria and re-run full-text evaluation." action={{ label: "Back to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
 
   async function start() {
     const { abort } = s.startTask("snowball", [{ id: "snow", label: "Fetching citations", status: "running" }]);
@@ -117,7 +118,7 @@ export function SnowballPage() {
         toast.info(`Canceled: ${unique.length} unique citations gathered`);
       } else {
         s.updateTask("snowball", { status: "done" });
-        toast.success(`Found ${unique.length} unique papers via snowballing`);
+        toast.success(`Found ${unique.length} unique articles via snowballing`);
       }
     } catch (e: any) {
       s.updateTask("snowball", { status: "error", detail: e?.message });
@@ -156,7 +157,7 @@ export function SnowballPage() {
         toast.info(`Canceled: ${out.length} of ${s.snowballResults.length} screened`);
       } else {
         s.updateTask("snowball-screen", { status: "done" });
-        toast.success(`Screened ${out.length} snowballed papers`);
+        toast.success(`Screened ${out.length} snowballed articles`);
       }
     } catch (e: any) {
       s.updateTask("snowball-screen", { status: "error", detail: e?.message });
@@ -188,10 +189,10 @@ export function SnowballPage() {
         });
       }
     }
-    if (toAdd.length === 0) { toast.error("No papers selected to add."); return; }
+    if (toAdd.length === 0) { toast.error("No articles selected to add."); return; }
     s.setResults([...s.results, ...toAdd]);
     s.setPrisma(p => ({ ...p, identified: p.identified + (s.snowballResults?.length || 0), included_final: p.included_final + toAdd.length }));
-    toast.success(`Added ${toAdd.length} paper${toAdd.length === 1 ? "" : "s"} to main results`);
+    toast.success(`Added ${toAdd.length} article${toAdd.length === 1 ? "" : "s"} to main results`);
   }
   function clearAll() {
     s.setSnowballResults(null); s.setSnowballScreened(null);
@@ -233,38 +234,43 @@ export function SnowballPage() {
   return (
     <div className="space-y-3">
       {/* ── Compact header: stats + controls + run ─────────────────────────── */}
-      <Card className="p-3">
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="mr-auto min-w-0">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Pill icon={FileText} title="Seed papers that passed full-text screening">{seeds.length} seeds</Pill>
-              {results && <Pill icon={Network}>{results.length} found</Pill>}
-              {results && <Pill icon={ArrowDownLeft} title="Backward: references cited by the seeds">{backCount} backward</Pill>}
-              {results && <Pill icon={ArrowUpRight} title="Forward: papers that cite the seeds">{fwdCount} forward</Pill>}
-              {screened && <Pill icon={CheckCircle2} tone="green" title="AI marked INCLUDE">{includedCount} AI-included</Pill>}
-              {screened && <Pill icon={XCircle} tone="amber" title="AI marked EXCLUDE">{excludedCount} AI-excluded</Pill>}
-              {results && chosen.size > 0 && <Pill icon={CheckCircle2} tone="green" title="Selected to carry into main results">{chosen.size} selected</Pill>}
-            </div>
-          </div>
-          <div className="flex items-center gap-2.5 h-10 rounded-lg border bg-muted/30 px-3">
+      <ControlPane
+        singleLine
+        stats={<>
+          <InlineStat icon={FileText} value={seeds.length} label="Seeds" />
+          {results && <>
+            <PaneDivider />
+            <InlineStat icon={Network} value={results.length} label="Found" />
+            <InlineStat icon={ArrowDownLeft} value={backCount} label="Backward" />
+            <InlineStat icon={ArrowUpRight} value={fwdCount} label="Forward" />
+          </>}
+          {screened && <>
+            <PaneDivider />
+            <InlineStat icon={CheckCircle2} tone="success" value={includedCount} label="AI included" />
+            <InlineStat icon={XCircle} tone="amber" value={excludedCount} label="AI excluded" />
+          </>}
+          {results && chosen.size > 0 && <InlineStat icon={CheckCircle2} tone="success" value={chosen.size} label="Selected" />}
+        </>}
+        actions={<>
+          <div className="flex items-center gap-2.5 h-9 rounded-lg border bg-muted/30 px-2.5">
             <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Direction</span>
-            <div className="inline-flex h-8 rounded-md border bg-background p-0.5">
+            <div className="inline-flex h-7 rounded-md border bg-background p-0.5">
               {DIRECTIONS.map(d => (
                 <button
                   key={d.value}
                   onClick={() => setType(d.value)}
-                  className={`px-2.5 text-sm rounded-[5px] transition-colors ${type === d.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  className={`px-2.5 text-xs rounded-[5px] transition-colors ${type === d.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
                 >
                   {d.label}
                 </button>
               ))}
             </div>
             <div className="h-5 w-px bg-border mx-1" />
-            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Max per paper</span>
-            <div className="inline-flex h-8 items-center rounded-md border bg-background">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Max</span>
+            <div className="inline-flex h-7 items-center rounded-md border bg-background">
               <button
                 onClick={() => setMaxCit(m => Math.max(5, m - 5))}
-                className="px-2 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
+                className="px-1.5 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
                 disabled={maxCit <= 5}
                 aria-label="Decrease"
               >
@@ -279,11 +285,11 @@ export function SnowballPage() {
                   const n = parseInt(e.target.value, 10);
                   setMaxCit(Number.isNaN(n) ? 1 : Math.min(500, Math.max(1, n)));
                 }}
-                className="w-10 h-full text-center text-sm font-semibold tabular-nums bg-transparent border-x outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                className="w-9 h-full text-center text-sm font-semibold tabular-nums bg-transparent border-x outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
               />
               <button
                 onClick={() => setMaxCit(m => Math.min(500, m + 5))}
-                className="px-2 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
+                className="px-1.5 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
                 disabled={maxCit >= 500}
                 aria-label="Increase"
               >
@@ -291,17 +297,23 @@ export function SnowballPage() {
               </button>
             </div>
           </div>
-          <Button onClick={start} disabled={running} className="h-10">
-            <Network className="size-4 mr-2" />{running ? "Fetching..." : results ? "Re-run" : "Start Snowballing"}
-          </Button>
-        </div>
-      </Card>
+          {running ? (
+            <Button size="sm" variant="destructive" className="h-9 shadow-sm" onClick={() => s.cancelTask("snowball")}>
+              <XCircle className="size-3.5 mr-1.5" />Cancel
+            </Button>
+          ) : (
+            <Button size="sm" className="h-9 shadow-sm" onClick={start}>
+              <Network className="size-3.5 mr-1.5" />{results ? "Re-run" : "Start snowballing"}
+            </Button>
+          )}
+        </>}
+      />
 
       {fetchTask && fetchTask.status === "running" && (
         <TaskProgressCard task={fetchTask} title="Fetching citations" onCancel={() => s.cancelTask("snowball")} />
       )}
       {screenTask && screenTask.status === "running" && (
-        <TaskProgressCard task={screenTask} title="Screening snowballed papers" onCancel={() => s.cancelTask("snowball-screen")} />
+        <TaskProgressCard task={screenTask} title="Screening snowballed articles" onCancel={() => s.cancelTask("snowball-screen")} />
       )}
 
       {results && (
@@ -311,7 +323,7 @@ export function SnowballPage() {
             {/* LEFT: seed papers */}
             <Card className="w-80 shrink-0 p-0 overflow-hidden flex flex-col">
               <div className="px-3 py-2 border-b text-xs uppercase tracking-wide text-muted-foreground">
-                Seed papers
+                Seed articles
               </div>
               <div className="overflow-auto flex-1">
                 <button

@@ -5,6 +5,31 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 import { cn } from "./utils";
 
+// A Popover that closes itself when the page (or any scroll container) scrolls
+// or resizes, so it never floats detached from its trigger inside a scrollable
+// table. Capture-phase listening is required because scroll events don't bubble.
+function ScrollAwarePopover({
+  children,
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+  const [open, setOpen] = React.useState(false);
+  React.useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
+  return (
+    <PopoverPrimitive.Root data-slot="popover" open={open} onOpenChange={setOpen} {...props}>
+      {children}
+    </PopoverPrimitive.Root>
+  );
+}
+
 function Popover({
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
@@ -45,4 +70,10 @@ function PopoverAnchor({
   return <PopoverPrimitive.Anchor data-slot="popover-anchor" {...props} />;
 }
 
-export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor };
+function PopoverClose({
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Close>) {
+  return <PopoverPrimitive.Close data-slot="popover-close" {...props} />;
+}
+
+export { Popover, PopoverTrigger, PopoverContent, PopoverAnchor, PopoverClose, ScrollAwarePopover };

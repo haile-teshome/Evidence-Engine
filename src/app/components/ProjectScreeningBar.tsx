@@ -105,7 +105,7 @@ export function ProjectScreeningBar({
       {blinded && (
         <Alert className="mt-3 border-amber-200 bg-amber-50">
           <AlertDescription className="text-xs">
-            You are in <strong>blinded mode</strong>: other reviewers' decisions and reasoning are hidden until you decide on each paper. Once both reviewers have decided, conflicts are routed to the adjudicator.
+            You are in <strong>blinded mode</strong>: other reviewers' decisions and reasoning are hidden until you decide on each article. Once both reviewers have decided, conflicts are routed to the adjudicator.
           </AlertDescription>
         </Alert>
       )}

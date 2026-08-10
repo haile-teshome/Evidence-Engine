@@ -150,7 +150,7 @@ export function CorpusHeatmap({
         <table className="min-w-full text-xs">
           <thead>
             <tr>
-              <th className="text-left px-2 py-1 sticky left-0 bg-card">Paper</th>
+              <th className="text-left px-2 py-1 sticky left-0 bg-card">Article</th>
               {columns.map(c => (
                 <th key={c.id} className="px-1 py-1 align-bottom">
                   <div

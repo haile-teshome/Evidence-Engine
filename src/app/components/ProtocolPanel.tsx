@@ -1,11 +1,10 @@
 import { useState } from "react";
 import { useStore } from "../lib/store";
 import { AIService, ProtocolDeviation } from "../lib/apiClient";
-import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Textarea } from "./ui/textarea";
-import { FileText, Loader2, Download, Plus, Trash2, Wand2, ChevronDown, ChevronRight } from "lucide-react";
+import { Loader2, Download, Plus, Trash2, Wand2 } from "lucide-react";
 import { toast } from "sonner";
 
 function dl(name: string, content: string, mime: string) {
@@ -17,10 +16,10 @@ function dl(name: string, content: string, mime: string) {
 
 // Register-first protocol: draft a PROSPERO-style protocol from the PICO and
 // eligibility criteria, then track any deviations from it. Both are exportable
-// for transparent reporting.
+// for transparent reporting. Rendered inline inside the Strategy Review drawer,
+// so it lays out for a narrow column (no collapsible card wrapper).
 export function ProtocolPanel() {
   const s = useStore();
-  const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [title, setTitle] = useState("");
   const protocol = s.protocol;
@@ -65,60 +64,54 @@ export function ProtocolPanel() {
   }
 
   return (
-    <Card className="p-3 space-y-2">
-      <button className="flex items-center gap-1.5 text-sm font-medium w-full text-left" onClick={() => setOpen(o => !o)}>
-        {open ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-        <FileText className="size-4 text-primary" />Protocol (register first)
-        {protocol && <span className="text-xs text-muted-foreground font-normal ml-1">drafted{deviations.length ? `, ${deviations.length} deviation${deviations.length === 1 ? "" : "s"}` : ""}</span>}
-      </button>
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground">
+        Draft a PROSPERO-style protocol from your question and criteria, register it before screening, then log any deviations for transparent reporting.
+      </p>
 
-      {open && (
-        <div className="space-y-3 pt-1">
-          <p className="text-xs text-muted-foreground">
-            Draft a PROSPERO-style protocol from your question and criteria, register it before screening, then log any deviations for transparent reporting.
-          </p>
-          <div className="flex flex-wrap items-center gap-2">
-            <Input value={title} onChange={e => setTitle(e.target.value)} placeholder="Review title (optional)" className="h-8 text-sm flex-1 min-w-[200px]" />
-            <Button size="sm" onClick={generate} disabled={busy}>
-              {busy ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Wand2 className="size-3.5 mr-1.5" />}{protocol ? "Regenerate" : "Draft protocol"}
-            </Button>
-            <Button size="sm" variant="outline" onClick={exportMd} disabled={!protocol?.text}><Download className="size-3.5 mr-1.5" />Export (.md)</Button>
+      <Input value={title} onChange={e => setTitle(e.target.value)} placeholder="Review title (optional)" className="h-8 text-sm" />
+      <div className="flex gap-2">
+        <Button size="sm" onClick={generate} disabled={busy} className="flex-1">
+          {busy ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Wand2 className="size-3.5 mr-1.5" />}{protocol ? "Regenerate" : "Draft protocol"}
+        </Button>
+        <Button size="sm" variant="outline" onClick={exportMd} disabled={!protocol?.text}><Download className="size-3.5 mr-1.5" />Export</Button>
+      </div>
+
+      {protocol && (
+        <>
+          <div className="space-y-2 rounded-md border bg-muted/30 p-2.5">
+            <label className="flex items-center gap-1.5 text-xs font-medium">
+              <input type="checkbox" checked={!!protocol.registered} onChange={e => s.setProtocol({ ...protocol, registered: e.target.checked })} />
+              Registered
+            </label>
+            <Input value={protocol.registrationId || ""} onChange={e => s.setProtocol({ ...protocol, registrationId: e.target.value })}
+              placeholder="Registration ID (e.g. PROSPERO CRD…)" className="h-7 text-xs" />
+            <div className="text-[11px] text-muted-foreground">Drafted {new Date(protocol.generatedAt).toLocaleDateString()}</div>
           </div>
 
-          {protocol && (
-            <>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <input type="checkbox" checked={!!protocol.registered} onChange={e => s.setProtocol({ ...protocol, registered: e.target.checked })} />
-                  Registered
-                </label>
-                <Input value={protocol.registrationId || ""} onChange={e => s.setProtocol({ ...protocol, registrationId: e.target.value })}
-                  placeholder="Registration ID (e.g. PROSPERO CRD…)" className="h-7 text-xs w-64" />
-                <span className="text-[11px] text-muted-foreground">Drafted {new Date(protocol.generatedAt).toLocaleDateString()}</span>
-              </div>
-              <Textarea value={protocol.text} onChange={e => s.setProtocol({ ...protocol, text: e.target.value })}
-                className="text-xs font-mono min-h-[280px]" />
+          <Textarea value={protocol.text} onChange={e => s.setProtocol({ ...protocol, text: e.target.value })}
+            className="text-xs font-mono min-h-[260px]" />
 
-              <div className="space-y-1.5 border-t pt-2">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-medium">Deviations from the protocol</div>
-                  <Button size="sm" variant="outline" onClick={addDeviation}><Plus className="size-3.5 mr-1.5" />Add deviation</Button>
+          <div className="space-y-2 border-t pt-2">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-medium">Deviations from the protocol</div>
+              <Button size="sm" variant="outline" onClick={addDeviation}><Plus className="size-3.5 mr-1.5" />Add</Button>
+            </div>
+            {deviations.length === 0 && <div className="text-[11px] text-muted-foreground">None logged. Record any change made after registration.</div>}
+            {deviations.map(d => (
+              <div key={d.id} className="space-y-1.5 rounded-md border p-2">
+                <div className="flex items-center gap-1.5">
+                  <Input type="date" value={d.date} onChange={e => patchDeviation(d.id, { date: e.target.value })} className="h-7 text-xs flex-1" />
+                  <button onClick={() => s.setProtocolDeviations(prev => prev.filter(x => x.id !== d.id))} className="text-muted-foreground hover:text-destructive shrink-0"><Trash2 className="size-3.5" /></button>
                 </div>
-                {deviations.length === 0 && <div className="text-[11px] text-muted-foreground">None logged. Record any change made after registration.</div>}
-                {deviations.map(d => (
-                  <div key={d.id} className="grid grid-cols-[110px_1fr_1fr_1fr_auto] gap-1.5 items-center">
-                    <Input type="date" value={d.date} onChange={e => patchDeviation(d.id, { date: e.target.value })} className="h-7 text-xs" />
-                    <Input value={d.section} onChange={e => patchDeviation(d.id, { section: e.target.value })} placeholder="Section" className="h-7 text-xs" />
-                    <Input value={d.change} onChange={e => patchDeviation(d.id, { change: e.target.value })} placeholder="What changed" className="h-7 text-xs" />
-                    <Input value={d.reason} onChange={e => patchDeviation(d.id, { reason: e.target.value })} placeholder="Reason" className="h-7 text-xs" />
-                    <button onClick={() => s.setProtocolDeviations(prev => prev.filter(x => x.id !== d.id))} className="text-muted-foreground hover:text-destructive"><Trash2 className="size-3.5" /></button>
-                  </div>
-                ))}
+                <Input value={d.section} onChange={e => patchDeviation(d.id, { section: e.target.value })} placeholder="Section" className="h-7 text-xs" />
+                <Input value={d.change} onChange={e => patchDeviation(d.id, { change: e.target.value })} placeholder="What changed" className="h-7 text-xs" />
+                <Input value={d.reason} onChange={e => patchDeviation(d.id, { reason: e.target.value })} placeholder="Reason" className="h-7 text-xs" />
               </div>
-            </>
-          )}
-        </div>
+            ))}
+          </div>
+        </>
       )}
-    </Card>
+    </div>
   );
 }

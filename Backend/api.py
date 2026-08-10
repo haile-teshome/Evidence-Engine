@@ -2184,18 +2184,29 @@ def _openalex_links(work: Dict[str, Any], direction: str, max_per: int) -> List[
     out: List[Dict[str, Any]] = []
     try:
         if direction == "backward":
-            refs = (work.get("referenced_works") or [])[:max_per]
-            for ref_url in refs:
-                try:
-                    rr = requests.get(ref_url, params={"mailto": Config.ENTREZ_EMAIL}, timeout=8)
-                    if rr.status_code == 200:
-                        out.append(_openalex_minimal(rr.json(), "backward"))
-                except Exception:
-                    continue
+            # referenced_works are canonical OpenAlex ids (openalex.org/W…).
+            # Batch-resolve them through the API in one call rather than
+            # dereferencing each web URL (which returns HTML, not JSON).
+            ref_ids = [r.split("/")[-1] for r in (work.get("referenced_works") or [])[:max_per] if r]
+            if ref_ids:
+                rr = requests.get(
+                    "https://api.openalex.org/works",
+                    params={"filter": f"openalex_id:{'|'.join(ref_ids)}", "per_page": max_per, "mailto": Config.ENTREZ_EMAIL},
+                    timeout=12,
+                )
+                if rr.status_code == 200:
+                    for w in rr.json().get("results", [])[:max_per]:
+                        out.append(_openalex_minimal(w, "backward"))
         else:
-            cited_by = work.get("cited_by_api_url")
-            if cited_by:
-                rr = requests.get(cited_by, params={"per_page": max_per, "mailto": Config.ENTREZ_EMAIL}, timeout=12)
+            # Forward citations via the `cites` filter (cited_by_api_url was
+            # removed from the OpenAlex work schema).
+            wid = (work.get("id") or "").split("/")[-1]
+            if wid:
+                rr = requests.get(
+                    "https://api.openalex.org/works",
+                    params={"filter": f"cites:{wid}", "per_page": max_per, "mailto": Config.ENTREZ_EMAIL},
+                    timeout=12,
+                )
                 if rr.status_code == 200:
                     for w in rr.json().get("results", [])[:max_per]:
                         out.append(_openalex_minimal(w, "forward"))

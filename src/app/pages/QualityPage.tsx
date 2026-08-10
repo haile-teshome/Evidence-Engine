@@ -284,7 +284,7 @@ export function QualityPage() {
   async function runAssess(forceInstrumentId?: string) {
     const { papers, stage } = includedPapers();
     if (papers.length === 0) {
-      toast.error("No included papers yet. Run Abstract or Full-Text screening first.");
+      toast.error("No included articles yet. Run Abstract or Full-Text screening first.");
       return;
     }
     const priorById = new Map((s.qualityReports || []).map(r => [r.paper_id, r]));
@@ -293,7 +293,7 @@ export function QualityPage() {
     const signal = abort.signal;
     try {
       const reports: QualityReport[] = [];
-      s.updateTask("quality-assess", { progress: { done: 0, total: papers.length }, detail: `Appraising ${papers.length} included papers${forcedName ? ` with ${forcedName}` : ""}…` });
+      s.updateTask("quality-assess", { progress: { done: 0, total: papers.length }, detail: `Appraising ${papers.length} included articles${forcedName ? ` with ${forcedName}` : ""}…` });
       for (let i = 0; i < papers.length; i++) {
         if (signal.aborted) break;
         const p = papers[i];
@@ -342,7 +342,7 @@ export function QualityPage() {
       } else {
         s.updateTask("quality-assess", { status: "done" });
         const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
-        toast.success(`Appraised ${reports.length} included papers${forcedName ? ` with ${forcedName}` : ` (${stage})`}${withFT ? `, ${withFT} using full text` : ""}.`);
+        toast.success(`Appraised ${reports.length} included articles${forcedName ? ` with ${forcedName}` : ` (${stage})`}${withFT ? `, ${withFT} using full text` : ""}.`);
       }
     } catch (e: any) {
       s.updateTask("quality-assess", { status: "error", detail: e?.message });
@@ -379,9 +379,9 @@ export function QualityPage() {
   function proceedToScreening() {
     if (!s.qualityReports || !s.uniquePapers) return;
     const kept = s.uniquePapers.filter(p => !s.excludedByQuality.has(p.id));
-    if (kept.length === 0) { toast.error("All papers are excluded. Adjust your selections."); return; }
+    if (kept.length === 0) { toast.error("All articles are excluded. Adjust your selections."); return; }
     s.setPage("abstract");
-    toast.info(`${kept.length} papers will be carried forward to abstract screening.`);
+    toast.info(`${kept.length} articles will be carried forward to abstract screening.`);
   }
 
   const reports = s.qualityReports;
@@ -437,7 +437,7 @@ export function QualityPage() {
         <>
           <Alert>
             <AlertDescription>
-              Risk-of-bias appraisal of your <strong>included</strong> papers, with a rubric matched to each study
+              Risk-of-bias appraisal of your <strong>included</strong> articles, with a rubric matched to each study
               design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Uses the acquired full text where available for better
               judgments. Reviewer overrides are audit-logged.
             </AlertDescription>
@@ -446,10 +446,10 @@ export function QualityPage() {
             const { papers, stage } = includedPapers();
             const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
             return papers.length === 0 ? (
-              <Alert><AlertDescription>No included papers yet. Run Abstract or Full-Text screening first, then come back to appraise risk of bias.</AlertDescription></Alert>
+              <Alert><AlertDescription>No included articles yet. Run Abstract or Full-Text screening first, then come back to appraise risk of bias.</AlertDescription></Alert>
             ) : (
               <div className="text-xs text-muted-foreground px-1">
-                {papers.length} included paper{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text yet, abstract-only appraisal"}
+                {papers.length} included article{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text yet, abstract-only appraisal"}
               </div>
             );
           })()}
@@ -461,7 +461,7 @@ export function QualityPage() {
             />
           )}
           <Button onClick={() => runAssess()} disabled={running || includedPapers().papers.length === 0} size="lg" className="w-full">
-            <ShieldCheck className="size-4 mr-2" />{running ? "Appraising…" : "Appraise Risk of Bias on Included Papers"}
+            <ShieldCheck className="size-4 mr-2" />{running ? "Appraising…" : "Appraise Risk of Bias on Included Articles"}
           </Button>
         </>
       )}
@@ -484,7 +484,7 @@ export function QualityPage() {
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
                 Framework
-                <HelpLabel text="Re-run all papers with one instrument, or auto-match each to its study design. Prior appraisals are saved per paper." />
+                <HelpLabel text="Re-run all articles with one instrument, or auto-match each to its study design. Prior appraisals are saved per article." />
               </div>
               <div className="flex items-center gap-2">
                 <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
@@ -492,7 +492,7 @@ export function QualityPage() {
                     <SelectValue placeholder="Auto: match by design" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="__auto">Auto: match each paper's design</SelectItem>
+                    <SelectItem value="__auto">Auto: match each article's design</SelectItem>
                     {["internal_validity", "reporting", "certainty"]
                       .filter(ax => instruments.some(i => i.axis === ax))
                       .map(ax => (
@@ -521,7 +521,7 @@ export function QualityPage() {
             <div className="flex flex-col sm:flex-row sm:items-center gap-2">
               <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
                 Exclude
-                <HelpLabel text="How aggressively to exclude papers by risk of bias. Uses your edited judgments where set; override individual rows below." />
+                <HelpLabel text="How aggressively to exclude articles by risk of bias. Uses your edited judgments where set; override individual rows below." />
               </div>
               <div className="flex gap-1 flex-wrap">
                 {([
@@ -583,7 +583,7 @@ export function QualityPage() {
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-medium">Risk-of-bias appraisal{instrumentGroups.length > 1 && activeGroup ? `: ${activeGroup.label}` : ""}</h3>
               <div className="text-xs text-muted-foreground">
-                Select a paper, then click a judgment chip to override it.
+                Select an article, then click a judgment chip to override it.
               </div>
             </div>
             {/* ── Two-pane: paper list (left) + selected appraisal (right) ───── */}
@@ -596,7 +596,7 @@ export function QualityPage() {
                     <Input
                       value={q}
                       onChange={e => setQ(e.target.value)}
-                      placeholder={`Filter ${activeReports.length} papers…`}
+                      placeholder={`Filter ${activeReports.length} articles…`}
                       className="pl-7 h-8 text-sm"
                     />
                   </div>
@@ -610,7 +610,7 @@ export function QualityPage() {
                       <button
                         key={r.paper_id}
                         onClick={() => setSelectedId(r.paper_id)}
-                        className={`w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"} ${excluded ? "opacity-50" : ""}`}
+                        className={`block w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"} ${excluded ? "opacity-50" : ""}`}
                       >
                         <div className="flex items-center gap-1.5 mb-1">
                           <span
@@ -636,7 +636,7 @@ export function QualityPage() {
                     );
                   })}
                   {filtered.length === 0 && (
-                    <div className="p-4 text-sm text-muted-foreground">No papers match “{q}”.</div>
+                    <div className="p-4 text-sm text-muted-foreground">No articles match “{q}”.</div>
                   )}
                 </div>
               </div>
@@ -645,7 +645,7 @@ export function QualityPage() {
               <div className="flex-1 min-w-0 rounded-md border overflow-hidden flex flex-col">
                 {!selected ? (
                   <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                    Select a paper on the left.
+                    Select an article on the left.
                   </div>
                 ) : (
                   <PaperDetail
@@ -839,7 +839,7 @@ function FrameworkSelector({
       <Select value={pending} onValueChange={setPending} disabled={reassessing}>
         <SelectTrigger
           className={`h-6 px-2 py-0 text-xs w-auto gap-1 border-dashed ${changed ? "border-primary/60 text-primary" : ""}`}
-          title="Appraisal framework: pick a tool, then Run to (re-)appraise this paper"
+          title="Appraisal framework: pick a tool, then Run to (re-)appraise this article"
         >
           <SelectValue placeholder={fallbackLabel} />
         </SelectTrigger>
@@ -862,7 +862,7 @@ function FrameworkSelector({
         className="h-6 px-2 text-xs"
         disabled={reassessing || !pending}
         onClick={() => onRun(pending)}
-        title={changed ? "Appraise this paper with the selected tool" : "Re-appraise this paper"}
+        title={changed ? "Appraise this article with the selected tool" : "Re-appraise this article"}
       >
         {reassessing
           ? <><Loader2 className="size-3 mr-1 animate-spin" />Running…</>

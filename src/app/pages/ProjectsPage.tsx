@@ -94,7 +94,7 @@ export function ProjectsPage() {
       s.setUniquePapers(asPapers.length ? asPapers : null);
       s.setDuplicatesCount(0);
       if (asPapers.length && !s.query) { s.setQuery(project.name); s.setUnifiedSearchQuery(project.name); }
-      toast.success(`Opened ${project.name}: ${asPapers.length} papers, ${members.length} member${members.length === 1 ? "" : "s"}`);
+      toast.success(`Opened ${project.name}: ${asPapers.length} articles, ${members.length} member${members.length === 1 ? "" : "s"}`);
       s.setPage("home");
     } catch (e: any) {
       toast.error(e?.message || "Failed to open project");
@@ -357,7 +357,7 @@ function CreateProjectCard({
 
       // 5. Show summary
       toast.success(
-        `Created ${project.name}: ${seeds.length} papers, ${links.length} invite links${strategy === "split" ? ` · split (${reviewersPerPaper}/paper), assign after reviewers join` : ""}`,
+        `Created ${project.name}: ${seeds.length} articles, ${links.length} invite links${strategy === "split" ? ` · split (${reviewersPerPaper}/article), assign after reviewers join` : ""}`,
         { duration: 6000 },
       );
 
@@ -436,7 +436,7 @@ function CreateProjectCard({
                 onChange={(e) => setCustomCsv(e.target.value)}
                 rows={5}
                 className="font-mono text-[11px]"
-                placeholder="title,abstract,source,url,doi&#10;Some paper,Its abstract...,PubMed,https://...,10.1234/..."
+                placeholder="title,abstract,source,url,doi&#10;Some article,Its abstract...,PubMed,https://...,10.1234/..."
               />
             </div>
           )}
@@ -502,26 +502,26 @@ function CreateProjectCard({
 
       {step === 4 && (
         <div className="space-y-3">
-          <div className="text-sm">How should papers be distributed across reviewers?</div>
+          <div className="text-sm">How should articles be distributed across reviewers?</div>
           <div className="space-y-2">
             <StrategyOption
               value="full_overlap"
               selected={strategy}
               onSelect={setStrategy}
               title="Full overlap (Cochrane standard)"
-              description={`Every reviewer screens every paper. Required for dual-blinded review with adjudication. Workload: ${seedCount} papers × ${expectedReviewers} reviewers = ${seedCount * expectedReviewers} screenings.`}
+              description={`Every reviewer screens every article. Required for dual-blinded review with adjudication. Workload: ${seedCount} articles × ${expectedReviewers} reviewers = ${seedCount * expectedReviewers} screenings.`}
             />
             <StrategyOption
               value="split"
               selected={strategy}
               onSelect={setStrategy}
               title="Round-robin split"
-              description={`Each paper is assigned to ${reviewersPerPaper} reviewers, distributed round-robin. Faster, no full duplicate screening. Workload: ${seedCount} papers × ${reviewersPerPaper} reviewers = ${seedCount * reviewersPerPaper} screenings.`}
+              description={`Each article is assigned to ${reviewersPerPaper} reviewers, distributed round-robin. Faster, no full duplicate screening. Workload: ${seedCount} articles × ${reviewersPerPaper} reviewers = ${seedCount * reviewersPerPaper} screenings.`}
             />
           </div>
           {strategy === "split" && (
             <div className="space-y-1.5 pl-6">
-              <Label className="text-xs">Reviewers per paper</Label>
+              <Label className="text-xs">Reviewers per article</Label>
               <Input
                 type="number"
                 min={1}
@@ -531,7 +531,7 @@ function CreateProjectCard({
                 className="w-24"
               />
               <div className="text-[11px] text-muted-foreground">
-                Cochrane requires ≥ 2 reviewers per paper for primary screening; setting to 1 skips dual screening.
+                Cochrane requires ≥ 2 reviewers per article for primary screening; setting to 1 skips dual screening.
               </div>
             </div>
           )}
@@ -545,7 +545,7 @@ function CreateProjectCard({
           )}
 
           <div className="text-xs text-muted-foreground border-t pt-3">
-            <strong>Summary:</strong> Create review <em>{name || "(unnamed)"}</em> in <em>{mode}</em> mode with {seedCount} seed papers from <em>{chosenSource.title}</em>, {pendingInvites.length} invite link{pendingInvites.length === 1 ? "" : "s"}, and <em>{strategy === "full_overlap" ? "full-overlap" : `split (${reviewersPerPaper}/paper, applied after join)`}</em> assignment.
+            <strong>Summary:</strong> Create review <em>{name || "(unnamed)"}</em> in <em>{mode}</em> mode with {seedCount} seed articles from <em>{chosenSource.title}</em>, {pendingInvites.length} invite link{pendingInvites.length === 1 ? "" : "s"}, and <em>{strategy === "full_overlap" ? "full-overlap" : `split (${reviewersPerPaper}/article, applied after join)`}</em> assignment.
           </div>
         </div>
       )}
@@ -612,7 +612,7 @@ function SourceOption({
     >
       <div className="flex items-center justify-between gap-3">
         <div className="font-medium text-sm">{title}</div>
-        <Badge variant="outline" className="text-[10px] tabular-nums">{count} papers</Badge>
+        <Badge variant="outline" className="text-[10px] tabular-nums">{count} articles</Badge>
       </div>
       <div className="text-xs text-muted-foreground mt-1">{description}</div>
     </button>
@@ -658,7 +658,7 @@ function useMemoSources(s: ReturnType<typeof useStore>) {
     quality: {
       title: "Quality-assessed (post-QA)",
       count: qualityKept,
-      description: `Unique papers that passed your Quality Assessment exclusion rule. The cleanest hand-off into shared screening.`,
+      description: `Unique articles that passed your Quality Assessment exclusion rule. The cleanest hand-off into shared screening.`,
       materialise: () => {
         if (!s.qualityReports || !s.uniquePapers) return [] as any[];
         const keep = new Set(s.qualityReports
@@ -671,16 +671,16 @@ function useMemoSources(s: ReturnType<typeof useStore>) {
       },
     },
     unique: {
-      title: "Aggregated unique papers (post-dedup)",
+      title: "Aggregated unique articles (post-dedup)",
       count: s.uniquePapers?.length || 0,
-      description: "All unique papers retrieved across your active databases, after deduplication. Use this if Quality Assessment hasn't been run.",
+      description: "All unique articles retrieved across your active databases, after deduplication. Use this if Quality Assessment hasn't been run.",
       materialise: () => (s.uniquePapers || []).map(p => ({
         paper_id: p.id, title: p.title, abstract: p.abstract || "", source: p.source,
         url: (p as any).url || "", doi: (p as any).doi || "",
       })),
     },
     raw: {
-      title: "Raw aggregated papers (pre-dedup)",
+      title: "Raw aggregated articles (pre-dedup)",
       count: s.rawPapers?.length || 0,
       description: "Every record fetched from databases, including duplicates. Rarely the right choice; use it only when you want the pre-dedup state.",
       materialise: () => (s.rawPapers || []).map(p => ({
@@ -689,9 +689,9 @@ function useMemoSources(s: ReturnType<typeof useStore>) {
       })),
     },
     screened: {
-      title: "AI-screened papers (all)",
+      title: "AI-screened articles (all)",
       count: screened,
-      description: "Every paper that went through Abstract Screening (both AI-included and AI-excluded). Useful if you want reviewers to re-evaluate AI exclusions.",
+      description: "Every article that went through Abstract Screening (both AI-included and AI-excluded). Useful if you want reviewers to re-evaluate AI exclusions.",
       materialise: () => (s.results || []).map(r => ({
         paper_id: r.paper_id, title: r.Title, abstract: r.Abstract || "", source: r.Source,
         url: r.URL || "", doi: "",
@@ -700,7 +700,7 @@ function useMemoSources(s: ReturnType<typeof useStore>) {
     included: {
       title: "AI-included only (effective decisions)",
       count: includedAfterScreening,
-      description: "Papers that came out of Abstract Screening as INCLUDE (honouring reviewer overrides). Use this to escalate a single-user pass to a multi-reviewer second pass.",
+      description: "Articles that came out of Abstract Screening as INCLUDE (honouring reviewer overrides). Use this to escalate a single-user pass to a multi-reviewer second pass.",
       materialise: () => (s.results || [])
         .filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE")
         .map(r => ({
@@ -820,11 +820,11 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
         reviewers_per_paper: reviewersPerPaper,
       });
       toast.success(
-        `Distributed ${r.papers} papers across ${r.reviewers} reviewers (${r.assigned} assignments, ${distributeStrategy})`,
+        `Distributed ${r.papers} articles across ${r.reviewers} reviewers (${r.assigned} assignments, ${distributeStrategy})`,
         { duration: 5000 },
       );
     } catch (e: any) {
-      toast.error(e?.message || "Failed to distribute papers");
+      toast.error(e?.message || "Failed to distribute articles");
     } finally {
       setBusy(false);
     }
@@ -926,9 +926,9 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
 
       {isLead && !project.locked_at && (
         <div className="space-y-2 pt-2 border-t">
-          <div className="text-xs font-medium">Distribute papers across reviewers</div>
+          <div className="text-xs font-medium">Distribute articles across reviewers</div>
           <div className="text-[11px] text-muted-foreground">
-            Re-runs whenever the member list changes. Defaults to full overlap (every reviewer screens every paper); switch to <em>split</em> to share the load round-robin.
+            Re-runs whenever the member list changes. Defaults to full overlap (every reviewer screens every article); switch to <em>split</em> to share the load round-robin.
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             <Select value={distributeStrategy} onValueChange={(v) => setDistributeStrategy(v as AssignmentStrategy)}>
@@ -940,7 +940,7 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
             </Select>
             {distributeStrategy === "split" && (
               <div className="flex items-center gap-1">
-                <Label className="text-[11px] whitespace-nowrap">reviewers/paper</Label>
+                <Label className="text-[11px] whitespace-nowrap">reviewers/article</Label>
                 <Input
                   type="number"
                   min={1}

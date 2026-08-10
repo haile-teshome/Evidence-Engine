@@ -80,7 +80,7 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
     if (!selPaper) return;
     const p = papers.find(x => x.paper_id === selPaper);
     const text = s.fullTexts[selPaper]?.text || p?.abstract || "";
-    if (!text) { toast.error("No text for this paper. Acquire full text first, or fill it in manually."); return; }
+    if (!text) { toast.error("No text for this article. Acquire full text first, or fill it in manually."); return; }
     setAiBusy(true);
     try {
       const vals = await AIService.extractFields(
@@ -187,7 +187,7 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
         <div>
           <h3 className="font-medium flex items-center gap-2"><Users className="size-4 text-primary" />Data extraction: dual and independent</h3>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {mySubmitted.size} of {papers.length} papers submitted by you{finals.length ? ` · ${finals.length} reconciled` : ""}. Two reviewers extract the same fields, then disagreements are reconciled.
+            {mySubmitted.size} of {papers.length} articles submitted by you{finals.length ? ` · ${finals.length} reconciled` : ""}. Two reviewers extract the same fields, then disagreements are reconciled.
           </p>
         </div>
         <Button size="sm" variant="outline" onClick={exportCsv}><Download className="size-3.5 mr-1.5" />Export CSV</Button>
@@ -204,7 +204,7 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
         <TabsContent value="extract" className="pt-3">
           <div className="flex gap-4 min-h-[320px]">
             <div className="w-64 shrink-0 border rounded-md overflow-y-auto max-h-[460px]">
-              {papers.length === 0 && <div className="p-3 text-xs text-muted-foreground">No papers in this project yet.</div>}
+              {papers.length === 0 && <div className="p-3 text-xs text-muted-foreground">No articles in this project yet.</div>}
               {papers.map(p => (
                 <button key={p.paper_id} onClick={() => setSelPaper(p.paper_id)}
                   className={`w-full text-left px-3 py-2 border-b text-xs flex items-start gap-2 hover:bg-muted/60 ${p.paper_id === selPaper ? "bg-primary/10" : ""}`}>
@@ -216,13 +216,13 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
 
             <div className="flex-1 min-w-0">
               {!selPaper ? (
-                <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Select a paper to extract.</div>
+                <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Select an article to extract.</div>
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-sm font-medium line-clamp-1">{paperTitle(selPaper)}</div>
                     <Button size="sm" variant="outline" onClick={aiPrefill} disabled={aiBusy}
-                      title="Draft values from the paper text. You confirm each one.">
+                      title="Draft values from the article text. You confirm each one.">
                       {aiBusy ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Wand2 className="size-3.5 mr-1.5" />}AI pre-fill
                     </Button>
                   </div>
@@ -242,7 +242,7 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
                   <div className="flex items-center gap-2 pt-1">
                     <Button size="sm" variant="outline" onClick={() => save(false)} disabled={saving}><Save className="size-3.5 mr-1.5" />Save draft</Button>
                     <Button size="sm" onClick={() => save(true)} disabled={saving}>{saving ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <Check className="size-3.5 mr-1.5" />}Submit</Button>
-                    {mySubmitted.has(selPaper) && <span className="text-xs text-muted-foreground">You have submitted this paper.</span>}
+                    {mySubmitted.has(selPaper) && <span className="text-xs text-muted-foreground">You have submitted this article.</span>}
                   </div>
                 </div>
               )}
@@ -254,7 +254,7 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
         {canReconcile && (
           <TabsContent value="reconcile" className="pt-3">
             {conflicts.length === 0 ? (
-              <div className="text-sm text-muted-foreground py-6 text-center">No field-level disagreements to reconcile. Papers agree, or fewer than two reviewers have submitted.</div>
+              <div className="text-sm text-muted-foreground py-6 text-center">No field-level disagreements to reconcile. Articles agree, or fewer than two reviewers have submitted.</div>
             ) : (
               <ReconcilePanel projectId={projectId} conflicts={conflicts} fields={fields} paperTitle={paperTitle} onDone={reload} />
             )}
@@ -318,7 +318,7 @@ function ReconcilePanel({
       </div>
       <div className="flex-1 min-w-0 space-y-4">
         {!conflict ? (
-          <div className="text-sm text-muted-foreground">Select a paper.</div>
+          <div className="text-sm text-muted-foreground">Select an article.</div>
         ) : (
           <>
             <div className="text-sm font-medium line-clamp-1">{paperTitle(selPaper)}</div>

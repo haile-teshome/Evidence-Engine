@@ -14,7 +14,7 @@ import { PicoCards } from "../components/PicoCards";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2 } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2, Hand } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
 import { ProtocolPanel } from "../components/ProtocolPanel";
@@ -266,8 +266,8 @@ function SummaryText({ text, onCite }: { text: string; onCite?: (n: number) => v
 const INITIAL_STAGES: Stage[] = [
   { id: "pico", label: "Infer PICO framework", status: "pending" },
   { id: "query", label: "Generate MeSH search string", status: "pending" },
-  { id: "papers", label: "Fetch an initial sample of papers", status: "pending" },
-  { id: "rerank", label: "Score papers for relevance (LEADS)", status: "pending" },
+  { id: "papers", label: "Fetch an initial sample of articles", status: "pending" },
+  { id: "rerank", label: "Score articles for relevance (LEADS)", status: "pending" },
   { id: "question", label: "Draft formal research question", status: "pending" },
   { id: "summary", label: "Summarize the literature found", status: "pending" },
   { id: "suggestions", label: "Suggest refinements", status: "pending" },
@@ -650,7 +650,7 @@ function RelevanceExplorer() {
       <Separator />
 
       {dropped.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No papers were dropped at this threshold.</p>
+        <p className="text-sm text-muted-foreground">No articles were dropped at this threshold.</p>
       ) : (
         <section>
           <div className="text-sm font-semibold text-foreground mb-1.5">
@@ -801,7 +801,7 @@ export function HomePage() {
           const breakdown = Object.entries(fetched.sourceCounts || {})
             .map(([k, v]) => `${k}: ${v}`)
             .join(" · ");
-          markStage("papers", { status: "done", detail: `${papers.length} papers: ${breakdown}` });
+          markStage("papers", { status: "done", detail: `${papers.length} articles: ${breakdown}` });
           s.setRawPapers(papers);
         }
       }
@@ -841,7 +841,7 @@ export function HomePage() {
         }
       } else {
         s.setRerankResults(null);
-        markStage("rerank", { status: "done", detail: "no papers to score" });
+        markStage("rerank", { status: "done", detail: "no articles to score" });
       }
 
       const formalQ = await runStage("question", signal, sig => AIService.generateFormalQuestion(newPico, sig));
@@ -907,9 +907,8 @@ export function HomePage() {
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
-      {s.history.length > 0 && <ProtocolPanel />}
       {s.history.length === 0 && !analyzing && (
-        <Alert><AlertDescription>👋 Welcome! Describe your research goal below to generate a strategy and see initial findings.</AlertDescription></Alert>
+        <Alert className="flex items-center gap-2"><Hand className="size-4 shrink-0 text-primary" /><AlertDescription>Welcome! Describe your research goal below to generate a strategy and see initial findings.</AlertDescription></Alert>
       )}
 
       {s.history.map((entry, idx) => (
@@ -1153,7 +1152,7 @@ export function HomePage() {
             <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
               <div>
                 <h2 className="m-0 text-base">Strategy Review</h2>
-                <span className="text-xs text-muted-foreground">Edit PICO, criteria &amp; search string</span>
+                <span className="text-xs text-muted-foreground">Edit PICO, criteria, search &amp; protocol</span>
               </div>
               <button onClick={() => setReviewOpen(false)} className="text-muted-foreground hover:text-foreground" title="Close">
                 <X className="size-4" />
@@ -1161,10 +1160,11 @@ export function HomePage() {
             </div>
             <Tabs defaultValue="pico" className="flex-1 flex flex-col min-h-0">
               <div className="px-4 pt-3 shrink-0">
-                <TabsList className="grid grid-cols-3 w-full">
+                <TabsList className="grid grid-cols-4 w-full">
                   <TabsTrigger value="pico">PICO</TabsTrigger>
                   <TabsTrigger value="criteria">Criteria</TabsTrigger>
                   <TabsTrigger value="search">Search</TabsTrigger>
+                  <TabsTrigger value="protocol">Protocol</TabsTrigger>
                 </TabsList>
               </div>
               <div className="flex-1 overflow-auto p-4">
@@ -1190,6 +1190,9 @@ export function HomePage() {
                   <label className="text-muted-foreground text-sm">Final Search String</label>
                   <Textarea value={s.query} onChange={e => { s.setQuery(e.target.value); s.setUnifiedSearchQuery(e.target.value); }} rows={8} className="font-mono text-xs" />
                   <p className="text-xs text-muted-foreground">Edits here also update the per-database queries on the Planning page.</p>
+                </TabsContent>
+                <TabsContent value="protocol" className="mt-0">
+                  <ProtocolPanel />
                 </TabsContent>
               </div>
             </Tabs>

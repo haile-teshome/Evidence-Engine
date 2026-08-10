@@ -31,7 +31,7 @@ const FLAVOR: Record<string, string[]> = {
     "Gathering an initial evidence sample…",
   ],
   rerank: [
-    "Scoring papers for PICO relevance with LEADS…",
+    "Scoring articles for PICO relevance with LEADS…",
     "Filtering out tangential hits…",
     "Ranking by per-PICO eligibility…",
   ],

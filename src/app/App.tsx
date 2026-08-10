@@ -32,12 +32,12 @@ import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, 
 const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> = {
   home: { title: "Research Strategy", subtitle: "PICO-driven question framing and search design", icon: Home },
   simulation: { title: "Search Planning", subtitle: "Per-database query tuning with agentic optimization", icon: BarChart3 },
-  quality: { title: "Quality Assessment", subtitle: "Deduplicate and surface issues in acquired papers", icon: ShieldCheck },
+  quality: { title: "Quality Assessment", subtitle: "Deduplicate and surface issues in acquired articles", icon: ShieldCheck },
   abstract: { title: "Abstract Screening", subtitle: "Multi-agent title and abstract review", icon: FileSearch },
-  acquisition: { title: "Full-Text Acquisition", subtitle: "Collect the full text for each included paper", icon: FileDown },
+  acquisition: { title: "Full-Text Acquisition", subtitle: "Collect the full text for each included article", icon: FileDown },
   fulltext: { title: "Full-Text Evidence", subtitle: "Per-criterion full-text evaluation", icon: FlaskConical },
   snowball: { title: "Citation Snowballing", subtitle: "Backward and forward citation discovery", icon: Network },
-  extraction: { title: "Table Extraction", subtitle: "Pull tables from included papers", icon: Table2 },
+  extraction: { title: "Table Extraction", subtitle: "Pull tables from included articles", icon: Table2 },
   textextraction: { title: "Text Extraction", subtitle: "Ask questions in natural language and pull values from the text", icon: ScanText },
   prisma: { title: "Diagramming", subtitle: "PRISMA flow, risk-of-bias heatmap, and inter-rater reliability for the review", icon: GitBranch },
   meta: { title: "Meta-analysis", subtitle: "Automated effect-size extraction and pooling (fixed + random effects)", icon: Sigma },
@@ -64,7 +64,7 @@ function Shell() {
   }, []);
   return (
     <div className="flex min-h-screen bg-background text-foreground">
-      <Toaster richColors position="top-right" />
+      <Toaster richColors closeButton position="top-right" />
       <CommandPalette />
       <Sidebar />
       <main className="flex-1 overflow-x-clip">
@@ -241,7 +241,7 @@ function Shell() {
                     <>
                       <div className="text-xs text-muted-foreground">
                         Showing risk-of-bias appraisal for {heatmapReports.length}{" "}
-                        {heatmapStage === "fulltext" ? "full-text-included" : "abstract-included"} paper{heatmapReports.length === 1 ? "" : "s"}.
+                        {heatmapStage === "fulltext" ? "full-text-included" : "abstract-included"} article{heatmapReports.length === 1 ? "" : "s"}.
                       </div>
                       <RiskOfBiasSummary
                         reports={heatmapReports}
@@ -251,7 +251,7 @@ function Shell() {
                     </>
                   ) : (
                     <div className="text-sm text-muted-foreground p-4 border rounded-md">
-                      No included papers yet. Run Quality Assessment plus screening (abstract or full-text) to populate the heatmap.
+                      No included articles yet. Run Quality Assessment plus screening (abstract or full-text) to populate the heatmap.
                     </div>
                   )}
                 </TabsContent>

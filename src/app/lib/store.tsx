@@ -76,6 +76,23 @@ export type HistoryEntry = {
 export type ExtractedTable = { title: string; type: string; data: string[][]; caption?: string };
 export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[] };
 
+// One archived title/abstract screening pass, kept so prior runs can be
+// compared or restored. `results` is the full result set after the pass, so a
+// pass can be restored wholesale. Incremental passes only re-screen papers not
+// already screened (e.g. records added later from citation snowballing).
+export type ScreeningPass = {
+  id: string;
+  ranAt: string;                 // ISO timestamp
+  mode: "full" | "incremental";
+  model: string;
+  screenedNow: number;           // papers screened in this pass
+  totalAfter: number;            // total records after this pass
+  included: number;              // AI includes among the total
+  excluded: number;
+  durationSec: number;
+  results: ScreenResult[];       // snapshot of the full set (for restore/compare)
+};
+
 export type TaskStage = {
   id: string;
   label: string;
@@ -199,6 +216,8 @@ type Ctx = {
   // Results
   results: ScreenResult[] | null; setResults: (v: ScreenResult[] | null) => void;
   screeningDuration: number; setScreeningDuration: (v: number) => void;
+  // Archive of every title/abstract screening pass (for compare / restore).
+  screeningArchive: ScreeningPass[]; setScreeningArchive: React.Dispatch<React.SetStateAction<ScreeningPass[]>>;
   fullTextResults: FullTextResult[] | null; setFullTextResults: (v: FullTextResult[] | null) => void;
   ftDuration: number; setFtDuration: (v: number) => void;
 
@@ -387,6 +406,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const [results, setResults] = useState<ScreenResult[] | null>(null);
   const [screeningDuration, setScreeningDuration] = useState(0);
+  const [screeningArchive, setScreeningArchive] = useState<ScreeningPass[]>([]);
   const [fullTextResults, setFullTextResults] = useState<FullTextResult[] | null>(null);
   const [ftDuration, setFtDuration] = useState(0);
 
@@ -491,7 +511,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     abstractOverrides,
     fullTextOverrides,
     rerankThreshold, rerankResults,
-    results, fullTextResults, snowballResults, snowballScreened, extractedPapers, prisma,
+    results, screeningArchive, fullTextResults, snowballResults, snowballScreened, extractedPapers, prisma,
     // Planning (search-design) outputs + per-tab run results so a session keeps
     // everything that's been run, including acquired full texts. The local
     // autosave drops fullTexts only as a fallback if it would exceed the
@@ -552,6 +572,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
     setRerankResults(prev => pick(d.rerankResults, prev));
     setResults(prev => pick(d.results, prev));
+    setScreeningArchive(prev => pick(d.screeningArchive, prev, []) ?? []);
     setFullTextResults(prev => pick(d.fullTextResults, prev));
     setSnowballResults(prev => pick(d.snowballResults, prev));
     setSnowballScreened(prev => pick(d.snowballScreened, prev));
@@ -613,7 +634,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
       searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
-      fullTextOverrides, rerankThreshold, rerankResults, results, fullTextResults,
+      fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive, fullTextResults,
       snowballResults, snowballScreened, extractedPapers, prisma,
       simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
       writingEnriched, writingSummary, writingMethodsMain,
@@ -660,7 +681,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setMetaOutcome(""); setMetaMeasure(""); setMetaTau2Method("DL");
     setMetaUseKnappHartung(false);
     setMetaExtractions(null); setMetaRun(null);
-    setResults(null); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
+    setResults(null); setScreeningArchive([]); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
     setSnowballResults(null); setSnowballScreened(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
     setWritingEnriched({}); setWritingSummary(""); setWritingMethodsMain("");
@@ -688,7 +709,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     metaOutcome, setMetaOutcome, metaMeasure, setMetaMeasure,
     metaTau2Method, setMetaTau2Method, metaUseKnappHartung, setMetaUseKnappHartung,
     metaExtractions, setMetaExtractions, metaRun, setMetaRun,
-    results, setResults, screeningDuration, setScreeningDuration, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
+    results, setResults, screeningArchive, setScreeningArchive, screeningDuration, setScreeningDuration, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,

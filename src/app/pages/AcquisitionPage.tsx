@@ -20,11 +20,12 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import {
   FileDown, CheckCircle2, AlertTriangle, ExternalLink, RefreshCcw, Upload, FileUp, FileText, X, Search,
-  BookOpen, Code2, FileType2, FileSearch,
+  BookOpen, Code2, FileType2, FileSearch, Clock,
 } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 
 const NONE = "__none__"; // Radix Select cannot use an empty-string value
 
@@ -195,11 +196,20 @@ export function AcquisitionPage() {
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
 
-  if (!s.results) return <EmptyState icon={FileSearch} title="No included papers yet" description="Run abstract screening first, then acquire the full text for included papers here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
+  if (!s.results) return <EmptyState icon={FileSearch} title="No included articles yet" description="Run abstract screening first, then acquire the full text for included articles here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
   // Honour reviewer overrides: papers the user marked Keep at abstract
   // screening get their full text fetched here even if the AI excluded them.
-  const included = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
-  if (included.length === 0) return <Alert><AlertDescription>No included papers from screening yet.</AlertDescription></Alert>;
+  // Dedupe by paper_id: snowballed papers are appended to results without a
+  // dedup pass, so the same id can appear twice — which would collide React
+  // keys in the list and render a blank ghost row.
+  const included = Array.from(
+    new Map(
+      s.results
+        .filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE")
+        .map(r => [r.paper_id, r]),
+    ).values(),
+  );
+  if (included.length === 0) return <Alert><AlertDescription>No included articles from screening yet.</AlertDescription></Alert>;
 
   async function runFetch(onlyMissing = false) {
     const queue = onlyMissing ? included.filter(p => s.fullTexts[p.paper_id]?.status !== "found") : included;
@@ -312,7 +322,12 @@ export function AcquisitionPage() {
     toast.success(`Matched ${ok} file${ok === 1 ? "" : "s"}` + (fail ? `, ${fail} failed` : ""));
   }
 
-  const records: FullTextRecord[] = included.map(p => s.fullTexts[p.paper_id] || { paper_id: p.paper_id, title: p.Title, url: p.URL, source: p.Source, status: "pending" as const });
+  const records: FullTextRecord[] = included.map(p => {
+    const ft = s.fullTexts[p.paper_id];
+    return ft
+      ? { ...ft, paper_id: p.paper_id, title: ft.title || p.Title, url: ft.url || p.URL, source: ft.source || p.Source }
+      : { paper_id: p.paper_id, title: p.Title, url: p.URL, source: p.Source, status: "pending" as const };
+  });
   const found = records.filter(r => r.status === "found").length;
   const missing = records.filter(r => r.status === "missing").length;
   const pending = records.filter(r => r.status === "pending").length;
@@ -325,27 +340,37 @@ export function AcquisitionPage() {
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-3">
-        <Stat label="Included" value={included.length} />
-        <Stat label="Acquired" value={found} variant="success" />
-        <Stat label="Missing" value={missing} variant="warn" />
-        <Stat label="Not yet fetched" value={pending} />
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" onClick={() => runFetch(false)} disabled={running}>
-          <FileDown className="size-4 mr-2" />{running ? "Fetching…" : "Fetch all full texts"}
-        </Button>
-        {missing > 0 && (
-          <Button size="sm" variant="outline" onClick={() => runFetch(true)} disabled={running}>
-            <RefreshCcw className="size-4 mr-2" />Retry missing ({missing})
+      <ControlPane
+        stats={<>
+          <InlineStat icon={FileText} value={included.length} label="Included" />
+          <PaneDivider />
+          <InlineStat icon={CheckCircle2} tone="success" value={found} label="Acquired" hint={included.length ? `${Math.round((found / included.length) * 100)}%` : undefined} />
+          <InlineStat icon={AlertTriangle} tone="amber" value={missing} label="Missing" />
+          <InlineStat icon={Clock} tone="neutral" value={pending} label="Not fetched" />
+        </>}
+        actions={<>
+          {running ? (
+            <Button size="sm" variant="destructive" className="h-8 shadow-sm" onClick={() => s.cancelTask("fulltext-fetch")} title="Stop fetching">
+              <X className="size-3.5 mr-1.5" />Cancel
+            </Button>
+          ) : (
+            <>
+              <Button size="sm" className="h-8 shadow-sm" onClick={() => runFetch(false)}>
+                <FileDown className="size-3.5 mr-1.5" />Fetch all
+              </Button>
+              {missing > 0 && (
+                <Button size="sm" variant="outline" className="h-8" onClick={() => runFetch(true)}>
+                  <RefreshCcw className="size-3.5 mr-1.5" />Retry missing ({missing})
+                </Button>
+              )}
+            </>
+          )}
+          <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
+          <Button size="sm" variant="outline" className="h-8" onClick={() => setBulkOpen(true)}>
+            <Upload className="size-3.5 mr-1.5" />Bulk upload
           </Button>
-        )}
-        <div className="flex-1" />
-        <Button size="sm" variant="outline" onClick={() => setBulkOpen(true)}>
-          <Upload className="size-4 mr-2" />Bulk upload &amp; match
-        </Button>
-      </div>
+        </>}
+      />
 
       {task && task.status === "running" && (
         <TaskProgressCard task={task} title="Acquiring full texts" onCancel={() => s.cancelTask("fulltext-fetch")} />
@@ -368,13 +393,13 @@ export function AcquisitionPage() {
                 <button
                   key={r.paper_id}
                   onClick={() => setSelectedId(r.paper_id)}
-                  className={`w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
+                  className={`block w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
                 >
                   <div className="flex items-center gap-2 mb-1">
                     <StatusDot status={r.status} />
                     <Badge variant="outline" className="text-[10px]">{r.source}</Badge>
                   </div>
-                  <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{r.title}</div>
+                  <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{r.title || "Untitled"}</div>
                 </button>
               );
             })}

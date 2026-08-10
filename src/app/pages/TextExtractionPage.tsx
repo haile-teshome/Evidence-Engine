@@ -11,10 +11,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/
 import {
   ScanText, Sparkles, Search, AlertTriangle, Download,
   MapPin, Quote as QuoteIcon, FileSpreadsheet, Maximize2, ChevronDown,
-  FileText, ListChecks,
+  FileText, ListChecks, X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import { getPdfBlob } from "../lib/pdfBlobs";
 import ExcelJS from "exceljs";
 
@@ -127,7 +128,7 @@ export function TextExtractionPage() {
         toast.info(`Canceled: ${out.length} of ${acquired.length} processed`);
       } else {
         s.updateTask("text-extract", { status: "done" });
-        toast.success(`Extracted from ${out.length} papers`);
+        toast.success(`Extracted from ${out.length} articles`);
         setAskOpen(false);   // collapse the question panel to free up the screen
       }
     } catch (e: any) {
@@ -156,38 +157,52 @@ export function TextExtractionPage() {
 
   return (
     <div className="space-y-3">
-      {/* ── Compact header: question, run, export, with inline counts ─────── */}
-      <Card className="p-3 space-y-2">
-        <div className="flex items-start justify-between gap-2">
-          {s.textExtractions.length > 0 ? (
-            <button
-              onClick={() => setAskOpen(o => !o)}
-              className="flex items-center gap-2 text-sm font-medium min-w-0 hover:text-primary"
-              title={askOpen ? "Collapse question" : "Edit question"}
-            >
-              <ChevronDown className={`size-4 shrink-0 transition-transform ${askOpen ? "" : "-rotate-90"}`} />
-              <ScanText className="size-4 text-primary shrink-0" />
-              {askOpen ? "Ask in natural language" : <span className="truncate text-muted-foreground font-normal">{query}</span>}
-            </button>
-          ) : (
-            <h3 className="font-medium flex items-center gap-2 text-sm shrink-0"><ScanText className="size-4 text-primary" />Ask in natural language</h3>
-          )}
-          <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
-            <Button onClick={run} disabled={running} size="sm">
-              <Sparkles className="size-4 mr-2" />{running ? "Extracting..." : `Extract from ${acquired.length} papers`}
+      {/* ── Control pane: counts + run + export ──────────────────────────── */}
+      <ControlPane
+        stats={s.textExtractions.length > 0 ? <>
+          <InlineStat icon={FileText} value={s.textExtractions.length} label="Articles" />
+          <PaneDivider />
+          <InlineStat icon={QuoteIcon} tone="success" value={totalEvidence} label="Quotes" />
+          <InlineStat icon={ListChecks} tone="success" value={totalValues} label="Values" />
+          {noEvidence > 0 && <InlineStat icon={AlertTriangle} tone="amber" value={noEvidence} label="No evidence" />}
+          {missing.length > 0 && <InlineStat icon={AlertTriangle} tone="amber" value={missing.length} label="Skipped" />}
+        </> : (
+          <InlineStat icon={FileText} value={acquired.length} label="Ready to extract" />
+        )}
+        actions={<>
+          {running ? (
+            <Button size="sm" variant="destructive" className="h-8 shadow-sm" onClick={() => s.cancelTask("text-extract")} title="Stop extraction">
+              <X className="size-3.5 mr-1.5" />Cancel
             </Button>
-            {s.textExtractions.length > 0 && (
-              <>
-                <Button size="sm" variant="outline" onClick={() => downloadTextExtractionXlsx(s.textExtractions, query)}>
-                  <FileSpreadsheet className="size-4 mr-2" />Export Excel
-                </Button>
-                <Button size="sm" variant="outline" onClick={exportJson}>
-                  <Download className="size-4 mr-2" />Export JSON
-                </Button>
-              </>
-            )}
-          </div>
-        </div>
+          ) : (
+            <Button size="sm" className="h-8 shadow-sm" onClick={run}>
+              <Sparkles className="size-3.5 mr-1.5" />Extract from {acquired.length}
+            </Button>
+          )}
+          {s.textExtractions.length > 0 && (
+            <>
+              <Button size="sm" variant="outline" className="h-8" onClick={() => downloadTextExtractionXlsx(s.textExtractions, query)}>
+                <FileSpreadsheet className="size-3.5 mr-1.5" />Excel
+              </Button>
+              <Button size="sm" variant="outline" className="h-8" onClick={exportJson}>
+                <Download className="size-3.5 mr-1.5" />JSON
+              </Button>
+            </>
+          )}
+        </>}
+      />
+
+      {/* Ask-in-natural-language editor. */}
+      <Card className="p-3 space-y-2">
+        <button
+          onClick={() => setAskOpen(o => !o)}
+          className="flex items-center gap-2 text-sm font-medium w-full text-left min-w-0 hover:text-primary"
+          title={askOpen ? "Collapse question" : "Edit question"}
+        >
+          <ChevronDown className={`size-4 shrink-0 transition-transform ${askOpen ? "" : "-rotate-90"}`} />
+          <ScanText className="size-4 text-primary shrink-0" />
+          {askOpen ? "Ask in natural language" : <span className="truncate text-muted-foreground font-normal">{query}</span>}
+        </button>
         {askOpen && (
           <>
             <Textarea value={query} onChange={e => setQuery(e.target.value)} rows={2}
@@ -198,23 +213,6 @@ export function TextExtractionPage() {
               ))}
             </div>
           </>
-        )}
-        {(s.textExtractions.length > 0 || missing.length > 0) && (
-          <div className="flex flex-wrap items-center gap-1.5">
-            {s.textExtractions.length > 0 && (
-              <>
-                <Pill icon={FileText} title="Papers processed">{s.textExtractions.length} papers</Pill>
-                <Pill icon={QuoteIcon} tone="green" title="Evidence quotes found">{totalEvidence} quotes</Pill>
-                <Pill icon={ListChecks} tone="green" title="Values extracted">{totalValues} values</Pill>
-                {noEvidence > 0 && (
-                  <Pill icon={AlertTriangle} tone="amber" title="Papers with no matching evidence">{noEvidence} no evidence</Pill>
-                )}
-              </>
-            )}
-            {missing.length > 0 && (
-              <Pill icon={AlertTriangle} tone="amber" title="Skipped: no full text acquired">{missing.length} skipped</Pill>
-            )}
-          </div>
         )}
       </Card>
 
@@ -238,7 +236,7 @@ export function TextExtractionPage() {
                   <Input
                     value={listQ}
                     onChange={e => setListQ(e.target.value)}
-                    placeholder={`Filter ${s.textExtractions.length} papers…`}
+                    placeholder={`Filter ${s.textExtractions.length} articles…`}
                     className="pl-7 h-8 text-sm"
                   />
                 </div>
@@ -251,18 +249,18 @@ export function TextExtractionPage() {
                     <button
                       key={r.paper_id}
                       onClick={() => setSelectedId(r.paper_id)}
-                      className={`w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
+                      className={`block w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
                     >
                       <div className="flex items-center gap-1.5 mb-1">
                         <Badge variant={evCount > 0 ? "default" : "secondary"} className="text-[10px]">{evCount} quotes</Badge>
                         <Badge variant="outline" className="text-[10px]">{r.values.length} values</Badge>
                       </div>
-                      <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{r.title}</div>
+                      <div className="text-sm leading-snug line-clamp-2 break-words">{(r.title || "").replace(/\s+/g, " ").trim() || "Untitled"}</div>
                     </button>
                   );
                 })}
                 {filtered.length === 0 && (
-                  <div className="p-4 text-sm text-muted-foreground">No papers match “{listQ}”.</div>
+                  <div className="p-4 text-sm text-muted-foreground">No articles match “{listQ}”.</div>
                 )}
               </div>
             </Card>
@@ -271,7 +269,7 @@ export function TextExtractionPage() {
             <Card className="flex-1 min-w-0 p-0 overflow-hidden flex flex-col">
               {!selected ? (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                  Select a paper on the left.
+                  Select an article on the left.
                 </div>
               ) : (
                 <PaperExtractionDetail
@@ -350,7 +348,7 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
             {evidence.length === 0 ? (
               <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded p-3">
                 <AlertTriangle className="size-4 inline mr-1" />
-                No relevant passages found for this query. The information may not be in this paper.
+                No relevant passages found for this query. The information may not be in this article.
               </div>
             ) : (
               <>
@@ -442,7 +440,7 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
                         onClick={() => pdfUrl && setViewMode("pdf")}
                         disabled={!pdfUrl}
                         className={`px-2.5 py-1 rounded transition-colors ${viewMode === "pdf" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"} ${!pdfUrl ? "opacity-40 cursor-not-allowed" : ""}`}
-                        title={pdfUrl ? "View the source PDF" : "No PDF available for this paper"}
+                        title={pdfUrl ? "View the source PDF" : "No PDF available for this article"}
                       >
                         PDF
                       </button>
@@ -963,5 +961,5 @@ async function downloadTextExtractionXlsx(results: TextExtractionResult[], query
 
   const evCount = results.reduce((acc, r) => acc + (r.evidence?.length ?? r.spans.length), 0);
   const valCount = results.reduce((acc, r) => acc + r.values.length, 0);
-  toast.success(`Exported ${results.length} papers (${evCount} quotes, ${valCount} values) to XLSX.`);
+  toast.success(`Exported ${results.length} articles (${evCount} quotes, ${valCount} values) to XLSX.`);
 }

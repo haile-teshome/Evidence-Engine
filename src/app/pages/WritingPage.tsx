@@ -457,7 +457,7 @@ export function WritingPage() {
         done++;
       }
     }
-    if (done) toast.success(`Enriched ${done} of ${todo.length} papers`);
+    if (done) toast.success(`Enriched ${done} of ${todo.length} articles`);
     setEnriching(false);
   }
 
@@ -754,7 +754,7 @@ export function WritingPage() {
     return (
       <Alert>
         <AlertDescription>
-          No papers found. Run a search on the Home page first.
+          No articles found. Run a search on the Home page first.
         </AlertDescription>
       </Alert>
     );
@@ -770,8 +770,8 @@ export function WritingPage() {
           <div className="mr-auto min-w-0">
             <h2 className="font-medium leading-tight">Writing Assistant</h2>
             <div className="flex flex-wrap items-center gap-1.5 mt-1">
-              <Pill icon={BookOpen}>{merged.length} papers</Pill>
-              <Pill icon={Layers} title="Pipeline stage these papers came from">{stage}</Pill>
+              <Pill icon={BookOpen}>{merged.length} articles</Pill>
+              <Pill icon={Layers} title="Pipeline stage these articles came from">{stage}</Pill>
               {enrichedCount > 0 && <Pill icon={CheckCircle2} tone="green" title="Full metadata fetched (cached this session)">{enrichedCount} enriched</Pill>}
               {enriching && <Pill icon={Loader2} spin>fetching metadata…</Pill>}
             </div>
@@ -815,7 +815,7 @@ export function WritingPage() {
                   <Input
                     value={query}
                     onChange={e => setQuery(e.target.value)}
-                    placeholder={`Filter ${merged.length} papers…`}
+                    placeholder={`Filter ${merged.length} articles…`}
                     className="pl-7 h-8 text-sm"
                   />
                 </div>
@@ -839,14 +839,14 @@ export function WritingPage() {
                   );
                 })}
                 {filtered.length === 0 && (
-                  <div className="p-4 text-sm text-muted-foreground">No papers match “{query}”.</div>
+                  <div className="p-4 text-sm text-muted-foreground">No articles match “{query}”.</div>
                 )}
               </div>
             </Card>
 
             <Card className="flex-1 min-w-0 p-0 overflow-hidden flex flex-col">
               {!selectedRow ? (
-                <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Select a paper on the left.</div>
+                <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">Select an article on the left.</div>
               ) : (
                 <CitationDetail row={selectedRow} format={format} enriching={enriching} />
               )}
