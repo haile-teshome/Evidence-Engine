@@ -10,9 +10,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Input } from "../components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
-import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle } from "lucide-react";
+import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle, X } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import { ExtractionWorkspace } from "../components/ExtractionWorkspace";
 import ExcelJS from "exceljs";
 
@@ -36,7 +37,7 @@ export function ExtractionPage() {
 
   // Honour reviewer overrides from abstract screening.
   const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
-  if (passed.length === 0) return <div className="space-y-3">{projectBlock}{!projectBlock && <Alert><AlertDescription>No included papers available for extraction.</AlertDescription></Alert>}</div>;
+  if (passed.length === 0) return <div className="space-y-3">{projectBlock}{!projectBlock && <Alert><AlertDescription>No included articles available for extraction.</AlertDescription></Alert>}</div>;
 
   async function extract() {
     const { abort } = s.startTask("table-extract", [{ id: "tbl", label: "Extracting tables", status: "running" }]);
@@ -74,7 +75,7 @@ export function ExtractionPage() {
         toast.info(`Canceled: ${out.length} of ${passed.length} processed`);
       } else {
         s.updateTask("table-extract", { status: "done" });
-        toast.success(`Tables extracted from ${out.length} papers`);
+        toast.success(`Tables extracted from ${out.length} articles`);
       }
     } catch (e: any) {
       s.updateTask("table-extract", { status: "error", detail: e?.message });
@@ -113,22 +114,18 @@ export function ExtractionPage() {
   return (
     <div className="space-y-3">
       {projectBlock}
-      {/* ── Single compact header: counts + format + run + export ───────────── */}
-      <Card className="p-3">
-        <div className="flex items-end gap-3 flex-wrap">
-          <div className="mr-auto min-w-0">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <Pill icon={FileText} title="Included papers available for extraction">{passed.length} included</Pill>
-              {ep && <Pill icon={Table2} tone="green" title="Papers with extractable tables">{withTables} with tables</Pill>}
-              {ep && withoutTables > 0 && (
-                <Pill icon={AlertTriangle} tone="amber" title="No extractable tables: paywalled, no tabular content, or PDF-only">{withoutTables} no tables</Pill>
-              )}
-            </div>
-          </div>
-          <div>
-            <label className="text-xs text-muted-foreground">Output format</label>
+      {/* ── Control pane: counts + format + run + export ─────────────────── */}
+      <ControlPane
+        stats={<>
+          <InlineStat icon={FileText} value={passed.length} label="Included" />
+          {ep && <><PaneDivider /><InlineStat icon={Table2} tone="success" value={withTables} label="With tables" /></>}
+          {ep && withoutTables > 0 && <InlineStat icon={AlertTriangle} tone="amber" value={withoutTables} label="No tables" />}
+        </>}
+        actions={<>
+          <div className="flex items-center gap-1.5">
+            <label className="text-xs text-muted-foreground">Format</label>
             <Select value={format} onValueChange={v => setFormat(v as Format)}>
-              <SelectTrigger className="h-9 w-36"><SelectValue /></SelectTrigger>
+              <SelectTrigger className="h-8 w-28"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="CSV Export">CSV</SelectItem>
                 <SelectItem value="JSON Export">JSON</SelectItem>
@@ -136,16 +133,22 @@ export function ExtractionPage() {
               </SelectContent>
             </Select>
           </div>
-          <Button onClick={extract} disabled={running}>
-            <Table2 className="size-4 mr-2" />{running ? "Extracting..." : "Start Table Extraction"}
-          </Button>
-          {ep && (
-            <Button variant="outline" onClick={exportAll}>
-              <Download className="size-4 mr-2" />Export All ({format.split(" ")[0]})
+          {running ? (
+            <Button size="sm" variant="destructive" className="h-8 shadow-sm" onClick={() => s.cancelTask("table-extract")} title="Stop extraction">
+              <X className="size-3.5 mr-1.5" />Cancel
+            </Button>
+          ) : (
+            <Button size="sm" className="h-8 shadow-sm" onClick={extract}>
+              <Table2 className="size-3.5 mr-1.5" />Start extraction
             </Button>
           )}
-        </div>
-      </Card>
+          {ep && (
+            <Button size="sm" variant="outline" className="h-8" onClick={exportAll}>
+              <Download className="size-3.5 mr-1.5" />Export ({format.split(" ")[0]})
+            </Button>
+          )}
+        </>}
+      />
 
       {task && task.status === "running" && (
         <TaskProgressCard
@@ -167,7 +170,7 @@ export function ExtractionPage() {
                   <Input
                     value={q}
                     onChange={e => setQ(e.target.value)}
-                    placeholder={`Filter ${totalPapers} papers…`}
+                    placeholder={`Filter ${totalPapers} articles…`}
                     className="pl-7 h-8 text-sm"
                   />
                 </div>
@@ -179,7 +182,7 @@ export function ExtractionPage() {
                     <button
                       key={idx}
                       onClick={() => setSelectedIdx(idx)}
-                      className={`w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
+                      className={`block w-full text-left px-3 py-2.5 border-b hover:bg-muted/50 transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent"}`}
                     >
                       <div className="flex items-center gap-2 mb-1">
                         <Badge variant={p.Extracted_Tables.length ? "default" : "secondary"} className="text-[10px]">
@@ -187,12 +190,12 @@ export function ExtractionPage() {
                         </Badge>
                         <span className="text-[10px] text-muted-foreground">{p.Source}</span>
                       </div>
-                      <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{p.Paper_Title}</div>
+                      <div className="text-sm leading-snug line-clamp-2 break-words">{(p.Paper_Title || "").replace(/\s+/g, " ").trim() || "Untitled"}</div>
                     </button>
                   );
                 })}
                 {filtered.length === 0 && (
-                  <div className="p-4 text-sm text-muted-foreground">No papers match “{q}”.</div>
+                  <div className="p-4 text-sm text-muted-foreground">No articles match “{q}”.</div>
                 )}
               </div>
             </Card>
@@ -201,7 +204,7 @@ export function ExtractionPage() {
             <Card className="flex-1 min-w-0 p-0 overflow-hidden flex flex-col">
               {!selected ? (
                 <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
-                  Select a paper on the left.
+                  Select an article on the left.
                 </div>
               ) : (
                 <PaperTablesDetail key={selectedIdx} paper={selected} format={format} />
@@ -297,12 +300,12 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
                 {t.caption && <div className="text-xs italic text-muted-foreground">{t.caption}</div>}
                 <div className="grid grid-cols-2 gap-2">
                   <Button size="sm" variant="outline" onClick={() => exportTable(paper, t, i, format)}><Download className="size-4 mr-2" />Export {fmtLabel}</Button>
-                  {paper.Paper_URL && <a href={paper.Paper_URL} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 text-sm bg-primary text-primary-foreground rounded-md py-2 hover:opacity-90"><ExternalLink className="size-4" />View Full Paper</a>}
+                  {paper.Paper_URL && <a href={paper.Paper_URL} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 text-sm bg-primary text-primary-foreground rounded-md py-2 hover:opacity-90"><ExternalLink className="size-4" />View Full Article</a>}
                 </div>
               </TabsContent>
             ))}
           </Tabs>
-        ) : <Alert><AlertDescription>No tables found in this paper.</AlertDescription></Alert>}
+        ) : <Alert><AlertDescription>No tables found in this article.</AlertDescription></Alert>}
       </div>
 
       {/* Full-screen view of a single table. */}
@@ -621,7 +624,7 @@ async function downloadExtractedTablesXlsx(papers: ExtractedPaper[]) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
-  toast.success(`Exported ${papers.length} papers (${papers.reduce((acc, p) => acc + p.Extracted_Tables.length, 0)} tables) to XLSX.`);
+  toast.success(`Exported ${papers.length} articles (${papers.reduce((acc, p) => acc + p.Extracted_Tables.length, 0)} tables) to XLSX.`);
 }
 
 function styleHeaderRow(row: ExcelJS.Row) {

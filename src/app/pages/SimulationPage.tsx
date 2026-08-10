@@ -7,7 +7,8 @@ import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
 import { Badge } from "../components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { ChevronDown, Bot, Play, X, History, GitCompare, Trash2, FlaskConical, Wand2, Loader2 } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
+import { ChevronDown, ChevronLeft, ChevronRight, Bot, Play, X, History, GitCompare, Trash2, FlaskConical, Wand2, Loader2, RotateCcw, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { QueryDiff } from "../components/QueryDiff";
 import { AnalysisProgress, Stage as ProgStage } from "../components/AnalysisProgress";
@@ -134,7 +135,6 @@ function HistoryColumn({
       <div className="px-3 py-2 border-b flex items-center justify-between">
         <span className="text-xs uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
           <History className="size-3.5" />Run history
-          {runs.length > 0 && <span className="text-muted-foreground/70">({runs.length})</span>}
         </span>
         {runs.length > 0 && (
           <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={onClear} title="Clear history">
@@ -167,7 +167,7 @@ function HistoryColumn({
                 </div>
                 <div className="mt-0.5">
                   <span className="font-semibold text-primary tabular-nums">{run.totalYield.toLocaleString()}</span>
-                  <span className="text-xs text-muted-foreground"> papers</span>
+                  <span className="text-xs text-muted-foreground"> articles</span>
                 </div>
                 <div className="font-mono text-[10px] text-muted-foreground truncate mt-1">
                   {run.unifiedQuery.slice(0, 60)}{run.unifiedQuery.length > 60 ? "…" : ""}
@@ -223,6 +223,56 @@ export function SimulationPage() {
   // Two-pane workspace: which database's query is open on the right.
   const [selectedDb, setSelectedDb] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(false);
+  // Query-preview pagination + progressive loading.
+  const [previewPerPage, setPreviewPerPage] = useState(25);
+  const [previewPage, setPreviewPage] = useState(0);
+  const [previewLoadingDb, setPreviewLoadingDb] = useState<string | null>(null);
+  const [exhaustedDbs, setExhaustedDbs] = useState<Set<string>>(new Set());
+  useEffect(() => { setPreviewPage(0); }, [selectedDb, previewPerPage]);
+
+  // Pull the next batch of preview results for a database and append them, so
+  // the reviewer can keep paging without a manual "load more". Bounded at 2000
+  // records; stops when the source returns nothing new (its API page cap).
+  const PREVIEW_CAP = 2000;
+  async function loadMorePreview(src: string) {
+    const cur = s.dbTestResults?.[src];
+    if (!cur || previewLoadingDb || exhaustedDbs.has(src)) return;
+    const loaded = cur.papers.length;
+    if (loaded >= (cur.total_found || 0) || loaded >= PREVIEW_CAP) return;
+    setPreviewLoadingDb(src);
+    try {
+      const target = Math.min(loaded + 200, PREVIEW_CAP);
+      const { papers } = await DataAggregator.fetchAll(cur.query, [src], s.pico, target);
+      const mapped = papers.slice(0, PREVIEW_CAP).map(p => ({ title: p.title, url: p.url }));
+      if (mapped.length <= loaded) {
+        setExhaustedDbs(prev => new Set(prev).add(src));   // source can't return more
+      } else {
+        s.setDbTestResults(prev => ({ ...(prev || {}), [src]: { ...cur, papers: mapped } }));
+        if (mapped.length >= (cur.total_found || 0) || mapped.length >= PREVIEW_CAP) {
+          setExhaustedDbs(prev => new Set(prev).add(src));
+        }
+      }
+    } catch { /* ignore */ } finally {
+      setPreviewLoadingDb(null);
+    }
+  }
+
+  // Auto-load the next batch once the reviewer reaches the last page of what's
+  // loaded (and more exists). Runs before the early return to keep hook order.
+  useEffect(() => {
+    const apiSrcs = s.sources.filter(x => x !== "Local PDFs");
+    const active = selectedDb && apiSrcs.includes(selectedDb) ? selectedDb : (apiSrcs[0] ?? null);
+    if (!active) return;
+    const cur = s.dbTestResults?.[active];
+    if (!cur?.papers?.length) return;
+    const loaded = cur.papers.length;
+    const totalPages = Math.max(1, Math.ceil(loaded / previewPerPage));
+    const onLastPage = previewPage >= totalPages - 1;
+    if (onLastPage && loaded < (cur.total_found || 0) && loaded < PREVIEW_CAP && !exhaustedDbs.has(active) && previewLoadingDb == null) {
+      void loadMorePreview(active);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewPage, selectedDb, previewPerPage, s.dbTestResults, previewLoadingDb, exhaustedDbs]);
 
   // Auto-load the canonical query (generated on Research Strategy) into the
   // base-query box when it is still empty, so Planning opens ready to edit.
@@ -284,7 +334,7 @@ export function SimulationPage() {
     setUsedRunId(run.id);
     setCompareA(null);
     setCompareB(null);
-    toast.success(`Loaded ${run.label}: ${run.totalYield.toLocaleString()} papers`);
+    toast.success(`Loaded ${run.label}: ${run.totalYield.toLocaleString()} articles`);
   }
 
   // Does a run's queries still match what's currently in the editor?
@@ -306,12 +356,16 @@ export function SimulationPage() {
     try {
       const q = s.perDbQueries[src] || s.unifiedSearchQuery;
       const yieldRes = await DataAggregator.simulateYield(q, [src]);
-      const { papers } = await DataAggregator.fetchAll(q, [src], s.pico, 25);
+      // Preview up to 500 matching records so the reviewer can inspect the
+      // actual results a query returns, not just a small sample.
+      const { papers } = await DataAggregator.fetchAll(q, [src], s.pico, 500);
       s.setDbTestResults(prev => ({
         ...(prev || {}),
-        [src]: { query: q, total_found: yieldRes[src] || 0, papers: papers.slice(0, 25).map(p => ({ title: p.title, url: p.url })) },
+        [src]: { query: q, total_found: yieldRes[src] || 0, papers: papers.slice(0, 500).map(p => ({ title: p.title, url: p.url })) },
       }));
-      toast.success(`${src}: ${yieldRes[src]} papers`);
+      setPreviewPage(0);
+      setExhaustedDbs(prev => { const n = new Set(prev); n.delete(src); return n; });
+      toast.success(`${src}: ${yieldRes[src]} articles`);
     } finally { setTesting(null); }
   }
 
@@ -357,11 +411,11 @@ export function SimulationPage() {
         (iter, _total, source, count, relevance, reasoning) => {
           s.updateTaskStage("ai-optimize", source, {
             status: "running",
-            detail: `iter ${iter} · ${count.toLocaleString()} papers · rel ${relevance.toFixed(2)}`,
+            detail: `iter ${iter} · ${count.toLocaleString()} articles · rel ${relevance.toFixed(2)}`,
           });
           s.appendTaskLog(
             "ai-optimize",
-            `Iter ${iter} · ${source}: ${count.toLocaleString()} papers, relevance ${relevance.toFixed(2)} · ${reasoning || ""}`,
+            `Iter ${iter} · ${source}: ${count.toLocaleString()} articles, relevance ${relevance.toFixed(2)} · ${reasoning || ""}`,
           );
         },
         signal,
@@ -376,7 +430,7 @@ export function SimulationPage() {
       Object.entries(last.sources).forEach(([k, v]: any) => {
         s.updateTaskStage("ai-optimize", k, {
           status: "done",
-          detail: `${(v.count as number).toLocaleString()} papers · rel ${(v.relevance_score as number).toFixed(2)}`,
+          detail: `${(v.count as number).toLocaleString()} articles · rel ${(v.relevance_score as number).toFixed(2)}`,
         });
       });
       s.setAgenticTrace(result.trace);
@@ -435,7 +489,7 @@ export function SimulationPage() {
             <Button onClick={runSimulation} disabled={optRunning} className="w-full justify-start">
               <Play className="size-4 mr-2" />Run Planning
             </Button>
-            <Button variant="ghost" onClick={() => { s.setSimulation(null); s.setDbTestResults(null); s.setAgenticTrace(null); s.setAgenticSummary(null); }} className="w-full justify-start">
+            <Button variant="destructive" onClick={() => { s.setSimulation(null); s.setDbTestResults(null); s.setAgenticTrace(null); s.setAgenticSummary(null); }} className="w-full justify-start">
               <X className="size-4 mr-2" />Clear
             </Button>
           </div>
@@ -516,64 +570,100 @@ export function SimulationPage() {
                   ) : (
                     <div className="flex items-baseline gap-1.5 mt-0.5">
                       <span className="text-2xl font-bold text-primary tabular-nums leading-none">{yieldOf(activeDb)!.toLocaleString()}</span>
-                      <span className="text-xs text-muted-foreground">papers · {(shareOf(yieldOf(activeDb)) * 100).toFixed(0)}% of total</span>
+                      <span className="text-xs text-muted-foreground">articles · {(shareOf(yieldOf(activeDb)) * 100).toFixed(0)}% of total</span>
                     </div>
                   )}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <Button
-                    size="sm" variant="ghost" className="text-xs h-8"
+                    size="sm" variant="outline" className="text-xs h-8"
                     onClick={() => s.setPerDbQueries(p => ({ ...p, [activeDb]: s.unifiedSearchQuery }))}
                     title="Reset this database's query to the base query"
                   >
-                    Reset to base
+                    <RotateCcw className="size-3.5 mr-1.5" />Reset to base
                   </Button>
                   <Button size="sm" onClick={() => testDb(activeDb)} disabled={testing === activeDb}>
                     <FlaskConical className="size-4 mr-1.5" />{testing === activeDb ? "Testing…" : "Test"}
                   </Button>
                 </div>
               </div>
-              <div className="flex-1 overflow-auto p-3 space-y-3">
+              <div className="flex-1 overflow-auto p-4 space-y-4">
                 <div>
                   <label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Query for {activeDb}</label>
                   <Textarea
                     value={s.perDbQueries[activeDb] ?? ""}
                     onChange={e => s.setPerDbQueries(p => ({ ...p, [activeDb]: e.target.value }))}
                     rows={6}
-                    className="font-mono text-xs mt-1"
+                    className="font-mono text-xs mt-1.5"
                   />
                 </div>
-                {s.dbTestResults?.[activeDb]?.papers?.length ? (
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                        Sample results
-                      </span>
-                      <span className="text-[11px] text-muted-foreground">
-                        showing {s.dbTestResults[activeDb].papers.length} of {(yieldOf(activeDb) ?? 0).toLocaleString()}
-                      </span>
-                    </div>
-                    <div className="space-y-1.5">
-                      {s.dbTestResults[activeDb].papers.map((p, i) => (
-                        <div key={i} className="rounded-md border p-2.5 hover:border-primary/40 transition-colors">
-                          <div className="flex gap-2">
-                            <span className="text-xs text-muted-foreground tabular-nums shrink-0 pt-0.5 w-5 text-right">{i + 1}</span>
-                            <div className="min-w-0">
-                              <div className="text-sm leading-snug">{p.title}</div>
-                              {p.url && (
-                                <a href={p.url} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline break-all">{p.url}</a>
-                              )}
+                {(() => {
+                  const all = s.dbTestResults?.[activeDb]?.papers ?? [];
+                  if (!all.length) {
+                    return (
+                      <div className="rounded-md border border-dashed p-4 text-xs text-muted-foreground text-center">
+                        Edit the query and click <strong>Test</strong> to preview the yield and a sample of results for {activeDb}.
+                      </div>
+                    );
+                  }
+                  const totalPages = Math.max(1, Math.ceil(all.length / previewPerPage));
+                  const page = Math.min(previewPage, totalPages - 1);
+                  const start = page * previewPerPage;
+                  const pageItems = all.slice(start, start + previewPerPage);
+                  return (
+                    <div className="space-y-2.5 border-t pt-4">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                          Results <span className="text-muted-foreground/60 normal-case tracking-normal">({all.length.toLocaleString()} loaded of {(yieldOf(activeDb) ?? 0).toLocaleString()})</span>
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[11px] text-muted-foreground">Per page</span>
+                          <Select value={String(previewPerPage)} onValueChange={v => { setPreviewPerPage(Number(v)); setPreviewPage(0); }}>
+                            <SelectTrigger className="h-7 w-[84px] text-xs"><SelectValue /></SelectTrigger>
+                            <SelectContent>
+                              {[25, 50, 100, 200].map(n => <SelectItem key={n} value={String(n)}>{n}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        {pageItems.map((p, i) => (
+                          <div key={start + i} className="rounded-md border p-2.5 hover:border-primary/40 transition-colors">
+                            <div className="flex gap-2">
+                              <span className="text-xs text-muted-foreground tabular-nums shrink-0 pt-0.5 w-8 text-right">{start + i + 1}</span>
+                              <div className="min-w-0">
+                                <div className="text-sm leading-snug">{p.title}</div>
+                                {p.url && (
+                                  <a href={p.url} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline break-all">{p.url}</a>
+                                )}
+                              </div>
                             </div>
                           </div>
+                        ))}
+                      </div>
+                      {previewLoadingDb === activeDb && (
+                        <div className="flex items-center justify-center gap-2 py-1 text-[11px] text-muted-foreground">
+                          <Loader2 className="size-3.5 animate-spin" />Loading more results…
                         </div>
-                      ))}
+                      )}
+                      {totalPages > 1 && (
+                        <div className="flex items-center justify-between pt-1">
+                          <Button size="sm" variant="outline" className="h-7" disabled={page === 0} onClick={() => setPreviewPage(page - 1)}>
+                            <ChevronLeft className="size-3.5 mr-1" />Prev
+                          </Button>
+                          <span className="text-[11px] text-muted-foreground tabular-nums">
+                            Page {page + 1} of {totalPages} · {start + 1}–{Math.min(start + previewPerPage, all.length)}
+                          </span>
+                          <Button size="sm" variant="outline" className="h-7"
+                            disabled={page >= totalPages - 1 && (exhaustedDbs.has(activeDb) || all.length >= (yieldOf(activeDb) ?? 0))}
+                            onClick={() => setPreviewPage(page + 1)}>
+                            Next<ChevronRight className="size-3.5 ml-1" />
+                          </Button>
+                        </div>
+                      )}
                     </div>
-                  </div>
-                ) : (
-                  <div className="text-xs text-muted-foreground">
-                    Edit the query and click <strong>Test</strong> to preview the yield and a sample of results for {activeDb}.
-                  </div>
-                )}
+                  );
+                })()}
               </div>
             </>
           )}
@@ -621,7 +711,7 @@ export function SimulationPage() {
             </div>
             <div className="bg-muted/30 rounded p-3 text-center">
               <div className="text-2xl font-bold">{s.agenticSummary.total_papers_found.toLocaleString()}</div>
-              <div className="text-xs text-muted-foreground">Total Papers</div>
+              <div className="text-xs text-muted-foreground">Total Articles</div>
             </div>
             <div className="bg-muted/30 rounded p-3 text-center">
               <div className="text-2xl font-bold">{s.agenticSummary.best_relevance.toFixed(2)}</div>
@@ -636,7 +726,7 @@ export function SimulationPage() {
               <Collapsible key={db}>
                 <CollapsibleTrigger asChild>
                   <Button variant="outline" className="w-full justify-between">
-                    <span>{db}: {final.count} papers · relevance {final.relevance.toFixed(2)} ({final.quality}) · {hist.length} iterations</span>
+                    <span>{db}: {final.count} articles · relevance {final.relevance.toFixed(2)} ({final.quality}) · {hist.length} iterations</span>
                     <ChevronDown className="size-4" />
                   </Button>
                 </CollapsibleTrigger>
@@ -647,10 +737,13 @@ export function SimulationPage() {
                     const deltaRel = prev ? step.relevance - prev.relevance : 0;
                     return (
                       <div key={i} className="border-l-2 border-primary pl-3 space-y-2 pb-2">
-                        <div className="text-sm font-medium flex flex-wrap items-baseline gap-2">
-                          <span>{i === hist.length - 1 ? "✅" : `${i + 1}.`} Iteration {step.iteration}</span>
+                        <div className="text-sm font-medium flex flex-wrap items-center gap-2">
+                          <span className="inline-flex items-center gap-1.5">
+                            {i === hist.length - 1 ? <CheckCircle2 className="size-4 text-emerald-600" /> : <span className="tabular-nums">{i + 1}.</span>}
+                            Iteration {step.iteration}
+                          </span>
                           <span className="text-muted-foreground font-normal">·</span>
-                          <span>{step.count.toLocaleString()} papers</span>
+                          <span>{step.count.toLocaleString()} articles</span>
                           {prev && (
                             <span className={`text-xs ${deltaCount >= 0 ? "text-emerald-600" : "text-rose-600"}`}>
                               ({deltaCount >= 0 ? "+" : ""}{deltaCount.toLocaleString()})

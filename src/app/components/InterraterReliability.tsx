@@ -282,7 +282,7 @@ export function InterraterReliability({ projectId }: { projectId: string }) {
         <Alert>
           <Users className="size-4 inline mr-1" />
           <AlertDescription className="text-xs">
-            Inter-rater reliability requires at least two reviewers with decisions. This project currently has {reviewerIds.length} reviewer{reviewerIds.length === 1 ? "" : "s"}. Invite more reviewers (and have them screen the same papers) to populate this view.
+            Inter-rater reliability requires at least two reviewers with decisions. This project currently has {reviewerIds.length} reviewer{reviewerIds.length === 1 ? "" : "s"}. Invite more reviewers (and have them screen the same articles) to populate this view.
           </AlertDescription>
         </Alert>
       </Card>
@@ -358,7 +358,7 @@ export function InterraterReliability({ projectId }: { projectId: string }) {
               <tr>
                 <th className="text-left px-2 py-1.5 font-medium">Reviewer A</th>
                 <th className="text-left px-2 py-1.5 font-medium">Reviewer B</th>
-                <th className="text-right px-2 py-1.5 font-medium">n papers</th>
+                <th className="text-right px-2 py-1.5 font-medium">n articles</th>
                 <th className="text-right px-2 py-1.5 font-medium">agree</th>
                 <th className="text-right px-2 py-1.5 font-medium">κ</th>
                 <th className="text-left px-2 py-1.5 font-medium">interpretation</th>
@@ -383,7 +383,7 @@ export function InterraterReliability({ projectId }: { projectId: string }) {
                 );
               })}
               {pairs.length === 0 && (
-                <tr><td colSpan={6} className="px-2 py-3 text-muted-foreground text-center">No pairwise data yet. Reviewers need to decide on overlapping papers.</td></tr>
+                <tr><td colSpan={6} className="px-2 py-3 text-muted-foreground text-center">No pairwise data yet. Reviewers need to decide on overlapping articles.</td></tr>
               )}
             </tbody>
           </table>
@@ -394,7 +394,7 @@ export function InterraterReliability({ projectId }: { projectId: string }) {
       <div className="space-y-2">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Decision matrix</div>
         <div className="text-xs text-muted-foreground">
-          One row per paper, one column per reviewer. Green = include, red = exclude, amber = maybe, grey = not yet decided. Adjudicated papers ({adjudications.length}) are marked with a violet ring on every cell.
+          One row per article, one column per reviewer. Green = include, red = exclude, amber = maybe, grey = not yet decided. Adjudicated articles ({adjudications.length}) are marked with a violet ring on every cell.
         </div>
         <DecisionMatrixGrid
           paperIds={paperIds}
@@ -444,7 +444,7 @@ function DecisionMatrixGrid({
       <table className="text-xs">
         <thead className="bg-muted sticky top-0 z-10">
           <tr>
-            <th className="text-left px-2 py-1 sticky left-0 bg-muted z-20 max-w-[260px]">Paper</th>
+            <th className="text-left px-2 py-1 sticky left-0 bg-muted z-20 max-w-[260px]">Article</th>
             {reviewerIds.map(rid => (
               <th key={rid} className="px-1 py-1 text-center font-mono text-[10px]" title={rid}>
                 {rid.slice(0, 6)}…
@@ -473,7 +473,7 @@ function DecisionMatrixGrid({
             </tr>
           ))}
           {paperIds.length === 0 && (
-            <tr><td colSpan={reviewerIds.length + 1} className="px-2 py-3 text-center text-muted-foreground">No papers in this project.</td></tr>
+            <tr><td colSpan={reviewerIds.length + 1} className="px-2 py-3 text-center text-muted-foreground">No articles in this project.</td></tr>
           )}
         </tbody>
       </table>
@@ -532,7 +532,7 @@ function buildIrrSvg({
 
   // Title + summary
   out.push(`<text x="${PAD}" y="${PAD + 14}" font-size="14" font-weight="600">Inter-rater reliability: ${stage}</text>`);
-  out.push(`<text x="${PAD}" y="${PAD + 40}" font-size="11" fill="#475569">Fleiss' κ = ${Number.isFinite(fleiss.k) ? fleiss.k.toFixed(3) : "N/A"}   ·   Krippendorff's α = ${Number.isFinite(alpha.alpha) ? alpha.alpha.toFixed(3) : "N/A"}   ·   ${reviewerIds.length} reviewers   ·   ${papers.length} papers   ·   coverage ${(coverage * 100).toFixed(0)}%</text>`);
+  out.push(`<text x="${PAD}" y="${PAD + 40}" font-size="11" fill="#475569">Fleiss' κ = ${Number.isFinite(fleiss.k) ? fleiss.k.toFixed(3) : "N/A"}   ·   Krippendorff's α = ${Number.isFinite(alpha.alpha) ? alpha.alpha.toFixed(3) : "N/A"}   ·   ${reviewerIds.length} reviewers   ·   ${papers.length} articles   ·   coverage ${(coverage * 100).toFixed(0)}%</text>`);
 
   // Pairwise table inline
   let py = PAD + 60;

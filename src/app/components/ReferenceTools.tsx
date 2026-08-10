@@ -26,7 +26,7 @@ export function ReferenceTools() {
   const libRef = useRef<HTMLInputElement>(null);
 
   function exportRefs(fmt: "RIS" | "BibTeX") {
-    if (!papers.length) { toast.error("No papers to export yet."); return; }
+    if (!papers.length) { toast.error("No articles to export yet."); return; }
     const ext = fmt === "RIS" ? "ris" : "bib";
     const mime = fmt === "RIS" ? "application/x-research-info-systems" : "application/x-bibtex";
     download(`corpus.${ext}`, serializeReferences(papers.map(paperToRef), fmt), mime);

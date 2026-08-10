@@ -579,14 +579,14 @@ export function MetaAnalysisPage() {
 
   async function runExtraction() {
     if (!s.metaOutcome.trim()) { toast.error("Specify the outcome you want to meta-analyse."); return; }
-    if (candidatePapers.length === 0) { toast.error("No included papers available. Run abstract screening first."); return; }
+    if (candidatePapers.length === 0) { toast.error("No included articles available. Run abstract screening first."); return; }
     setExtracting(true);
     try {
       const r = await MetaAnalysisService.extract(candidatePapers, s.metaOutcome, s.metaMeasure || "", fullTextMap);
       s.setMetaExtractions(r.extractions);
       s.setMetaRun(null);
       const ok = r.extractions.filter(x => typeof x.yi === "number").length;
-      toast.success(`Extracted effect-size data from ${ok} of ${r.extractions.length} papers.`);
+      toast.success(`Extracted effect-size data from ${ok} of ${r.extractions.length} articles.`);
     } catch (e: any) {
       toast.error(`Extraction failed: ${e?.message?.slice(0, 80) || "unknown error"}`);
     } finally {
@@ -685,7 +685,7 @@ export function MetaAnalysisPage() {
         </div>
 
         {candidatePapers.length === 0 && (
-          <Alert><AlertDescription>No source papers found. Run Abstract Screening first; included papers feed the meta-analysis.</AlertDescription></Alert>
+          <Alert><AlertDescription>No source articles found. Run Abstract Screening first; included articles feed the meta-analysis.</AlertDescription></Alert>
         )}
       </Card>
 

@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useState, useEffect } from "react";
 import { useStore } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
 import { categoriseAbstractExclusion, effectiveAbstractDecision } from "../lib/exclusionBucketing";
@@ -8,11 +8,12 @@ import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
-import { Popover, PopoverContent, PopoverTrigger } from "../components/ui/popover";
-import { Search, Download, Minus, Zap, ChevronRight, ChevronDown, Maximize2, Minimize2 } from "lucide-react";
+import { PopoverContent, PopoverTrigger, PopoverClose, ScrollAwarePopover } from "../components/ui/popover";
+import { Search, Download, Minus, Zap, ChevronRight, ChevronDown, Maximize2, Minimize2, Plus, RotateCcw, History, X, Check, FileText, CheckCircle2, XCircle, Clock, GripVertical, Sparkles } from "lucide-react";
 import { RapidScreen } from "../components/RapidScreen";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 
 // ---- styling helpers -------------------------------------------------------
 
@@ -47,6 +48,17 @@ function picoVoteFullLabel(v: PicoVote): string {
   }
 }
 
+// Non-frozen columns the reviewer can drag to reorder. Keep/Decision/Title are
+// pinned (sticky) and not part of this list.
+const ABS_MOVABLE_COLS: { id: string; label: string; align?: "center" }[] = [
+  { id: "source", label: "Source" },
+  { id: "p", label: "P", align: "center" },
+  { id: "i", label: "I", align: "center" },
+  { id: "c", label: "C", align: "center" },
+  { id: "o", label: "O", align: "center" },
+  { id: "reasoning", label: "Reasoning" },
+];
+
 // ---- page ------------------------------------------------------------------
 
 export function AbstractPage() {
@@ -54,12 +66,16 @@ export function AbstractPage() {
   const task = s.tasks["abstract-screen"];
   const running = task?.status === "running";
 
-  async function runSearch() {
+  // mode "full" re-screens the whole corpus and replaces the results; mode
+  // "incremental" only screens papers not already in results (e.g. records added
+  // later from citation snowballing), leaving existing decisions + overrides
+  // untouched. Either way the pass is archived so prior runs can be restored.
+  async function runSearch(mode: "full" | "incremental" = "full") {
     if (!s.query) { toast.error("Define a research goal on the Home page first."); return; }
 
     const { abort } = s.startTask("abstract-screen", [
-      { id: "fetch",  label: "Fetching papers",  status: "pending" },
-      { id: "screen", label: "Screening papers", status: "pending" },
+      { id: "fetch",  label: "Fetching articles",  status: "pending" },
+      { id: "screen", label: "Screening articles", status: "pending" },
     ]);
     const signal = abort.signal;
     const start = Date.now();
@@ -75,21 +91,21 @@ export function AbstractPage() {
         queue = s.uniquePapers.filter(p => !s.excludedByQuality.has(p.id));
         s.updateTask("abstract-screen", {
           stages: [
-            { id: "fetch", label: "Using existing paper set from Quality Assessment", status: "done" },
-            { id: "screen", label: "Screening papers", status: "running" },
+            { id: "fetch", label: "Using existing article set from Quality Assessment", status: "done" },
+            { id: "screen", label: "Screening articles", status: "running" },
           ],
         });
         if (queue.length === 0) {
-          s.updateTask("abstract-screen", { status: "error", detail: "All papers were excluded in Quality Assessment." });
-          toast.error("All papers were excluded in quality assessment.");
+          s.updateTask("abstract-screen", { status: "error", detail: "All articles were excluded in Quality Assessment." });
+          toast.error("All articles were excluded in quality assessment.");
           return;
         }
       } else {
         s.updateTask("abstract-screen", {
-          detail: "Fetching papers from databases…",
+          detail: "Fetching articles from databases…",
           stages: [
-            { id: "fetch", label: "Fetching papers", status: "running" },
-            { id: "screen", label: "Screening papers", status: "pending" },
+            { id: "fetch", label: "Fetching articles", status: "running" },
+            { id: "screen", label: "Screening articles", status: "pending" },
           ],
         });
         // Pull the FULL planning corpus: every source's own query, up to its
@@ -114,14 +130,14 @@ export function AbstractPage() {
         s.setDuplicatesCount(duplicates.length);
         queue = unique;
         if (queue.length === 0) {
-          s.updateTask("abstract-screen", { status: "error", detail: "No papers retrieved for this query." });
-          toast.error("No papers retrieved for this query. Broaden it on the Home page.");
+          s.updateTask("abstract-screen", { status: "error", detail: "No articles retrieved for this query." });
+          toast.error("No articles retrieved for this query. Broaden it on the Home page.");
           return;
         }
         s.updateTask("abstract-screen", {
           stages: [
-            { id: "fetch", label: `Fetched ${all.length} papers (${unique.length} unique)`, status: "done" },
-            { id: "screen", label: "Screening papers", status: "running" },
+            { id: "fetch", label: `Fetched ${all.length} articles (${unique.length} unique)`, status: "done" },
+            { id: "screen", label: "Screening articles", status: "running" },
           ],
         });
       }
@@ -129,6 +145,19 @@ export function AbstractPage() {
       if (signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
       s.updateTask("abstract-screen", { status: "error", detail: e?.message || "Fetch failed" });
       return;
+    }
+
+    // Incremental: screen only papers not already in the existing results.
+    const existing = s.results || [];
+    const incremental = mode === "incremental" && existing.length > 0;
+    if (incremental) {
+      const seen = new Set(existing.map(x => x.paper_id));
+      queue = queue.filter(p => !seen.has(p.id));
+      if (queue.length === 0) {
+        s.updateTask("abstract-screen", { status: "done" });
+        toast.info("No new articles to screen. Everything in the corpus is already screened.");
+        return;
+      }
     }
 
     s.updateTask("abstract-screen", { progress: { done: 0, total: queue.length } });
@@ -166,12 +195,30 @@ export function AbstractPage() {
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, worker));
       const screened: ScreenResult[] = slots.filter((x): x is ScreenResult => Boolean(x));
 
+      // On cancel, discard this partial run and keep whatever was already
+      // loaded (the most recent completed screening), rather than overwriting it
+      // with a half-finished set.
       if (signal.aborted) {
         s.updateTask("abstract-screen", { status: "canceled" });
-        toast.info(`Canceled: ${screened.length} of ${queue.length} screened`);
+        toast.info(existing.length
+          ? `Canceled after ${screened.length}. Kept your previous screening (${existing.length}).`
+          : `Canceled: ${screened.length} of ${queue.length} screened.`);
+        return;
       }
 
-      const totalExcluded = Object.values(reasons).reduce((a, b) => a + b, 0);
+      // Merge: incremental appends the newly screened records to the existing
+      // set; full replaces it. Reviewer overrides live in a separate map keyed
+      // by paper_id, so they are preserved across either path.
+      const finalResults: ScreenResult[] = incremental ? [...existing, ...screened] : screened;
+
+      // Recompute the exclusion breakdown over the FULL set so PRISMA stays
+      // correct in incremental mode (where `reasons` only covers this pass).
+      const finalReasons: Record<string, number> = {};
+      finalResults.filter(x => x.Decision === "EXCLUDE").forEach(x => {
+        const bucket = categoriseAbstractExclusion(x, s.inclusion, s.exclusion);
+        finalReasons[bucket] = (finalReasons[bucket] || 0) + 1;
+      });
+      const totalExcluded = Object.values(finalReasons).reduce((a, b) => a + b, 0);
       const sourceCounts: Record<string, number> = {};
       (s.rawPapers || []).forEach(p => { sourceCounts[p.source] = (sourceCounts[p.source] || 0) + 1; });
       // PRISMA-S: record this search run (per-database query + records retrieved),
@@ -192,20 +239,34 @@ export function AbstractPage() {
       }
       s.setPrisma(p => ({
         ...p,
-        identified: s.rawPapers?.length || queue.length,
+        identified: s.rawPapers?.length || finalResults.length,
         source_counts: sourceCounts,
         duplicates_removed: s.duplicatesCount,
-        screened: screened.length,
+        screened: finalResults.length,
         excluded_total: totalExcluded,
-        exclusion_breakdown: reasons,
-        included_final: screened.length - totalExcluded,
+        exclusion_breakdown: finalReasons,
+        included_final: finalResults.length - totalExcluded,
       }));
-      s.setResults(screened);
-      s.setScreeningDuration((Date.now() - start) / 1000);
+      s.setResults(finalResults);
+      const durationSec = (Date.now() - start) / 1000;
+      s.setScreeningDuration(durationSec);
 
+      // Archive this pass so it can be compared or restored later.
       if (!signal.aborted) {
+        s.setScreeningArchive(prev => [...prev, {
+          id: Date.now().toString(36),
+          ranAt: new Date().toISOString(),
+          mode: incremental ? "incremental" : "full",
+          model: s.model,
+          screenedNow: screened.length,
+          totalAfter: finalResults.length,
+          included: finalResults.length - totalExcluded,
+          excluded: totalExcluded,
+          durationSec,
+          results: finalResults,
+        }]);
         s.updateTask("abstract-screen", { status: "done" });
-        toast.success(`Screened ${screened.length} papers in ${formatDuration((Date.now() - start) / 1000)}`);
+        toast.success(`Screened ${screened.length} article${screened.length === 1 ? "" : "s"}${incremental ? " (new)" : ""} in ${formatDuration(durationSec)}`);
       }
     } catch (e: any) {
       s.updateTask("abstract-screen", { status: "error", detail: e?.message });
@@ -218,11 +279,39 @@ export function AbstractPage() {
   // excluded counts.
   const passed = r ? r.filter(x => effectiveAbstractDecision(x, s.abstractOverrides) === "INCLUDE") : [];
   const excluded = r ? r.filter(x => effectiveAbstractDecision(x, s.abstractOverrides) === "EXCLUDE") : [];
-  const overrideCount = r ? r.filter(x => x.Decision !== effectiveAbstractDecision(x, s.abstractOverrides)).length : 0;
+
+  // Papers in the corpus not yet screened (drives the "Screen new papers"
+  // incremental action). Snowballed records already sit in results, so they are
+  // correctly excluded from this count.
+  const existingIds = new Set((r || []).map(x => x.paper_id));
+  const availableCorpus = (s.uniquePapers || []).filter(p => !s.excludedByQuality.has(p.id));
+  const newToScreen = availableCorpus.filter(p => !existingIds.has(p.id)).length;
 
   const [projectRefresh, setProjectRefresh] = useState(0);
   const [rapidOpen, setRapidOpen] = useState(false);
   const [maxOpen, setMaxOpen] = useState(false);
+  const [histOpen, setHistOpen] = useState(false);
+
+  // Reorderable (non-frozen) columns. Keep/Decision/Title stay pinned. The
+  // order persists per browser so the reviewer's layout sticks.
+  const DEFAULT_COL_ORDER = ABS_MOVABLE_COLS.map(c => c.id);
+  const [colOrder, setColOrder] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("ee:abstract-col-order") || "null");
+      if (Array.isArray(saved) && saved.length === DEFAULT_COL_ORDER.length && DEFAULT_COL_ORDER.every(id => saved.includes(id))) return saved;
+    } catch { /* ignore */ }
+    return DEFAULT_COL_ORDER;
+  });
+  useEffect(() => { try { localStorage.setItem("ee:abstract-col-order", JSON.stringify(colOrder)); } catch { /* ignore */ } }, [colOrder]);
+  const [dragCol, setDragCol] = useState<string | null>(null);
+  const [overCol, setOverCol] = useState<string | null>(null);
+  const orderedCols = colOrder.map(id => ABS_MOVABLE_COLS.find(c => c.id === id)!).filter(Boolean);
+  const moveCol = (from: string, to: string) => setColOrder(prev => {
+    if (from === to) return prev;
+    const a = [...prev]; const fi = a.indexOf(from); const ti = a.indexOf(to);
+    if (fi < 0 || ti < 0) return prev;
+    a.splice(fi, 1); a.splice(ti, 0, from); return a;
+  });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggleRow = (id: string) => setExpanded(prev => {
     const n = new Set(prev);
@@ -245,26 +334,100 @@ export function AbstractPage() {
       {!r && !s.uniquePapers && s.query && (
         <Alert>
           <AlertDescription>
-            Ready to screen against your PICO. Papers are fetched and deduplicated on demand. Quality Assessment is optional and can be run first from the sidebar.
+            Ready to screen against your PICO. Articles are fetched and deduplicated on demand. Quality Assessment is optional and can be run first from the sidebar.
           </AlertDescription>
         </Alert>
       )}
       {!r && s.uniquePapers && (
         <Alert>
           <AlertDescription>
-            {s.uniquePapers.length - s.excludedByQuality.size} of {s.uniquePapers.length} unique papers ready for screening{s.excludedByQuality.size > 0 ? ` (${s.excludedByQuality.size} excluded in Quality Assessment)` : ""}.
+            {s.uniquePapers.length - s.excludedByQuality.size} of {s.uniquePapers.length} unique articles ready for screening{s.excludedByQuality.size > 0 ? ` (${s.excludedByQuality.size} excluded in Quality Assessment)` : ""}.
           </AlertDescription>
         </Alert>
       )}
 
       {r && (
         <>
-          <div className="grid grid-cols-4 gap-3">
-            <StatBox label="Papers Screened" value={r.length} />
-            <StatBox label="Included" value={passed.length} variant="success" />
-            <StatBox label="Excluded" value={excluded.length} variant="danger" />
-            <StatBox label="Time" value={formatDuration(s.screeningDuration)} />
-          </div>
+          {/* Control pane: counts + all screening actions in one place. */}
+          <ControlPane
+            stats={<>
+              <InlineStat icon={FileText} value={r.length} label="Screened" />
+              <PaneDivider />
+              <InlineStat icon={CheckCircle2} value={passed.length} label="Included" tone="success" hint={r.length ? `${Math.round((passed.length / r.length) * 100)}%` : undefined} />
+              <InlineStat icon={XCircle} value={excluded.length} label="Excluded" tone="danger" hint={r.length ? `${Math.round((excluded.length / r.length) * 100)}%` : undefined} />
+              <PaneDivider />
+              <InlineStat icon={Clock} value={formatDuration(s.screeningDuration)} label="Time" tone="neutral" />
+            </>}
+            actions={<>
+              {running ? (
+                <Button size="sm" variant="destructive" className="h-8 shadow-sm" onClick={() => s.cancelTask("abstract-screen")} title="Stop screening (keeps the current results)">
+                  <X className="size-3.5 mr-1.5" />Cancel
+                </Button>
+              ) : (
+                <>
+                  <Button size="sm" className="h-8 shadow-sm" onClick={() => runSearch("incremental")} disabled={newToScreen === 0}
+                    title={newToScreen === 0 ? "No unscreened articles in the corpus" : "Screen only articles not already screened, keeping existing decisions and overrides"}>
+                    <Plus className="size-3.5 mr-1.5" />Screen new{newToScreen ? ` (${newToScreen})` : ""}
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-8" onClick={() => runSearch("full")}
+                    title="Re-screen every article from scratch. The current screening is archived first, so you can restore it.">
+                    <RotateCcw className="size-3.5 mr-1.5" />Re-screen all
+                  </Button>
+                </>
+              )}
+              <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
+              <Button size="sm" onClick={() => setRapidOpen(true)} className="h-8 shadow-sm bg-amber-400 hover:bg-amber-500 text-amber-950 border-amber-400 dark:bg-amber-500 dark:hover:bg-amber-400 dark:text-amber-950" title="Review records fast with the keyboard">
+                <Zap className="size-3.5 mr-1.5" />Rapid screen
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-8 px-2" title="Expand the table to full screen">
+                <Maximize2 className="size-4" />
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)} className="h-8 px-2" title="Download results as Excel (XLSX)">
+                <Download className="size-4" />
+              </Button>
+            </>}
+          />
+
+          {/* Run history: every screening pass, restorable. */}
+          {s.screeningArchive.length > 0 && (
+            <Card className="p-3">
+              <button className="flex items-center gap-1.5 text-sm font-medium w-full text-left" onClick={() => setHistOpen(o => !o)}>
+                {histOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
+                <History className="size-4 text-primary" />Run history
+                <span className="text-xs text-muted-foreground font-normal ml-1">{s.screeningArchive.length} pass{s.screeningArchive.length === 1 ? "" : "es"}</span>
+              </button>
+              {histOpen && (
+                <div className="mt-2 space-y-1.5">
+                  {[...s.screeningArchive].reverse().map((pass, idx) => {
+                    const isLatest = idx === 0;
+                    return (
+                      <div key={pass.id} className="flex items-center gap-3 text-xs rounded-md border px-3 py-2">
+                        <span className={`px-1.5 py-0.5 rounded font-medium ${pass.mode === "incremental" ? "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300" : "bg-muted text-muted-foreground"}`}>
+                          {pass.mode === "incremental" ? "Incremental" : "Full"}
+                        </span>
+                        <span className="text-muted-foreground">{new Date(pass.ranAt).toLocaleString()}</span>
+                        <span className="text-muted-foreground">·</span>
+                        <span>{pass.screenedNow} screened · {pass.totalAfter} total</span>
+                        <span className="text-emerald-600">{pass.included} incl</span>
+                        <span className="text-rose-600">{pass.excluded} excl</span>
+                        <span className="ml-auto flex items-center gap-2">
+                          {isLatest ? (
+                            <span className="text-muted-foreground italic">current</span>
+                          ) : (
+                            <Button size="sm" variant="outline" className="h-7"
+                              onClick={() => { s.setResults(pass.results); toast.success("Restored this screening pass"); }}
+                              title="Replace the current results with this archived pass (overrides are kept)">
+                              <RotateCcw className="size-3.5 mr-1.5" />Restore
+                            </Button>
+                          )}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          )}
 
           <RapidScreen
             open={rapidOpen}
@@ -281,32 +444,6 @@ export function AbstractPage() {
           />
 
           <Card className="p-4">
-            <div className="flex items-center justify-between mb-3 gap-3">
-              <h3 className="font-medium">Screening Results</h3>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button size="sm" variant="outline" onClick={() => setRapidOpen(true)} className="h-7" title="Review records fast with the keyboard">
-                  <Zap className="size-3.5 mr-1.5" />Rapid screen
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2" title="Expand the table to full screen">
-                  <Maximize2 className="size-4" />
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)}
-                  className="h-7 px-2"
-                  title="Download results as Excel (XLSX)"
-                >
-                  <Download className="size-4" />
-                </Button>
-              </div>
-            </div>
-            {overrideCount > 0 && (
-              <div className="text-xs text-muted-foreground mb-2">
-                {overrideCount} reviewer override{overrideCount === 1 ? "" : "s"} active.
-                Decision column reflects the reviewer's choice.
-              </div>
-            )}
             <div className={maxOpen ? "fixed inset-0 z-50 bg-background p-4 flex flex-col gap-2" : ""}>
               {maxOpen && (
                 <div className="flex items-center justify-between shrink-0">
@@ -314,19 +451,30 @@ export function AbstractPage() {
                   <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
                 </div>
               )}
-              <div className={`rounded-md border overflow-auto ${maxOpen ? "flex-1 min-h-0" : "max-h-[600px]"}`}>
+              <div className={`rounded-lg border overflow-auto ${maxOpen ? "flex-1 min-h-0" : "max-h-[600px]"}`}>
               <table className="w-full text-sm border-collapse">
-                <thead className="bg-muted sticky top-0 z-30">
+                <thead className="bg-muted sticky top-0 z-30 [&_th]:text-[11px] [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-muted-foreground [&_th]:py-2.5">
                   <tr className="text-left">
                     <th className="px-3 py-2 sticky left-0 bg-muted z-40 border-b border-r min-w-[60px] text-center" title="Check to keep, uncheck to drop">Keep</th>
                     <th className="px-3 py-2 sticky left-[60px] bg-muted z-40 border-b border-r min-w-[120px]">Decision</th>
                     <th className="px-3 py-2 sticky left-[180px] bg-muted z-40 border-b border-r min-w-[260px] max-w-[260px] shadow-[6px_0_8px_-6px_rgba(0,0,0,0.22)]">Title</th>
-                    <th className="px-3 py-2 border-b whitespace-nowrap">Source</th>
-                    <th className="px-3 py-2 border-b text-center">P</th>
-                    <th className="px-3 py-2 border-b text-center">I</th>
-                    <th className="px-3 py-2 border-b text-center">C</th>
-                    <th className="px-3 py-2 border-b text-center">O</th>
-                    <th className="px-3 py-2 border-b min-w-[380px]">Reasoning</th>
+                    {orderedCols.map(col => (
+                      <th
+                        key={col.id}
+                        draggable
+                        onDragStart={() => setDragCol(col.id)}
+                        onDragEnter={() => setOverCol(col.id)}
+                        onDragOver={e => e.preventDefault()}
+                        onDrop={e => { e.preventDefault(); if (dragCol) moveCol(dragCol, col.id); setDragCol(null); setOverCol(null); }}
+                        onDragEnd={() => { setDragCol(null); setOverCol(null); }}
+                        title="Drag to reorder column"
+                        className={`group/th px-3 border-b cursor-grab active:cursor-grabbing select-none transition-colors ${col.align === "center" ? "text-center" : "whitespace-nowrap"} ${col.id === "reasoning" ? "min-w-[380px]" : ""} ${dragCol === col.id ? "opacity-40" : ""} ${overCol === col.id && dragCol && dragCol !== col.id ? "bg-primary/10" : ""}`}
+                      >
+                        <span className={`inline-flex items-center gap-1 ${col.align === "center" ? "justify-center" : ""}`}>
+                          <GripVertical className="size-3 opacity-0 group-hover/th:opacity-40 transition-opacity" />{col.label}
+                        </span>
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -338,7 +486,7 @@ export function AbstractPage() {
                     const isOpen = expanded.has(row.paper_id);
                     return (
                       <Fragment key={row.paper_id}>
-                      <tr className="border-b last:border-b-0 align-top bg-card hover:bg-muted">
+                      <tr className="border-b border-border/60 last:border-b-0 align-top bg-card hover:bg-muted transition-colors">
                         <td className="px-3 py-2 sticky left-0 z-20 border-r bg-inherit text-center">
                           <Checkbox
                             checked={keep}
@@ -369,7 +517,7 @@ export function AbstractPage() {
                                   .catch((e: any) => console.error("Project decision write failed:", e?.message));
                               }
                             }}
-                            aria-label="Keep this paper"
+                            aria-label="Keep this article"
                           />
                         </td>
                         <td className="px-3 py-2 sticky left-[60px] z-20 border-r bg-inherit">
@@ -385,47 +533,57 @@ export function AbstractPage() {
                             </a>
                           </div>
                         </td>
-                        <td className="px-3 py-2 bg-inherit"><Badge variant="outline">{row.Source}</Badge></td>
-                        <td className="px-3 py-2 text-center bg-inherit">
-                          <PicoCell label="Population" field={pa?.population} criterion={s.pico.population} />
-                        </td>
-                        <td className="px-3 py-2 text-center bg-inherit">
-                          <PicoCell label="Intervention" field={pa?.intervention} criterion={s.pico.intervention} />
-                        </td>
-                        <td className="px-3 py-2 text-center bg-inherit">
-                          <PicoCell label="Comparator" field={pa?.comparator} criterion={s.pico.comparator} />
-                        </td>
-                        <td className="px-3 py-2 text-center bg-inherit">
-                          <PicoCell label="Outcome" field={pa?.outcome} criterion={s.pico.outcome} />
-                        </td>
-                        <td className="px-3 py-2 text-foreground/90 min-w-[380px] bg-inherit">
-                          {row.Reason}
-                        </td>
+                        {orderedCols.map(col => {
+                          switch (col.id) {
+                            case "source": return <td key={col.id} className="px-3 py-2 bg-inherit"><Badge variant="outline">{row.Source}</Badge></td>;
+                            case "p": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Population" field={pa?.population} criterion={s.pico.population} /></td>;
+                            case "i": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Intervention" field={pa?.intervention} criterion={s.pico.intervention} /></td>;
+                            case "c": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Comparator" field={pa?.comparator} criterion={s.pico.comparator} /></td>;
+                            case "o": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Outcome" field={pa?.outcome} criterion={s.pico.outcome} /></td>;
+                            case "reasoning": return <td key={col.id} className="px-3 py-2 text-foreground/90 min-w-[380px] max-w-[560px] bg-inherit"><div className="line-clamp-4 leading-relaxed">{row.Reason}</div></td>;
+                            default: return null;
+                          }
+                        })}
                       </tr>
                       {isOpen && (
-                        <tr className="border-b bg-muted/20">
-                          <td colSpan={9} className="p-0">
-                            <div className="sticky left-0 w-[min(900px,90vw)] px-4 py-3 space-y-3">
-                              <div>
-                                <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">Abstract</div>
-                                <p className="text-sm leading-relaxed whitespace-pre-wrap">{row.Abstract || <span className="text-muted-foreground">No abstract available.</span>}</p>
+                        <tr className="border-b border-border/60 bg-muted/30">
+                          <td colSpan={3 + orderedCols.length} className="p-0">
+                            <div className="sticky left-0 w-[min(920px,92vw)] p-4 space-y-4">
+                              {/* Abstract */}
+                              <div className="rounded-lg border bg-card p-3.5 shadow-sm">
+                                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Abstract</div>
+                                <p className="text-sm leading-relaxed whitespace-pre-wrap text-foreground/90">{row.Abstract || <span className="text-muted-foreground italic">No abstract available.</span>}</p>
                               </div>
+                              {/* Per-PICO assessment */}
                               {pa && (
                                 <div>
-                                  <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">Per-PICO assessment</div>
-                                  <div className="grid md:grid-cols-2 gap-2">
-                                    {([["Population", pa.population], ["Intervention", pa.intervention], ["Comparator", pa.comparator], ["Outcome", pa.outcome]] as const).map(([lbl, f]) => (
-                                      <div key={lbl} className="text-xs rounded border bg-card p-2 space-y-1">
-                                        <div className="flex items-center justify-between">
-                                          <span className="font-medium">{lbl}</span>
-                                          <Badge variant="outline" className="text-[10px]">{f?.vote ?? "NA"}</Badge>
+                                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Per-PICO assessment</div>
+                                  <div className="grid md:grid-cols-2 gap-2.5">
+                                    {([["Population", pa.population], ["Intervention", pa.intervention], ["Comparator", pa.comparator], ["Outcome", pa.outcome]] as const).map(([lbl, f]) => {
+                                      const v = f?.vote ?? "NA";
+                                      return (
+                                        <div key={lbl} className="rounded-lg border bg-card p-3 shadow-sm space-y-1.5">
+                                          <div className="flex items-center justify-between gap-2">
+                                            <span className="text-sm font-medium">{lbl}</span>
+                                            <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${picoVoteClass(v)}`}>
+                                              {v === "NA" && <Minus className="size-3" />}{picoVoteFullLabel(v)}
+                                            </span>
+                                          </div>
+                                          {f?.reasoning && <p className="text-xs text-muted-foreground leading-relaxed">{f.reasoning}</p>}
+                                          {f?.evidence && <blockquote className="text-xs italic text-foreground/70 border-l-2 border-primary/30 pl-2 break-words">“{f.evidence}”</blockquote>}
                                         </div>
-                                        {f?.reasoning && <p className="text-muted-foreground">{f.reasoning}</p>}
-                                        {f?.evidence && <p className="italic text-foreground/70">“{f.evidence}”</p>}
-                                      </div>
-                                    ))}
+                                      );
+                                    })}
                                   </div>
-                                  {pa.overall_reasoning && <p className="text-xs text-muted-foreground mt-2">{pa.overall_reasoning}</p>}
+                                </div>
+                              )}
+                              {/* Reasoning — below the PICO assessment, colour-accented */}
+                              {row.Reason && (
+                                <div className="rounded-lg border border-primary/30 bg-primary/[0.04] p-3.5 shadow-sm">
+                                  <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-primary mb-1.5">
+                                    <Sparkles className="size-3" />Reasoning
+                                  </div>
+                                  <p className="text-sm leading-relaxed text-foreground/90">{row.Reason}</p>
                                 </div>
                               )}
                             </div>
@@ -439,9 +597,6 @@ export function AbstractPage() {
               </table>
               </div>
             </div>
-            {passed.length > 0 && (
-              <Alert className="mt-3"><AlertDescription>{passed.length} papers passed abstract screening. Continue to Full-Text Evidence.</AlertDescription></Alert>
-            )}
           </Card>
         </>
       )}
@@ -454,9 +609,17 @@ export function AbstractPage() {
         />
       )}
 
-      {s.query && (
-        <Button onClick={runSearch} disabled={running} size="lg" className="w-full">
-          <Search className="size-4 mr-2" />{running ? "Screening..." : "Run Abstract Screening"}
+      {/* When results exist, the run/cancel actions live in the results-card
+          toolbar. Only the first-run controls appear here. */}
+      {s.query && !r && running && (
+        <Button onClick={() => s.cancelTask("abstract-screen")} size="lg" variant="destructive" className="w-full">
+          <X className="size-4 mr-2" />Cancel screening
+        </Button>
+      )}
+
+      {s.query && !r && !running && (
+        <Button onClick={() => runSearch("full")} size="lg" className="w-full">
+          <Search className="size-4 mr-2" />Run Abstract Screening
         </Button>
       )}
     </div>
@@ -478,7 +641,7 @@ function PicoCell({ label, field, criterion }: { label: string; field?: PicoFiel
       ? `The abstract did not give enough information to judge the ${label.toLowerCase()}.`
       : `No ${label.toLowerCase()} in your PICO frame, so there's nothing to assess against. Add one on the Home page to enable this check.`);
   return (
-    <Popover>
+    <ScrollAwarePopover>
       <PopoverTrigger asChild>
         <button
           className={`inline-flex items-center justify-center size-6 rounded text-xs font-semibold border ${picoVoteClass(vote)} hover:ring-1 hover:ring-foreground/30`}
@@ -490,9 +653,14 @@ function PicoCell({ label, field, criterion }: { label: string; field?: PicoFiel
       <PopoverContent className="w-96 text-xs space-y-2" align="end">
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs uppercase tracking-wide text-muted-foreground">{label}</span>
-          <span className={`px-2 py-0.5 rounded text-xs font-medium border ${picoVoteClass(vote)}`}>
-            {picoVoteFullLabel(vote)}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className={`px-2 py-0.5 rounded text-xs font-medium border ${picoVoteClass(vote)}`}>
+              {picoVoteFullLabel(vote)}
+            </span>
+            <PopoverClose className="size-5 grid place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" title="Close">
+              <X className="size-3.5" />
+            </PopoverClose>
+          </div>
         </div>
         {isNA ? (
           <div className="text-foreground/90">{naReason}</div>
@@ -507,26 +675,17 @@ function PicoCell({ label, field, criterion }: { label: string; field?: PicoFiel
           </>
         )}
       </PopoverContent>
-    </Popover>
+    </ScrollAwarePopover>
   );
 }
 
-function StatBox({ label, value, variant }: { label: string; value: any; variant?: "success" | "danger" }) {
-  const cls = variant === "success" ? "text-green-700" : variant === "danger" ? "text-red-700" : "text-foreground";
-  return (
-    <Card className="p-4 text-center">
-      <div className={`text-2xl font-bold ${cls}`}>{value}</div>
-      <div className="text-xs text-muted-foreground">{label}</div>
-    </Card>
-  );
-}
 
 function DecisionCell({ value, overridden, aiValue }: { value: string; overridden?: boolean; aiValue?: string }) {
   const inc = value.toUpperCase().includes("INCLUDE");
   return (
     <div className="space-y-1">
-      <span className={`inline-block px-2 py-1 rounded font-medium text-xs ${inc ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
-        {inc ? "✅ Include" : "❌ Exclude"}
+      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded font-medium text-xs ${inc ? "bg-green-100 text-green-800 dark:bg-emerald-950/50 dark:text-emerald-300" : "bg-red-100 text-red-800 dark:bg-rose-950/50 dark:text-rose-300"}`}>
+        {inc ? <Check className="size-3.5" /> : <X className="size-3.5" />}{inc ? "Include" : "Exclude"}
       </span>
       {overridden && aiValue && (
         <div className="text-[10px] text-muted-foreground leading-tight">
