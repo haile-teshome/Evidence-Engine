@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Input } from "../components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
-import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle, X, Rows3, Columns3 } from "lucide-react";
+import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle, X, Rows3, Columns3, Copy, Check } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
@@ -295,9 +295,12 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
               <TabsContent key={i} value={String(i)} className="space-y-3 mt-3">
                 <div className="flex items-center justify-between gap-2">
                   <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{t.type} · {t.data.length} row{t.data.length === 1 ? "" : "s"}</span>
-                  <Button size="sm" variant="ghost" onClick={() => setMaxIdx(i)} className="h-7 px-2 text-muted-foreground" title="Maximize table">
-                    <Maximize2 className="size-4 mr-1.5" />Expand
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <CopyTableButton data={t.data} />
+                    <Button size="sm" variant="ghost" onClick={() => setMaxIdx(i)} className="h-7 px-2 text-muted-foreground" title="Maximize table">
+                      <Maximize2 className="size-4 mr-1.5" />Expand
+                    </Button>
+                  </div>
                 </div>
                 <div className="rounded-lg border max-h-[28rem] overflow-auto shadow-sm">
                   <GridTable data={t.data} />
@@ -327,10 +330,11 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
                 <GridTable data={maxTable.data} />
               </div>
               {maxTable.caption && <div className="text-xs italic text-muted-foreground shrink-0">{maxTable.caption}</div>}
-              <div className="shrink-0">
+              <div className="shrink-0 flex items-center gap-2">
                 <Button size="sm" variant="outline" onClick={() => exportTable(paper, maxTable, maxIdx ?? 0, format)}>
                   <Download className="size-4 mr-2" />Export {fmtLabel}
                 </Button>
+                <CopyTableButton data={maxTable.data} className="border rounded-md" />
               </div>
             </>
           )}
@@ -356,6 +360,27 @@ function Pill({
     <span title={title} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
       <Icon className="size-3" />{children}
     </span>
+  );
+}
+// Copy a table to the clipboard as TSV (tab-separated), which pastes as real
+// cells into Excel / Google Sheets / Word. Shows a brief check-mark on success.
+function CopyTableButton({ data, className = "" }: { data: string[][]; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    const tsv = data.map(row => row.map(c => String(c ?? "").replace(/\t/g, " ").replace(/\r?\n/g, " ")).join("\t")).join("\n");
+    try {
+      await navigator.clipboard.writeText(tsv);
+      setCopied(true);
+      toast.success("Table copied to clipboard");
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("Copy failed");
+    }
+  };
+  return (
+    <Button size="sm" variant="ghost" onClick={copy} className={`h-7 px-2 text-muted-foreground ${className}`} title="Copy table to clipboard">
+      {copied ? <Check className="size-4 mr-1.5 text-emerald-600" /> : <Copy className="size-4 mr-1.5" />}{copied ? "Copied" : "Copy"}
+    </Button>
   );
 }
 function exportTableCsv(paper: { Paper_Title: string }, t: { data: string[][] }, i: number) {
