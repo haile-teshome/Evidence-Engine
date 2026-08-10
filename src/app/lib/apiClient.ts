@@ -149,7 +149,7 @@ export type GradeOutcome = {
 // PRISMA-S search audit log: one timestamped record per search run, with the
 // exact query and record count per database.
 export type SearchLogRow = { source: string; query: string; count: number };
-export type SearchLogEntry = { id: string; ranAt: string; label?: string; rows: SearchLogRow[] };
+export type SearchLogEntry = { id: string; ranAt: string; label?: string; group?: string; rows: SearchLogRow[] };
 
 // Register-first protocol + deviations from it (transparent reporting).
 export type ReviewProtocol = { text: string; generatedAt: string; registered?: boolean; registrationId?: string };
