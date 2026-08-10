@@ -190,15 +190,16 @@ export function TextExtractionPage() {
     setFormCurrent(targets[0]?.title || "");
     const rows: { paper_id: string; title: string; values: Record<string, any> }[] = [];
     let done = 0;
-    const BATCH = 6;
+    // Local (Ollama) serves one request at a time, so run in series — it also
+    // makes the live label exact. Cloud / GPU-served models batch well, so fan
+    // out to saturate them.
+    const CONCURRENCY = /^(claude|gpt|gemini)/i.test(s.model) ? 8 : 1;
     const spec = fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options }));
     try {
-      for (let i = 0; i < targets.length; i += BATCH) {
-        const batch = targets.slice(i, i + BATCH);
-        // Update per-article (not per-batch) so the bar glides and the label
-        // reflects what's actually being worked on right now.
+      for (let i = 0; i < targets.length; i += CONCURRENCY) {
+        const batch = targets.slice(i, i + CONCURRENCY);
         await Promise.all(batch.map(async p => {
-          setFormCurrent(p.title || "Untitled");
+          setFormCurrent(p.title || "Untitled");   // in series this is exact; concurrent shows the batch
           try {
             const values = await AIService.extractFields(p.text || "", spec, p.title || "");
             rows.push({ paper_id: p.paper_id, title: p.title || "Untitled", values });
@@ -504,14 +505,13 @@ export function TextExtractionPage() {
               <button onClick={() => setFormCollapsed(c => !c)} className="flex items-center gap-2 text-sm font-medium min-w-0 hover:text-primary">
                 {formCollapsed ? <ChevronRight className="size-4 shrink-0" /> : <ChevronDown className="size-4 shrink-0" />}
                 <FormInput className="size-4 text-primary shrink-0" />Extraction form
-                <span className="text-xs text-muted-foreground font-normal truncate">{fields.length} field{fields.length === 1 ? "" : "s"} · {targets.length}/{acquired.length} articles{formRows.length ? ` · ${formRows.length} extracted` : ""}</span>
               </button>
               {!formCollapsed && !formBusy && (
                 <div className="flex items-center gap-2">
-                  <Button size="sm" variant="outline" className="h-8 border-sky-300 text-sky-700 hover:bg-sky-50 hover:text-sky-800 dark:border-sky-900 dark:text-sky-300 dark:hover:bg-sky-950/40" onClick={() => formFileRef.current?.click()} title="Import fields from JSON, CSV, or a spreadsheet whose headers are the fields">
+                  <Button size="sm" className="h-8 bg-sky-500 hover:bg-sky-600 text-white shadow-sm" onClick={() => formFileRef.current?.click()} title="Import fields from JSON, CSV, or a spreadsheet whose headers are the fields">
                     <Upload className="size-3.5 mr-1.5" />Import form
                   </Button>
-                  <Button size="sm" variant="outline" className="h-8 border-amber-300 text-amber-700 hover:bg-amber-50 hover:text-amber-800 dark:border-amber-900 dark:text-amber-300 dark:hover:bg-amber-950/40" onClick={() => { setFields(DEFAULT_FORM_FIELDS); setFormRows([]); }} title="Restore the default fields">
+                  <Button size="sm" className="h-8 bg-amber-500 hover:bg-amber-600 text-white shadow-sm" onClick={() => { setFields(DEFAULT_FORM_FIELDS); setFormRows([]); }} title="Restore the default fields">
                     <RotateCcw className="size-3.5 mr-1.5" />Reset
                   </Button>
                 </div>
@@ -570,7 +570,7 @@ export function TextExtractionPage() {
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Articles ({targets.length} of {acquired.length})</span>
-                  <Button size="sm" variant="outline" className="h-7 border-emerald-300 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800 dark:border-emerald-900 dark:text-emerald-300 dark:hover:bg-emerald-950/40" onClick={toggleAllTargets}>{allSelected ? "Deselect all" : "Select all"}</Button>
+                  <Button size="sm" className="h-7 bg-emerald-500 hover:bg-emerald-600 text-white shadow-sm" onClick={toggleAllTargets}>{allSelected ? "Deselect all" : "Select all"}</Button>
                 </div>
                 <div className="rounded-md border max-h-[15.5rem] overflow-auto divide-y">
                   {acquired.map(p => (
