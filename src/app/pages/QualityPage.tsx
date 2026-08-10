@@ -17,15 +17,15 @@ import { Textarea } from "../components/ui/textarea";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import {
-  Copy, ShieldCheck, AlertTriangle, ArrowRight, Search,
+  Copy, ShieldCheck, ShieldAlert, AlertTriangle, ArrowRight, CheckCircle2, Search,
   Pencil, History, RotateCcw, FileDown, Plus, Trash2, Loader2, HelpCircle, ChevronRight, Quote,
 } from "lucide-react";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import {
   gradeCertainty, GRADE_DOWNGRADE_DOMAINS, GRADE_UPGRADE_FACTORS, GradeOutcome,
 } from "../lib/apiClient";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
-import { ReferenceTools } from "../components/ReferenceTools";
 import { IntegrityCheck } from "../components/IntegrityCheck";
 import { biasPlotSvg, BiasData } from "../lib/biasPlot";
 
@@ -431,10 +431,9 @@ export function QualityPage() {
 
   return (
     <div className="space-y-4">
-      <ReferenceTools />
-      <IntegrityCheck />
       {!reports && (
         <>
+          <IntegrityCheck />
           <Alert>
             <AlertDescription>
               Risk-of-bias appraisal of your <strong>included</strong> articles, with a rubric matched to each study
@@ -468,97 +467,69 @@ export function QualityPage() {
 
       {reports && summaryCounts && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
-            <Stat label="Appraised" value={reports.length} icon={<ShieldCheck className="size-4" />} />
-            <Stat label="Low RoB" value={summaryCounts.low} variant="success" />
-            <Stat label="Some concerns" value={summaryCounts.some} variant="warn" />
-            <Stat label="High RoB" value={summaryCounts.high} variant="warn" icon={<AlertTriangle className="size-4" />} />
-            <Stat label="Unclear" value={summaryCounts.no_info} />
-            <Stat label="Carrying Forward" value={kept} variant="info" />
-          </div>
-
-          <Card className="p-4 space-y-3">
-            <h3 className="text-sm font-medium">Appraisal controls</h3>
-
-            {/* Framework: apply one tool to every paper, or auto-match by design. */}
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-              <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
-                Framework
-                <HelpLabel text="Re-run all articles with one instrument, or auto-match each to its study design. Prior appraisals are saved per article." />
-              </div>
-              <div className="flex items-center gap-2">
-                <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
-                  <SelectTrigger className="h-9 w-[240px] text-xs">
-                    <SelectValue placeholder="Auto: match by design" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__auto">Auto: match each article's design</SelectItem>
-                    {["internal_validity", "reporting", "certainty"]
-                      .filter(ax => instruments.some(i => i.axis === ax))
-                      .map(ax => (
-                        <div key={ax}>
-                          <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{AXIS_LABEL[ax]}</div>
-                          {instruments.filter(i => i.axis === ax).map(i => (
-                            <SelectItem key={i.id} value={i.id}>
-                              {i.short_name}{i.legacy ? " (legacy)" : ""}
-                            </SelectItem>
-                          ))}
-                        </div>
-                      ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  size="sm"
-                  onClick={() => runAssess(bulkInstrument !== "__auto" ? bulkInstrument : undefined)}
-                  disabled={running}
-                >
-                  <RotateCcw className="size-4 mr-2" />{running ? "Re-running…" : "Re-run"}
-                </Button>
-              </div>
-            </div>
-
-            {/* Exclusion policy over the appraised papers. */}
-            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-              <div className="w-24 shrink-0 flex items-center gap-1 text-sm text-muted-foreground">
-                Exclude
-                <HelpLabel text="How aggressively to exclude articles by risk of bias. Uses your edited judgments where set; override individual rows below." />
-              </div>
-              <div className="flex gap-1 flex-wrap">
+          <ControlPane
+            stats={<>
+              <InlineStat icon={ShieldCheck} value={reports.length} label="Appraised" />
+              <PaneDivider />
+              <InlineStat icon={CheckCircle2} value={summaryCounts.low} label="Low RoB" tone="success" />
+              <InlineStat icon={AlertTriangle} value={summaryCounts.some} label="Some concerns" tone="amber" />
+              <InlineStat icon={ShieldAlert} value={summaryCounts.high} label="High RoB" tone="danger" />
+            </>}
+            actions={<>
+              <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
+                <SelectTrigger className="h-8 w-[190px] text-xs" title="Framework: re-run all articles with one instrument, or auto-match each to its study design.">
+                  <SelectValue placeholder="Auto: match by design" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__auto">Auto: match each article's design</SelectItem>
+                  {["internal_validity", "reporting", "certainty"]
+                    .filter(ax => instruments.some(i => i.axis === ax))
+                    .map(ax => (
+                      <div key={ax}>
+                        <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{AXIS_LABEL[ax]}</div>
+                        {instruments.filter(i => i.axis === ax).map(i => (
+                          <SelectItem key={i.id} value={i.id}>
+                            {i.short_name}{i.legacy ? " (legacy)" : ""}
+                          </SelectItem>
+                        ))}
+                      </div>
+                    ))}
+                </SelectContent>
+              </Select>
+              <Button size="sm" className="h-8 shadow-sm" onClick={() => runAssess(bulkInstrument !== "__auto" ? bulkInstrument : undefined)} disabled={running}>
+                <RotateCcw className="size-3.5 mr-1.5" />{running ? "Re-running…" : "Re-run"}
+              </Button>
+              <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
+              <div className="inline-flex rounded-md border p-0.5" title="Exclusion policy by risk of bias. Uses your edited judgments where set.">
                 {([
                   ["none", "Keep all"],
                   ["any_high", "Any High"],
                   ["two_or_more_high", "≥ 2 High"],
                 ] as const).map(([id, label]) => (
-                  <Button
+                  <button
                     key={id}
-                    size="sm"
-                    variant={excludeRule === id ? "default" : "outline"}
                     onClick={() => applyExcludeRule(id)}
+                    className={`h-7 rounded px-2.5 text-xs font-medium transition-colors ${excludeRule === id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
                   >
                     {label}
-                  </Button>
+                  </button>
                 ))}
               </div>
-            </div>
-
-            {overrides.length > 0 && (
-              <div className="pt-3 border-t flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">
-                  {overrides.length} reviewer override{overrides.length === 1 ? "" : "s"} logged.
-                </span>
+              {overrides.length > 0 && (
                 <Button
                   size="sm"
                   variant="ghost"
-                  onClick={() => {
-                    s.clearQualityOverrides();
-                    toast.info("Cleared all reviewer overrides.");
-                  }}
+                  className="h-8 px-2 text-muted-foreground"
+                  title={`${overrides.length} reviewer override${overrides.length === 1 ? "" : "s"} logged. Revert all to AI judgments.`}
+                  onClick={() => { s.clearQualityOverrides(); toast.info("Cleared all reviewer overrides."); }}
                 >
-                  <RotateCcw className="size-3 mr-1" /> Revert all to AI judgments
+                  <RotateCcw className="size-4" />
                 </Button>
-              </div>
-            )}
-          </Card>
+              )}
+            </>}
+          />
+
+          <IntegrityCheck />
 
           {/* One tab per risk-of-bias instrument used. The figure and paper list
               below are scoped to the active tab. */}
@@ -691,8 +662,6 @@ export function QualityPage() {
               <ArrowRight className="size-4 mr-2" />Continue to Diagramming
             </Button>
           </div>
-
-          <GradePanel />
         </>
       )}
     </div>
