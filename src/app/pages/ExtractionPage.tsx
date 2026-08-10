@@ -10,7 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Input } from "../components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
-import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle, X } from "lucide-react";
+import { Search, Download, Table2, ExternalLink, Maximize2, FileText, AlertTriangle, X, Rows3, Columns3 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
@@ -261,46 +261,51 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
   const maxTable = maxIdx !== null ? paper.Extracted_Tables[maxIdx] : null;
   const fmtLabel = format.split(" ")[0];
 
+  const totalRows = paper.Extracted_Tables.reduce((a, t) => a + t.data.length, 0);
+  const maxCols = Math.max(0, ...paper.Extracted_Tables.map(t => t.data[0]?.length || 0));
+
   return (
     <>
-      <div className="border-b p-4 space-y-3">
+      <div className="border-b p-4 space-y-3.5 bg-gradient-to-b from-muted/40 to-transparent">
         <div className="font-medium leading-snug">{paper.Paper_Title}</div>
-        <div className="grid grid-cols-4 gap-3 text-center">
-          <Stat label="Source" value={paper.Source} />
-          <Stat label="Tables" value={paper.Extracted_Tables.length} />
-          <Stat label="Total Rows" value={paper.Extracted_Tables.reduce((a, t) => a + t.data.length, 0)} />
-          <Stat label="Max Columns" value={Math.max(0, ...paper.Extracted_Tables.map(t => t.data[0]?.length || 0))} />
+        <div className="flex items-stretch gap-4 sm:gap-6 flex-wrap">
+          <InlineStat icon={FileText} value={paper.Source || "—"} label="Source" />
+          <PaneDivider />
+          <InlineStat icon={Table2} tone="success" value={paper.Extracted_Tables.length} label="Tables" />
+          <InlineStat icon={Rows3} value={totalRows.toLocaleString()} label="Rows" tone="neutral" />
+          <InlineStat icon={Columns3} value={maxCols} label="Columns" tone="neutral" />
         </div>
       </div>
 
       <div className="flex-1 overflow-auto p-4">
         {paper.Extracted_Tables.length > 0 ? (
           <Tabs defaultValue="0">
-            <TabsList>
-              {paper.Extracted_Tables.map((t, i) => (
-                <TabsTrigger key={i} value={String(i)}>{t.type} {i + 1}</TabsTrigger>
-              ))}
-            </TabsList>
+            <div className="relative">
+              <div className="overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <TabsList className="w-max gap-0.5">
+                  {paper.Extracted_Tables.map((t, i) => (
+                    <TabsTrigger key={i} value={String(i)} className="whitespace-nowrap data-[state=active]:shadow-sm transition-shadow">{t.type} {i + 1}</TabsTrigger>
+                  ))}
+                </TabsList>
+              </div>
+              {/* Fade hint that there are more tabs to scroll to. */}
+              <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-10 bg-gradient-to-l from-card to-transparent" />
+            </div>
             {paper.Extracted_Tables.map((t, i) => (
-              <TabsContent key={i} value={String(i)} className="space-y-3">
-                <div className="flex justify-end">
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => setMaxIdx(i)}
-                    className="size-7 text-muted-foreground hover:text-foreground"
-                    title="Maximize table"
-                  >
-                    <Maximize2 className="size-4" />
+              <TabsContent key={i} value={String(i)} className="space-y-3 mt-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{t.type} · {t.data.length} row{t.data.length === 1 ? "" : "s"}</span>
+                  <Button size="sm" variant="ghost" onClick={() => setMaxIdx(i)} className="h-7 px-2 text-muted-foreground" title="Maximize table">
+                    <Maximize2 className="size-4 mr-1.5" />Expand
                   </Button>
                 </div>
-                <div className="rounded-md border max-h-[28rem] overflow-auto">
+                <div className="rounded-lg border max-h-[28rem] overflow-auto shadow-sm">
                   <GridTable data={t.data} />
                 </div>
-                {t.caption && <div className="text-xs italic text-muted-foreground">{t.caption}</div>}
-                <div className="grid grid-cols-2 gap-2">
-                  <Button size="sm" variant="outline" onClick={() => exportTable(paper, t, i, format)}><Download className="size-4 mr-2" />Export {fmtLabel}</Button>
-                  {paper.Paper_URL && <a href={paper.Paper_URL} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 text-sm bg-primary text-primary-foreground rounded-md py-2 hover:opacity-90"><ExternalLink className="size-4" />View Full Article</a>}
+                {t.caption && <div className="text-xs italic text-muted-foreground leading-relaxed">{t.caption}</div>}
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <Button variant="outline" onClick={() => exportTable(paper, t, i, format)}><Download className="size-4 mr-2" />Export {fmtLabel}</Button>
+                  {paper.Paper_URL && <a href={paper.Paper_URL} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 h-9 text-sm font-medium bg-primary text-primary-foreground rounded-lg shadow-sm hover:bg-primary/90 transition-colors active:scale-[0.98] motion-reduce:active:scale-100"><ExternalLink className="size-4" />View full article</a>}
                 </div>
               </TabsContent>
             ))}
@@ -333,10 +338,6 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
       </Dialog>
     </>
   );
-}
-
-function Stat({ label, value }: { label: string; value: any }) {
-  return <div className="bg-muted/30 rounded p-2"><div className="font-bold">{value}</div><div className="text-xs text-muted-foreground">{label}</div></div>;
 }
 
 // Compact count pill used in the header summary line.

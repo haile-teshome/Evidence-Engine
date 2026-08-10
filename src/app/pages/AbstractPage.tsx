@@ -273,6 +273,39 @@ export function AbstractPage() {
     }
   }
 
+  // Manual screening without AI: build the corpus (fetching it if needed), seed
+  // every record as not-yet-included, then open the rapid reviewer so AI is
+  // never required to use the platform. Reviewer include/exclude decisions carry
+  // downstream exactly like AI ones.
+  async function startManual() {
+    let corpus = (s.uniquePapers || []).filter(p => !s.excludedByQuality.has(p.id));
+    if (!corpus.length) {
+      if (!s.query) { toast.error("Define a research goal on the Home page first."); return; }
+      const { abort } = s.startTask("abstract-screen", [{ id: "fetch", label: "Fetching papers", status: "running" }]);
+      try {
+        const { papers: all } = await DataAggregator.fetchForScreening(
+          s.sources, s.perDbQueries, s.unifiedSearchQuery || s.query, s.simulation, s.pico, { signal: abort.signal },
+        );
+        if (abort.signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
+        const { unique, duplicates } = Deduplicator.run(all);
+        s.setRawPapers(all); s.setUniquePapers(unique); s.setDuplicatesCount(duplicates.length);
+        corpus = unique.filter(p => !s.excludedByQuality.has(p.id));
+        s.updateTask("abstract-screen", { status: "done" });
+      } catch (e: any) {
+        s.updateTask("abstract-screen", { status: "error", detail: e?.message || "Fetch failed" });
+        return;
+      }
+    }
+    if (!corpus.length) { toast.error("No papers available to screen."); return; }
+    const results: ScreenResult[] = corpus.map(p => ({
+      paper_id: p.id, Source: p.source, Title: p.title, URL: p.url, Abstract: p.abstract || "",
+      Decision: "EXCLUDE", Reason: "", Agent_Trace: {},
+    }));
+    s.setResults(results);
+    setRapidOpen(true);
+    toast.info(`${results.length} articles ready. Include the relevant ones.`);
+  }
+
   const r = s.results;
   // Stats reflect EFFECTIVE decisions (reviewer overrides applied) so a
   // reviewer flipping the Keep checkbox immediately updates the included /
@@ -433,6 +466,7 @@ export function AbstractPage() {
             open={rapidOpen}
             onClose={() => setRapidOpen(false)}
             label="Rapid screen: abstracts"
+            hideAI={r.every(x => !x.Reason)}
             items={r.map(x => ({
               id: x.paper_id, title: x.Title, source: x.Source, url: x.URL, text: x.Abstract,
               aiInclude: x.Decision === "INCLUDE", reason: x.Reason,
@@ -618,9 +652,14 @@ export function AbstractPage() {
       )}
 
       {s.query && !r && !running && (
-        <Button onClick={() => runSearch("full")} size="lg" className="w-full">
-          <Search className="size-4 mr-2" />Run Abstract Screening
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={() => runSearch("full")} size="lg" className="flex-1">
+            <Search className="size-4 mr-2" />Run AI screening
+          </Button>
+          <Button onClick={startManual} size="lg" variant="outline" title="Fetch the articles and review them yourself, no AI required">
+            <Zap className="size-4 mr-2" />Screen manually
+          </Button>
+        </div>
       )}
     </div>
   );

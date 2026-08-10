@@ -31,13 +31,16 @@ function Kbd({ children, tone = "muted" }: { children: React.ReactNode; tone?: "
 // The current position, and which cards are starred, persist per stage so the
 // reviewer can close and resume where they left off.
 export function RapidScreen({
-  open, onClose, items, onDecide, label = "Rapid screen",
+  open, onClose, items, onDecide, label = "Rapid screen", hideAI = false,
 }: {
   open: boolean;
   onClose: () => void;
   items: RapidItem[];
   onDecide: (id: string, decision: "include" | "exclude") => void;
   label?: string;
+  // When there was no AI screening (manual review), hide the AI reveal toggle
+  // entirely so it can't surface placeholder decisions.
+  hideAI?: boolean;
 }) {
   // ── Per-stage persistence (position + starred cards) ──────────────────────
   const storeKey = `rapidscreen:v1:${label}`;
@@ -169,13 +172,15 @@ export function RapidScreen({
               >
                 <Search className="size-3" />Find
               </button>
-              <button
-                onClick={() => setShowAI(v => !v)}
-                title={showAI ? "Hide the AI decision and reasoning while you screen" : "Reveal the AI decision and reasoning (may bias your judgement)"}
-                className={`text-[11px] px-2.5 py-1.5 rounded-full border inline-flex items-center gap-1.5 transition-colors ${showAI ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900" : "text-muted-foreground hover:bg-muted"}`}
-              >
-                {showAI ? <Eye className="size-3" /> : <EyeOff className="size-3" />}AI {showAI ? "shown" : "hidden"}
-              </button>
+              {!hideAI && (
+                <button
+                  onClick={() => setShowAI(v => !v)}
+                  title={showAI ? "Hide the AI decision and reasoning while you screen" : "Reveal the AI decision and reasoning (may bias your judgement)"}
+                  className={`text-[11px] px-2.5 py-1.5 rounded-full border inline-flex items-center gap-1.5 transition-colors ${showAI ? "bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-900" : "text-muted-foreground hover:bg-muted"}`}
+                >
+                  {showAI ? <Eye className="size-3" /> : <EyeOff className="size-3" />}AI {showAI ? "shown" : "hidden"}
+                </button>
+              )}
               <button
                 onClick={() => setLearn(v => !v)}
                 title="Rank the queue by a model that learns from your labels, and estimate recall to suggest when to stop"
@@ -243,7 +248,7 @@ export function RapidScreen({
                   {/* meta pills */}
                   <div className="flex flex-wrap items-center gap-2 text-xs">
                     <span className="inline-flex items-center px-2 py-1 rounded-md bg-muted text-muted-foreground font-medium">{cur.source || "Unknown source"}</span>
-                    {showAI && (
+                    {showAI && !hideAI && (
                       <span className={`inline-flex items-center px-2 py-1 rounded-md font-medium border ${cur.aiInclude ? "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-900" : "bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-300 dark:border-rose-900"}`}>
                         AI suggests {cur.aiInclude ? "include" : "exclude"}
                       </span>
@@ -256,7 +261,7 @@ export function RapidScreen({
                   </div>
 
                   {/* AI reasoning callout */}
-                  {showAI && cur.reason && (
+                  {showAI && !hideAI && cur.reason && (
                     <div className="rounded-lg border border-border/70 bg-muted/40 p-3 pl-3.5 border-l-2 border-l-primary/50">
                       <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1">
                         <Sparkles className="size-3" />AI reasoning

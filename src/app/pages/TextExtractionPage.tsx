@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore, TextExtractionResult, TextEvidenceItem } from "../lib/store";
 import { AIService } from "../lib/mockServices";
 import { Card } from "../components/ui/card";
@@ -7,11 +7,13 @@ import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
 import { Input } from "../components/ui/input";
 import { Badge } from "../components/ui/badge";
+import { Checkbox } from "../components/ui/checkbox";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import {
   ScanText, Sparkles, Search, AlertTriangle, Download,
-  MapPin, Quote as QuoteIcon, FileSpreadsheet, Maximize2, ChevronDown,
-  FileText, ListChecks, X,
+  MapPin, Quote as QuoteIcon, FileSpreadsheet, Maximize2, ChevronDown, ChevronRight,
+  FileText, ListChecks, X, Plus, Trash2, Table2, Loader2, FormInput, Upload, RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -25,6 +27,19 @@ const PRESETS = [
   "List all reported adverse events with frequencies.",
   "Extract dose, frequency, and duration of the intervention.",
   "What were the inclusion and exclusion criteria for participants?",
+];
+
+// A structured extraction form: named fields the AI fills for each chosen
+// article, producing a study-characteristics table.
+type FormField = { id: string; label: string; type: string; options: string[] };
+const slug = (x: string) => (x || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "field";
+const DEFAULT_FORM_FIELDS: FormField[] = [
+  { id: "design", label: "Study design", type: "text", options: [] },
+  { id: "sample_size", label: "Sample size", type: "number", options: [] },
+  { id: "population", label: "Population", type: "text", options: [] },
+  { id: "intervention", label: "Intervention", type: "text", options: [] },
+  { id: "outcome", label: "Primary outcome", type: "text", options: [] },
+  { id: "result", label: "Main result / effect size", type: "text", options: [] },
 ];
 
 // Section → badge palette. Falls back to slate for unrecognised labels.
@@ -76,6 +91,22 @@ export function TextExtractionPage() {
 
   const acquired = useMemo(() => Object.values(s.fullTexts).filter(r => r.status === "found" && r.text), [s.fullTexts]);
   const missing = useMemo(() => Object.values(s.fullTexts).filter(r => r.status === "missing"), [s.fullTexts]);
+
+  // Structured extraction form: fields (persisted), which articles to run on,
+  // and the resulting matrix.
+  const [fields, setFields] = useState<FormField[]>(() => {
+    try { const v = JSON.parse(localStorage.getItem("ee:extract-form") || "null"); if (Array.isArray(v) && v.length) return v; } catch { /* ignore */ }
+    return DEFAULT_FORM_FIELDS;
+  });
+  useEffect(() => { try { localStorage.setItem("ee:extract-form", JSON.stringify(fields)); } catch { /* ignore */ } }, [fields]);
+  const [mode, setMode] = useState<"ask" | "form">("ask");
+  const [formCollapsed, setFormCollapsed] = useState(false);
+  const [deselected, setDeselected] = useState<Set<string>>(new Set());
+  const [formBusy, setFormBusy] = useState(false);
+  const [formProgress, setFormProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
+  const [formCurrent, setFormCurrent] = useState<string>("");
+  const [formRows, setFormRows] = useState<{ paper_id: string; title: string; values: Record<string, any> }[]>([]);
+  const formFileRef = useRef<HTMLInputElement>(null);
 
   if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first.</AlertDescription></Alert>;
   if (acquired.length === 0) return <Alert><AlertDescription>No full texts acquired yet. Fetch them on Full-Text Acquisition first.</AlertDescription></Alert>;
@@ -141,6 +172,171 @@ export function TextExtractionPage() {
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "text_extractions.json"; a.click(); URL.revokeObjectURL(a.href);
   }
 
+  // ── Structured extraction form ─────────────────────────────────────────────
+  const addField = () => setFields(f => [...f, { id: `f_${Date.now().toString(36)}`, label: "New field", type: "text", options: [] }]);
+  const patchField = (i: number, p: Partial<FormField>) => setFields(f => f.map((x, idx) => idx === i ? { ...x, ...p } : x));
+  const removeField = (i: number) => setFields(f => f.filter((_, idx) => idx !== i));
+
+  const targets = acquired.filter(p => !deselected.has(p.paper_id));
+  const allSelected = targets.length === acquired.length && acquired.length > 0;
+  const toggleTarget = (id: string) => setDeselected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggleAllTargets = () => setDeselected(allSelected ? new Set(acquired.map(p => p.paper_id)) : new Set());
+
+  async function runForm() {
+    if (!fields.length) { toast.error("Add at least one field to the form."); return; }
+    if (!targets.length) { toast.error("Select at least one article to extract from."); return; }
+    setFormBusy(true);
+    setFormProgress({ done: 0, total: targets.length });
+    setFormCurrent(targets[0]?.title || "");
+    const rows: { paper_id: string; title: string; values: Record<string, any> }[] = [];
+    let done = 0;
+    const BATCH = 6;
+    const spec = fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options }));
+    try {
+      for (let i = 0; i < targets.length; i += BATCH) {
+        const batch = targets.slice(i, i + BATCH);
+        // Update per-article (not per-batch) so the bar glides and the label
+        // reflects what's actually being worked on right now.
+        await Promise.all(batch.map(async p => {
+          setFormCurrent(p.title || "Untitled");
+          try {
+            const values = await AIService.extractFields(p.text || "", spec, p.title || "");
+            rows.push({ paper_id: p.paper_id, title: p.title || "Untitled", values });
+            setFormRows([...rows]);
+          } catch { /* skip failed article */ }
+          finally { done += 1; setFormProgress({ done, total: targets.length }); }
+        }));
+      }
+      toast.success(`Extracted the form from ${rows.length} article${rows.length === 1 ? "" : "s"}`);
+      if (rows.length) setFormCollapsed(true);   // keep the builder collapsed after a run
+    } catch (e: any) {
+      toast.error(e?.message || "Form extraction failed");
+    } finally { setFormBusy(false); }
+  }
+
+  async function exportFormXlsx() {
+    if (!formRows.length) { toast.error("Run the form first."); return; }
+    const thin = { style: "thin" as const, color: { argb: "FFE2E8F0" } };
+    const border = { top: thin, left: thin, bottom: thin, right: thin };
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "Evidence Engine";
+
+    // Unique, Excel-safe sheet names (<=31 chars, no []:*?/\).
+    const used = new Set<string>();
+    const names = formRows.map((r, i) => {
+      const base = (r.title || `Article ${i + 1}`).replace(/[[\]*?/\\:]/g, " ").replace(/\s+/g, " ").trim().slice(0, 28) || `Article ${i + 1}`;
+      let name = base, n = 2;
+      while (used.has(name.toLowerCase())) name = `${base.slice(0, 25)} ${n++}`;
+      used.add(name.toLowerCase());
+      return name;
+    });
+
+    // ── Summary sheet: articles × fields ──
+    const sum = wb.addWorksheet("Summary", { views: [{ state: "frozen", xSplit: 1, ySplit: 1 }] });
+    sum.columns = [{ key: "article", width: 46 }, ...fields.map(f => ({ key: f.id, width: 28 }))];
+    const head = sum.insertRow(1, ["Article", ...fields.map(f => f.label)]);
+    head.height = 22;
+    head.eachCell(c => {
+      c.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+      c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F2937" } };
+      c.alignment = { vertical: "middle", wrapText: true };
+      c.border = border;
+    });
+    formRows.forEach((r, i) => {
+      const row = sum.addRow([r.title || "Untitled", ...fields.map(f => String(r.values[f.id] ?? "").trim())]);
+      row.eachCell(c => { c.alignment = { vertical: "top", wrapText: true }; c.font = { size: 10 }; c.border = border; });
+      const a = row.getCell(1);
+      a.value = { text: r.title || "Untitled", hyperlink: `#'${names[i]}'!A1` };
+      a.font = { size: 10, color: { argb: "FF1D4ED8" }, underline: true };
+      if (i % 2) row.eachCell(c => { c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } }; });
+    });
+    sum.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: fields.length + 1 } };
+
+    // ── One sheet per article: Field | Value ──
+    formRows.forEach((r, i) => {
+      const ws = wb.addWorksheet(names[i], { views: [{ state: "frozen", ySplit: 3 }] });
+      ws.columns = [{ width: 28 }, { width: 90 }];
+      ws.mergeCells("A1:B1");
+      const t = ws.getCell("A1");
+      t.value = r.title || "Untitled";
+      t.font = { size: 13, bold: true, color: { argb: "FFFFFFFF" } };
+      t.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F2937" } };
+      t.alignment = { wrapText: true, vertical: "middle" };
+      ws.getRow(1).height = 30;
+      ws.mergeCells("A2:B2");
+      const back = ws.getCell("A2");
+      back.value = { text: "← Back to Summary", hyperlink: "#Summary!A1" };
+      back.font = { size: 10, color: { argb: "FF1D4ED8" }, underline: true };
+      const hr = ws.getRow(3);
+      hr.getCell(1).value = "Field"; hr.getCell(2).value = "Value";
+      hr.eachCell(c => {
+        c.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
+        c.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF7C3AED" } };
+        c.border = border;
+      });
+      fields.forEach((f, j) => {
+        const row = ws.addRow([f.label, String(r.values[f.id] ?? "").trim() || "—"]);
+        row.getCell(1).font = { bold: true, size: 10 };
+        row.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
+        row.getCell(2).font = { size: 10 };
+        row.eachCell(c => { c.alignment = { vertical: "top", wrapText: true }; c.border = border; });
+        if (j % 2) row.getCell(2).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF8FAFC" } };
+      });
+    });
+
+    const buf = await wb.xlsx.writeBuffer();
+    const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "extraction-form.xlsx"; a.click(); URL.revokeObjectURL(a.href);
+    toast.success("Exported Excel workbook");
+  }
+
+  function exportFormCsv() {
+    if (!formRows.length) { toast.error("Run the form first."); return; }
+    const q = (x: any) => `"${String(x ?? "").replace(/"/g, '""')}"`;
+    const head = ["Article", ...fields.map(f => f.label)];
+    const rows = formRows.map(r => [r.title, ...fields.map(f => r.values[f.id] ?? "")]);
+    const csv = [head, ...rows].map(r => r.map(q).join(",")).join("\r\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "extraction-form.csv"; a.click(); URL.revokeObjectURL(a.href);
+  }
+
+  // Import an existing extraction form. Accepts JSON (an array of fields or
+  // labels), or a spreadsheet / CSV whose column headers are the fields.
+  async function importForm(file: File) {
+    try {
+      const name = file.name.toLowerCase();
+      let next: FormField[] | null = null;
+      if (name.endsWith(".json")) {
+        const j = JSON.parse(await file.text());
+        const arr: any[] = Array.isArray(j) ? j : (Array.isArray(j?.fields) ? j.fields : []);
+        next = arr.map((x, i) => typeof x === "string"
+          ? { id: `${slug(x)}_${i}`, label: x, type: "text", options: [] }
+          : { id: `${slug(x.label || x.name || "field")}_${i}`, label: x.label || x.name || `Field ${i + 1}`, type: x.type || "text", options: Array.isArray(x.options) ? x.options : [] });
+      } else {
+        let labels: string[] = [];
+        if (name.endsWith(".xlsx") || name.endsWith(".xls")) {
+          const wb = new ExcelJS.Workbook();
+          await wb.xlsx.load(await file.arrayBuffer());
+          wb.worksheets[0]?.getRow(1).eachCell(c => { const v = String(c.value ?? "").trim(); if (v) labels.push(v); });
+        } else {
+          const text = await file.text();
+          const firstLine = text.split(/\r?\n/).find(l => l.trim()) || "";
+          const sep = firstLine.includes("\t") ? "\t" : ",";
+          labels = firstLine.split(sep).map(x => x.replace(/^"|"$/g, "").trim()).filter(Boolean);
+        }
+        // Drop a leading row-label column ("Article"/"Study"/etc.) if present.
+        labels = labels.filter(l => !/^(article|articles|title|study|studies|paper|papers|id|#)$/i.test(l));
+        next = labels.map((l, i) => ({ id: `${slug(l)}_${i}`, label: l, type: "text", options: [] }));
+      }
+      if (!next || !next.length) { toast.error("No fields found in that file."); return; }
+      setFields(next);
+      setFormRows([]);
+      toast.success(`Imported ${next.length} field${next.length === 1 ? "" : "s"} from ${file.name}`);
+    } catch {
+      toast.error("Could not read that form file. Use JSON, CSV, or an Excel file whose headers are the fields.");
+    }
+  }
+
   const totalEvidence = s.textExtractions.reduce(
     (a, r) => a + (r.evidence?.length ?? r.spans.length),
     0,
@@ -157,6 +353,17 @@ export function TextExtractionPage() {
 
   return (
     <div className="space-y-3">
+      {/* Mode toggle: free-text question vs a structured extraction form. */}
+      <div className="inline-flex rounded-lg border bg-muted/40 p-0.5 text-sm">
+        <button onClick={() => setMode("ask")} className={`inline-flex items-center gap-1.5 rounded-md px-3 h-8 font-medium transition-colors ${mode === "ask" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+          <ScanText className="size-3.5" />Ask
+        </button>
+        <button onClick={() => setMode("form")} className={`inline-flex items-center gap-1.5 rounded-md px-3 h-8 font-medium transition-colors ${mode === "form" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+          <FormInput className="size-3.5" />Form
+        </button>
+      </div>
+
+      {mode === "ask" && (<>
       {/* ── Control pane: counts + run + export ──────────────────────────── */}
       <ControlPane
         stats={s.textExtractions.length > 0 ? <>
@@ -176,7 +383,7 @@ export function TextExtractionPage() {
             </Button>
           ) : (
             <Button size="sm" className="h-8 shadow-sm" onClick={run}>
-              <Sparkles className="size-3.5 mr-1.5" />Extract from {acquired.length}
+              <Sparkles className="size-3.5 mr-1.5" />Extract
             </Button>
           )}
           {s.textExtractions.length > 0 && (
@@ -281,6 +488,140 @@ export function TextExtractionPage() {
               )}
             </Card>
           </div>
+        </>
+      )}
+      </>)}
+
+      {mode === "form" && (
+        <>
+          <input type="file" ref={formFileRef} accept=".json,.csv,.tsv,.txt,.xlsx,.xls" className="hidden"
+            onChange={e => { const f = e.target.files?.[0]; if (f) importForm(f); e.currentTarget.value = ""; }} />
+
+          {/* Collapsible form builder. Auto-collapses after a run so the results
+              take the screen; expand the header to edit fields / selection. */}
+          <Card className="p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <button onClick={() => setFormCollapsed(c => !c)} className="flex items-center gap-2 text-sm font-medium min-w-0 hover:text-primary">
+                {formCollapsed ? <ChevronRight className="size-4 shrink-0" /> : <ChevronDown className="size-4 shrink-0" />}
+                <FormInput className="size-4 text-primary shrink-0" />Extraction form
+                <span className="text-xs text-muted-foreground font-normal truncate">{fields.length} field{fields.length === 1 ? "" : "s"} · {targets.length}/{acquired.length} articles{formRows.length ? ` · ${formRows.length} extracted` : ""}</span>
+              </button>
+              {!formCollapsed && !formBusy && (
+                <div className="flex items-center gap-2">
+                  <Button size="sm" variant="outline" className="h-8 border-sky-300 text-sky-700 hover:bg-sky-50 hover:text-sky-800 dark:border-sky-900 dark:text-sky-300 dark:hover:bg-sky-950/40" onClick={() => formFileRef.current?.click()} title="Import fields from JSON, CSV, or a spreadsheet whose headers are the fields">
+                    <Upload className="size-3.5 mr-1.5" />Import form
+                  </Button>
+                  <Button size="sm" variant="outline" className="h-8 border-amber-300 text-amber-700 hover:bg-amber-50 hover:text-amber-800 dark:border-amber-900 dark:text-amber-300 dark:hover:bg-amber-950/40" onClick={() => { setFields(DEFAULT_FORM_FIELDS); setFormRows([]); }} title="Restore the default fields">
+                    <RotateCcw className="size-3.5 mr-1.5" />Reset
+                  </Button>
+                </div>
+              )}
+            </div>
+
+            {formBusy && (
+              <div className="space-y-1.5 pt-0.5">
+                <div className="h-2 rounded-full bg-muted overflow-hidden">
+                  <div className="h-full rounded-full bg-gradient-to-r from-primary/70 to-primary transition-[width] duration-500 ease-out" style={{ width: `${formProgress.total ? (formProgress.done / formProgress.total) * 100 : 0}%` }} />
+                </div>
+                <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0">
+                  <span className="inline-flex items-center gap-1.5 min-w-0 flex-1">
+                    <Loader2 className="size-3 animate-spin shrink-0" />
+                    <span className="truncate">{formCurrent ? <>Extracting <span className="text-foreground/70">{formCurrent}</span></> : "Extracting…"}</span>
+                  </span>
+                  <span className="tabular-nums shrink-0">{formProgress.done} / {formProgress.total}</span>
+                </div>
+              </div>
+            )}
+
+            {!formCollapsed && !formBusy && (
+            <div className="space-y-4 pt-1">
+            <div className="grid lg:grid-cols-2 gap-4">
+              {/* Fields */}
+              <div className="space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Fields</div>
+                <div className="space-y-1.5">
+                  {fields.map((f, i) => (
+                    <div key={f.id} className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <Input className="h-8 flex-1" value={f.label} onChange={e => patchField(i, { label: e.target.value })} placeholder="Field label (e.g. Sample size)" />
+                        <Select value={f.type} onValueChange={v => patchField(i, { type: v })}>
+                          <SelectTrigger className="h-8 w-24 text-xs"><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="text">Text</SelectItem>
+                            <SelectItem value="number">Number</SelectItem>
+                            <SelectItem value="category">Category</SelectItem>
+                            <SelectItem value="date">Date</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <button onClick={() => removeField(i)} className="text-muted-foreground hover:text-destructive shrink-0"><Trash2 className="size-3.5" /></button>
+                      </div>
+                      {f.type === "category" && (
+                        <Input className="h-7 text-xs ml-0" value={(f.options || []).join(", ")}
+                          onChange={e => patchField(i, { options: e.target.value.split(",").map(x => x.trim()).filter(Boolean) })}
+                          placeholder="Allowed values: option, option, option" />
+                      )}
+                    </div>
+                  ))}
+                  <Button size="sm" variant="outline" className="h-7" onClick={addField}><Plus className="size-3.5 mr-1.5" />Add field</Button>
+                </div>
+              </div>
+
+              {/* Articles */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Articles ({targets.length} of {acquired.length})</span>
+                  <Button size="sm" variant="outline" className="h-7 border-emerald-300 text-emerald-700 hover:bg-emerald-50 hover:text-emerald-800 dark:border-emerald-900 dark:text-emerald-300 dark:hover:bg-emerald-950/40" onClick={toggleAllTargets}>{allSelected ? "Deselect all" : "Select all"}</Button>
+                </div>
+                <div className="rounded-md border max-h-[15.5rem] overflow-auto divide-y">
+                  {acquired.map(p => (
+                    <label key={p.paper_id} className="flex items-center gap-2.5 px-2.5 py-1.5 text-xs cursor-pointer hover:bg-muted/40">
+                      <Checkbox checked={!deselected.has(p.paper_id)} onCheckedChange={() => toggleTarget(p.paper_id)} className="shrink-0" />
+                      <span className="line-clamp-1 flex-1 min-w-0">{(p.title || "").replace(/\s+/g, " ").trim() || "Untitled"}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="border-t pt-3">
+              <Button onClick={runForm} disabled={!targets.length || !fields.length}>
+                <Table2 className="size-4 mr-2" />Extract from {targets.length} article{targets.length === 1 ? "" : "s"}
+              </Button>
+            </div>
+            </div>
+            )}
+          </Card>
+
+          {/* Results matrix */}
+          {formRows.length > 0 && (
+            <Card className="p-0 overflow-hidden">
+              <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b bg-gradient-to-b from-muted/40 to-transparent">
+                <span className="text-sm font-medium">Results <span className="text-xs text-muted-foreground font-normal">· {formRows.length} article{formRows.length === 1 ? "" : "s"} × {fields.length} field{fields.length === 1 ? "" : "s"}</span></span>
+                <div className="flex items-center gap-2">
+                  <Button size="sm" className="h-8 shadow-sm" onClick={exportFormXlsx}><FileSpreadsheet className="size-3.5 mr-1.5" />Excel</Button>
+                  <Button size="sm" variant="outline" className="h-8" onClick={exportFormCsv}><Download className="size-3.5 mr-1.5" />CSV</Button>
+                </div>
+              </div>
+              <div className="overflow-auto max-h-[30rem]">
+                <table className="w-full text-xs border-collapse">
+                  <thead className="bg-muted sticky top-0 z-10 [&_th]:text-[11px] [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left sticky left-0 bg-muted border-b border-r min-w-[220px] max-w-[220px] z-20">Article</th>
+                      {fields.map(f => <th key={f.id} className="px-3 py-2 text-left border-b whitespace-nowrap">{f.label}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {formRows.map(r => (
+                      <tr key={r.paper_id} className="border-b border-border/60 last:border-0 align-top hover:bg-muted transition-colors bg-card">
+                        <td className="px-3 py-2 sticky left-0 bg-inherit border-r min-w-[220px] max-w-[220px]"><div className="line-clamp-2 font-medium">{r.title}</div></td>
+                        {fields.map(f => <td key={f.id} className="px-3 py-2 whitespace-pre-wrap break-words min-w-[130px] text-foreground/90">{String(r.values[f.id] ?? "").trim() || <span className="text-muted-foreground/40">—</span>}</td>)}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
         </>
       )}
     </div>
