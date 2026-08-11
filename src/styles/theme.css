@@ -179,3 +179,22 @@
     line-height: 1.5;
   }
 }
+
+/* Rendered Word/HTML document preview. Tailwind's reset strips heading and list
+   styling, so restore document-like typography for this scoped container only. */
+.doc-preview h1 { font-size: 1.5rem; font-weight: 700; line-height: 1.25; margin: 1.1em 0 0.5em; }
+.doc-preview h2 { font-size: 1.25rem; font-weight: 700; line-height: 1.3; margin: 1em 0 0.4em; }
+.doc-preview h3 { font-size: 1.1rem; font-weight: 600; line-height: 1.3; margin: 0.9em 0 0.35em; }
+.doc-preview h4, .doc-preview h5, .doc-preview h6 { font-weight: 600; margin: 0.8em 0 0.3em; }
+.doc-preview p { margin: 0.6em 0; }
+.doc-preview ul { list-style: disc; padding-left: 1.5rem; margin: 0.6em 0; }
+.doc-preview ol { list-style: decimal; padding-left: 1.5rem; margin: 0.6em 0; }
+.doc-preview li { margin: 0.25em 0; }
+.doc-preview strong, .doc-preview b { font-weight: 600; }
+.doc-preview em, .doc-preview i { font-style: italic; }
+.doc-preview a { color: var(--color-primary); text-decoration: underline; }
+.doc-preview table { border-collapse: collapse; margin: 0.8em 0; width: 100%; font-size: 0.95em; }
+.doc-preview th, .doc-preview td { border: 1px solid #d4d4d4; padding: 0.4em 0.6em; text-align: left; vertical-align: top; }
+.doc-preview th { background: #f5f5f5; font-weight: 600; }
+.doc-preview img { max-width: 100%; height: auto; }
+.doc-preview :first-child { margin-top: 0; }

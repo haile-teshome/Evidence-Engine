@@ -31,7 +31,7 @@ const PRESETS = [
 
 // A structured extraction form: named fields the AI fills for each chosen
 // article, producing a study-characteristics table.
-type FormField = { id: string; label: string; type: string; options: string[] };
+type FormField = { id: string; label: string; type: string; options: string[]; description?: string };
 const slug = (x: string) => (x || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "field";
 const DEFAULT_FORM_FIELDS: FormField[] = [
   { id: "design", label: "Study design", type: "text", options: [] },
@@ -101,6 +101,7 @@ export function TextExtractionPage() {
   useEffect(() => { try { localStorage.setItem("ee:extract-form", JSON.stringify(fields)); } catch { /* ignore */ } }, [fields]);
   const [mode, setMode] = useState<"ask" | "form">("ask");
   const [formCollapsed, setFormCollapsed] = useState(false);
+  const [openHints, setOpenHints] = useState<Set<string>>(new Set());
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
   const [formBusy, setFormBusy] = useState(false);
   const [formProgress, setFormProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
@@ -194,7 +195,7 @@ export function TextExtractionPage() {
     // makes the live label exact. Cloud / GPU-served models batch well, so fan
     // out to saturate them.
     const CONCURRENCY = /^(claude|gpt|gemini)/i.test(s.model) ? 8 : 1;
-    const spec = fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options }));
+    const spec = fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options, description: f.description }));
     try {
       for (let i = 0; i < targets.length; i += CONCURRENCY) {
         const batch = targets.slice(i, i + CONCURRENCY);
@@ -498,6 +499,31 @@ export function TextExtractionPage() {
           <input type="file" ref={formFileRef} accept=".json,.csv,.tsv,.txt,.xlsx,.xls" className="hidden"
             onChange={e => { const f = e.target.files?.[0]; if (f) importForm(f); e.currentTarget.value = ""; }} />
 
+          {/* Controls live in their own pane, above the form box. */}
+          {!formCollapsed && !formBusy && (
+            <ControlPane
+              stats={<>
+                <InlineStat icon={ListChecks} value={fields.length} label="Fields" />
+                <PaneDivider />
+                <InlineStat icon={FileText} value={targets.length} label="Selected" hint={`of ${acquired.length}`} tone="success" />
+              </>}
+              actions={<>
+                <Button size="sm" variant="outline" className="h-8" onClick={toggleAllTargets}>
+                  {allSelected ? <><X className="size-3.5 mr-1.5" />Deselect all</> : <><ListChecks className="size-3.5 mr-1.5" />Select all</>}
+                </Button>
+                <Button size="sm" variant="outline" className="h-8" onClick={() => formFileRef.current?.click()} title="Import fields from JSON, CSV, or a spreadsheet whose headers are the fields">
+                  <Upload className="size-3.5 mr-1.5" />Import form
+                </Button>
+                <Button size="sm" variant="outline" className="h-8" onClick={() => { setFields(DEFAULT_FORM_FIELDS); setFormRows([]); }} title="Restore the default fields">
+                  <RotateCcw className="size-3.5 mr-1.5" />Reset
+                </Button>
+                <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
+                <Button size="sm" className="h-8 shadow-sm" onClick={runForm} disabled={!targets.length || !fields.length}>
+                  <Table2 className="size-4 mr-1.5" />Extract from {targets.length} article{targets.length === 1 ? "" : "s"}
+                </Button>
+              </>}
+            />
+          )}
           {/* Collapsible form builder. Auto-collapses after a run so the results
               take the screen; expand the header to edit fields / selection. */}
           <Card className="p-3 space-y-2">
@@ -506,16 +532,6 @@ export function TextExtractionPage() {
                 {formCollapsed ? <ChevronRight className="size-4 shrink-0" /> : <ChevronDown className="size-4 shrink-0" />}
                 <FormInput className="size-4 text-primary shrink-0" />Extraction form
               </button>
-              {!formCollapsed && !formBusy && (
-                <div className="flex items-center gap-2">
-                  <Button size="sm" className="h-8 bg-sky-500 hover:bg-sky-600 text-white shadow-sm" onClick={() => formFileRef.current?.click()} title="Import fields from JSON, CSV, or a spreadsheet whose headers are the fields">
-                    <Upload className="size-3.5 mr-1.5" />Import form
-                  </Button>
-                  <Button size="sm" className="h-8 bg-amber-500 hover:bg-amber-600 text-white shadow-sm" onClick={() => { setFields(DEFAULT_FORM_FIELDS); setFormRows([]); }} title="Restore the default fields">
-                    <RotateCcw className="size-3.5 mr-1.5" />Reset
-                  </Button>
-                </div>
-              )}
             </div>
 
             {formBusy && (
@@ -535,15 +551,15 @@ export function TextExtractionPage() {
 
             {!formCollapsed && !formBusy && (
             <div className="space-y-4 pt-1">
-            <div className="grid lg:grid-cols-2 gap-4">
+            <div className="grid lg:grid-cols-2 gap-4 items-start">
               {/* Fields */}
               <div className="space-y-2">
                 <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Fields</div>
-                <div className="space-y-1.5">
+                <div className="space-y-2">
                   {fields.map((f, i) => (
-                    <div key={f.id} className="space-y-1">
+                    <div key={f.id} className="rounded-lg border bg-card p-2 space-y-1.5 shadow-sm transition-colors hover:border-primary/30">
                       <div className="flex items-center gap-2">
-                        <Input className="h-8 flex-1" value={f.label} onChange={e => patchField(i, { label: e.target.value })} placeholder="Field label (e.g. Sample size)" />
+                        <Input className="h-8 flex-1 font-medium" value={f.label} onChange={e => patchField(i, { label: e.target.value })} placeholder="Field label (e.g. Sample size)" />
                         <Select value={f.type} onValueChange={v => patchField(i, { type: v })}>
                           <SelectTrigger className="h-8 w-24 text-xs"><SelectValue /></SelectTrigger>
                           <SelectContent>
@@ -553,12 +569,31 @@ export function TextExtractionPage() {
                             <SelectItem value="date">Date</SelectItem>
                           </SelectContent>
                         </Select>
-                        <button onClick={() => removeField(i)} className="text-muted-foreground hover:text-destructive shrink-0"><Trash2 className="size-3.5" /></button>
+                        <button onClick={() => removeField(i)} title="Remove field" className="text-muted-foreground hover:text-destructive shrink-0 p-1 rounded-md hover:bg-destructive/10 transition-colors"><Trash2 className="size-3.5" /></button>
                       </div>
+                      {(f.description || openHints.has(f.id)) ? (
+                        <div className="relative">
+                          <Search className="size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 pointer-events-none" />
+                          <Input autoFocus={openHints.has(f.id) && !f.description} className="h-7 pl-8 pr-7 text-xs bg-muted/40 border-dashed placeholder:text-muted-foreground/60 placeholder:italic" value={f.description || ""}
+                            onChange={e => patchField(i, { description: e.target.value })}
+                            title="Guide the extractor: synonyms, units, the section it appears in, or how it's phrased"
+                            placeholder="Synonyms, units, section, phrasing…" />
+                          <button onClick={() => { patchField(i, { description: "" }); setOpenHints(s => { const n = new Set(s); n.delete(f.id); return n; }); }}
+                            title="Remove hint" className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-destructive"><X className="size-3" /></button>
+                        </div>
+                      ) : (
+                        <button onClick={() => setOpenHints(s => new Set(s).add(f.id))}
+                          className="inline-flex items-center gap-1 text-[11px] text-muted-foreground/60 hover:text-primary transition-colors">
+                          <Plus className="size-3" />Add extraction hint
+                        </button>
+                      )}
                       {f.type === "category" && (
-                        <Input className="h-7 text-xs ml-0" value={(f.options || []).join(", ")}
-                          onChange={e => patchField(i, { options: e.target.value.split(",").map(x => x.trim()).filter(Boolean) })}
-                          placeholder="Allowed values: option, option, option" />
+                        <div className="relative">
+                          <ListChecks className="size-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50 pointer-events-none" />
+                          <Input className="h-7 pl-8 text-xs" value={(f.options || []).join(", ")}
+                            onChange={e => patchField(i, { options: e.target.value.split(",").map(x => x.trim()).filter(Boolean) })}
+                            placeholder="Allowed values: option, option, option" />
+                        </div>
                       )}
                     </div>
                   ))}
@@ -567,26 +602,17 @@ export function TextExtractionPage() {
               </div>
 
               {/* Articles */}
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Articles ({targets.length} of {acquired.length})</span>
-                  <Button size="sm" className="h-7 bg-emerald-500 hover:bg-emerald-600 text-white shadow-sm" onClick={toggleAllTargets}>{allSelected ? "Deselect all" : "Select all"}</Button>
-                </div>
-                <div className="rounded-md border max-h-[15.5rem] overflow-auto divide-y">
+              <div className="space-y-2 flex flex-col">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Articles ({targets.length} of {acquired.length})</div>
+                <div className="rounded-md border flex-1 min-h-[15.5rem] overflow-auto divide-y">
                   {acquired.map(p => (
-                    <label key={p.paper_id} className="flex items-center gap-2.5 px-2.5 py-1.5 text-xs cursor-pointer hover:bg-muted/40">
-                      <Checkbox checked={!deselected.has(p.paper_id)} onCheckedChange={() => toggleTarget(p.paper_id)} className="shrink-0" />
-                      <span className="line-clamp-1 flex-1 min-w-0">{(p.title || "").replace(/\s+/g, " ").trim() || "Untitled"}</span>
+                    <label key={p.paper_id} className="flex items-start gap-2.5 px-2.5 py-1.5 text-xs cursor-pointer hover:bg-muted/40">
+                      <Checkbox checked={!deselected.has(p.paper_id)} onCheckedChange={() => toggleTarget(p.paper_id)} className="shrink-0 mt-0.5" />
+                      <span className="flex-1 min-w-0 leading-snug break-words" title={(p.title || "").replace(/\s+/g, " ").trim() || "Untitled"}>{(p.title || "").replace(/\s+/g, " ").trim() || "Untitled"}</span>
                     </label>
                   ))}
                 </div>
               </div>
-            </div>
-
-            <div className="border-t pt-3">
-              <Button onClick={runForm} disabled={!targets.length || !fields.length}>
-                <Table2 className="size-4 mr-2" />Extract from {targets.length} article{targets.length === 1 ? "" : "s"}
-              </Button>
             </div>
             </div>
             )}

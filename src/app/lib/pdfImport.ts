@@ -21,7 +21,9 @@ export const UPLOAD_SOURCE = "Local PDFs";
 export type ImportedStudy = {
   paper: Paper;
   fullText?: FullTextRecord;   // present when we have the document's full text
-  objectUrl?: string;          // for the in-app PDF viewer (PDFs only)
+  objectBlob?: Blob;           // the original file bytes, for the in-app viewer (the registry owns the object URL + persistence)
+  objectMime?: string;         // its MIME type, so the viewer knows if it can render it inline
+  html?: string;               // rendered HTML (Word docs), so the preview looks like the real document
 };
 
 const CURRENT_YEAR = 2026;
@@ -49,12 +51,18 @@ async function extractPdf(file: File): Promise<{ text: string; firstPage: string
   return { text: pages.join("\n\n"), firstPage: pages[0] || "", metaTitle };
 }
 
-async function extractDocx(file: File): Promise<string> {
+async function extractDocx(file: File): Promise<{ text: string; html: string }> {
   const buf = await file.arrayBuffer();
   const mod: any = await import("mammoth/mammoth.browser.js");
   const mammoth = mod.default || mod;
-  const res = await mammoth.extractRawText({ arrayBuffer: buf });
-  return (res?.value || "").trim();
+  // convertToHtml preserves headings, bold, lists and tables so the preview can
+  // show the document as it looks, not just raw text. extractRawText feeds the
+  // downstream text pipeline (screening, extraction, Q&A).
+  const [raw, rich] = await Promise.all([
+    mammoth.extractRawText({ arrayBuffer: buf }),
+    mammoth.convertToHtml({ arrayBuffer: buf }).catch(() => null),
+  ]);
+  return { text: (raw?.value || "").trim(), html: (rich?.value || "").trim() };
 }
 
 // ── heuristic metadata for documents ─────────────────────────────────────────
@@ -97,12 +105,26 @@ function guessYear(text: string): number | undefined {
   return years.length ? Math.max(...years) : undefined;
 }
 
-function studyFromDoc(file: File, text: string, firstPage: string, metaTitle: string, objectUrl?: string): ImportedStudy {
+function mimeOf(file: File): string {
+  if (file.type) return file.type;
+  const ext = extOf(file.name);
+  if (ext === "pdf") return "application/pdf";
+  if (ext === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (ext === "doc") return "application/msword";
+  if (ext === "rtf") return "application/rtf";
+  if (ext === "html" || ext === "htm") return "text/html";
+  if (ext === "json") return "application/json";
+  if (ext === "xml") return "application/xml";
+  if (["md", "markdown", "txt", "tex"].includes(ext)) return "text/plain";
+  return "application/octet-stream";
+}
+
+function studyFromDoc(file: File, text: string, firstPage: string, metaTitle: string, keepFile?: boolean, html?: string): ImportedStudy {
   const id = newId();
   const title = guessTitle(metaTitle, firstPage, file.name);
   const paper: Paper = { id, source: UPLOAD_SOURCE, title, abstract: guessAbstract(text), url: "", year: guessYear(text) };
   const fullText: FullTextRecord = { paper_id: id, title, url: "", source: UPLOAD_SOURCE, status: "found", text };
-  return { paper, fullText, objectUrl };
+  return { paper, fullText, objectBlob: keepFile ? file : undefined, objectMime: keepFile ? mimeOf(file) : undefined, html: html || undefined };
 }
 
 // ── tabular formats (one study per row) ──────────────────────────────────────
@@ -219,13 +241,71 @@ function parseBibTeX(text: string): ImportedStudy[] {
   return out;
 }
 
+// ── plain-text extraction for lighter formats ────────────────────────────────
+function stripHtml(html: string): string {
+  const noBlocks = html.replace(/<(script|style|head)[\s\S]*?<\/\1>/gi, " ");
+  const withBreaks = noBlocks
+    .replace(/<\/(p|div|h[1-6]|li|tr|br|section|article)>/gi, "\n")
+    .replace(/<br\s*\/?>/gi, "\n");
+  const text = withBreaks.replace(/<[^>]+>/g, " ");
+  const decoded = text
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;/gi, "'")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+  return decoded.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// Minimal RTF → text: drop control words, hex escapes, and group braces.
+function stripRtf(rtf: string): string {
+  return rtf
+    .replace(/\\'[0-9a-fA-F]{2}/g, "")
+    .replace(/\\par[d]?\b/g, "\n")
+    .replace(/\\tab\b/g, "\t")
+    .replace(/\\[a-zA-Z]+-?\d* ?/g, "")
+    .replace(/[{}]/g, "")
+    .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+// EndNote .enw tagged export (%T title, %A author, %D year, %X abstract, %U url).
+function parseEnw(text: string): ImportedStudy[] {
+  const out: ImportedStudy[] = [];
+  let cur: any = null;
+  const flush = () => { if (cur) { const st = studyFromRef(cur); if (st) out.push(st); } cur = null; };
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^%([A-Z0-9])\s(.*)$/);
+    if (!m) continue;
+    if (m[1] === "0" || (m[1] === "T" && cur?.title)) flush();
+    if (!cur) cur = {};
+    const val = m[2].trim();
+    switch (m[1]) {
+      case "T": cur.title = cur.title ? cur.title + " " + val : val; break;
+      case "A": cur.authors = cur.authors ? cur.authors + "; " + val : val; break;
+      case "X": case "N": cur.abstract = cur.abstract ? cur.abstract + " " + val : val; break;
+      case "D": if (!cur.year) cur.year = parseYearStr(val); break;
+      case "R": if (!cur.doi && /10\.\d{4}/.test(val)) cur.doi = (val.match(/10\.\S+/) || [])[0]; break;
+      case "U": if (!cur.url) cur.url = val; break;
+    }
+  }
+  flush();
+  return out;
+}
+
 // ── dispatch ─────────────────────────────────────────────────────────────────
 function extOf(name: string): string {
   const m = name.toLowerCase().match(/\.([a-z0-9]+)$/);
   return m ? m[1] : "";
 }
 
-export const ACCEPTED_EXTS = ["pdf", "docx", "doc", "txt", "md", "csv", "tsv", "xlsx", "xls", "ris", "bib", "nbib"];
+// Formats we can extract usable text from. Spreadsheets (incl. OpenDocument .ods)
+// go through the xlsx reader; references through their taggers; everything else
+// is read as text, with HTML/RTF cleaned up. Any file whose MIME is text/* is
+// also accepted, so uncommon plain-text extensions still work.
+export const ACCEPTED_EXTS = [
+  "pdf", "docx", "doc", "rtf",
+  "txt", "md", "markdown", "tex", "json", "xml", "html", "htm",
+  "csv", "tsv", "xlsx", "xls", "xlsm", "ods",
+  "ris", "bib", "nbib", "enw",
+];
 
 export function isAccepted(file: File): boolean {
   return ACCEPTED_EXTS.includes(extOf(file.name)) || file.type === "application/pdf" || file.type.startsWith("text/");
@@ -233,23 +313,35 @@ export function isAccepted(file: File): boolean {
 
 async function importOne(file: File): Promise<ImportedStudy[]> {
   const ext = extOf(file.name);
+  // For file formats we keep the original of (PDF, Word, RTF, HTML, text), text
+  // extraction is best-effort: a scanned/image-only PDF, or any file we can't pull
+  // text from, is still imported so it can be viewed as the actual document. Text
+  // powers Q&A / screening when available; its absence no longer rejects the file.
   if (ext === "pdf" || file.type === "application/pdf") {
-    const { text, firstPage, metaTitle } = await extractPdf(file);
-    if (!text.trim()) throw new Error("No extractable text (scanned/image-only PDF?)");
-    return [studyFromDoc(file, text, firstPage, metaTitle, URL.createObjectURL(file))];
+    let text = "", firstPage = "", metaTitle = "";
+    try { ({ text, firstPage, metaTitle } = await extractPdf(file)); } catch { /* image-only PDF → keep it anyway */ }
+    return [studyFromDoc(file, text, firstPage, metaTitle, true)];
   }
   if (ext === "docx" || ext === "doc") {
-    const text = await extractDocx(file);   // mammoth handles .docx; .doc will throw → reported as failed
-    if (!text.trim()) throw new Error("No extractable text");
-    return [studyFromDoc(file, text, text.slice(0, 3000), "")];
+    // mammoth handles .docx; .doc (legacy binary) throws and is reported as failed.
+    const { text, html } = await extractDocx(file);
+    return [studyFromDoc(file, text, text.slice(0, 3000), "", true, html)];
   }
-  if (["csv", "tsv", "xlsx", "xls"].includes(ext)) return importTabular(file);
+  if (["csv", "tsv", "xlsx", "xls", "xlsm", "ods"].includes(ext)) return importTabular(file);
   if (ext === "ris" || ext === "nbib") return parseRIS(await file.text());
   if (ext === "bib") return parseBibTeX(await file.text());
-  // txt / md / other text
+  if (ext === "enw") return parseEnw(await file.text());
+  if (ext === "rtf") {
+    const text = stripRtf(await file.text());
+    return [studyFromDoc(file, text, text.slice(0, 3000), "", true)];
+  }
+  if (ext === "html" || ext === "htm" || file.type === "text/html") {
+    const text = stripHtml(await file.text());
+    return [studyFromDoc(file, text, text.slice(0, 3000), "", true)];
+  }
+  // txt / md / tex / json / xml / other text
   const text = await file.text();
-  if (!text.trim()) throw new Error("Empty file");
-  return [studyFromDoc(file, text, text.slice(0, 3000), "")];
+  return [studyFromDoc(file, text, text.slice(0, 3000), "", true)];
 }
 
 // Process a batch with progress. Per-file failures are collected, not thrown, so

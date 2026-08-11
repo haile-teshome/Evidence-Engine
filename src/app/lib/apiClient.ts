@@ -364,7 +364,7 @@ export const AIService = {
   // call. Returns { field_id: value }; a first draft the reviewer confirms.
   async extractFields(
     text: string,
-    fields: { id: string; label: string; type: string; options?: string[] }[],
+    fields: { id: string; label: string; type: string; options?: string[]; description?: string }[],
     title = "",
     signal?: AbortSignal,
   ): Promise<Record<string, any>> {
@@ -527,6 +527,49 @@ export const AIService = {
     values: { field: string; value: string; quote?: string; section?: string; start?: number; end?: number }[];
   }> {
     return postJSON("/extract/text", { text, query, model: apiConfig.model }, signal);
+  },
+
+  // Answer a question across MANY documents (retrieved / uploaded / cited in
+  // explanations). Returns a synthesised answer with [n] markers that map to
+  // the returned `documents` list.
+  async askDocuments(
+    question: string,
+    documents: { id: string; title: string; text: string }[],
+    signal?: AbortSignal,
+  ): Promise<{ answer: string; documents: { n: number; id: string; title: string }[] }> {
+    const r = await postJSON<{ answer: string; documents: { n: number; id: string; title: string }[] }>(
+      "/documents/ask", { question, documents, model: apiConfig.model }, signal,
+    );
+    return { answer: r.answer || "", documents: r.documents || [] };
+  },
+
+  // Route a home-chat message to the lightest tool: "documents" (answer/summarize
+  // from the existing corpus), "search" (build/refine a literature search), or
+  // "chat" (general conversation, no retrieval). Defaults to "search" on failure.
+  async routeIntent(message: string, hasDocuments: boolean, signal?: AbortSignal): Promise<"documents" | "search" | "chat"> {
+    try {
+      const r = await postJSON<{ intent: string }>(
+        "/route/intent", { message, has_documents: hasDocuments, model: apiConfig.model }, signal,
+      );
+      if (r.intent === "documents") return "documents";
+      if (r.intent === "chat") return "chat";
+      return "search";
+    } catch {
+      return "search";
+    }
+  },
+
+  // A lightweight general reply for messages that need neither a search nor the
+  // document corpus (greetings, capability / how-to questions).
+  async chat(message: string, history: { role: string; content: string }[], signal?: AbortSignal): Promise<string> {
+    try {
+      const r = await postJSON<{ answer: string }>(
+        "/assistant/chat", { message, history, model: apiConfig.model }, signal,
+      );
+      return r.answer || "";
+    } catch {
+      return "";
+    }
   },
 
   async extractTables(

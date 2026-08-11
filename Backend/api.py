@@ -2844,9 +2844,15 @@ def extract_fields(req: ExtractFieldsRequest):
         label = f.get("label") or fid
         ftype = f.get("type") or "text"
         opts = f.get("options") or []
-        hint = f" (one of: {', '.join(opts)})" if ftype == "category" and opts else ""
-        if ftype == "number":
-            hint = " (a number only)"
+        desc = (f.get("description") or "").strip()
+        bits = []
+        if ftype == "category" and opts:
+            bits.append("one of: " + ", ".join(opts))
+        elif ftype == "number":
+            bits.append("a number only")
+        if desc:
+            bits.append("look for: " + desc)
+        hint = f" ({'; '.join(bits)})" if bits else ""
         field_lines.append(f'  "{fid}": <{label}{hint}>')
     fields_block = ",\n".join(field_lines)
 
@@ -3258,6 +3264,172 @@ def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str
     except Exception as e:
         print(f"[extract_pdf_tables] {e}")
         return []
+
+
+class DocumentsAskRequest(BaseModel):
+    question: str
+    documents: List[Dict[str, Any]]     # [{id, title, text}]
+    model: Optional[str] = None
+
+
+@app.post("/api/documents/ask")
+def documents_ask(req: DocumentsAskRequest):
+    """Answer a question across MULTIPLE documents (retrieved, uploaded, or cited
+    in explanations). Returns a synthesised answer with [n] citations mapping to
+    the supplied documents, plus the citation list so the UI can render sources."""
+    from langchain_core.messages import HumanMessage
+
+    question = (req.question or "").strip()
+    docs = [d for d in (req.documents or []) if (d.get("text") or "").strip()]
+    if not question or not docs:
+        return {"answer": "", "documents": []}
+
+    # Fit the documents into a character budget, spread evenly across them.
+    docs = docs[:40]
+    budget = 26000
+    per = max(600, budget // max(1, len(docs)))
+    blocks, cited = [], []
+    for i, d in enumerate(docs, 1):
+        title = (d.get("title") or "Untitled").strip()
+        blocks.append(f"[{i}] {title}\n{(d.get('text') or '')[:per]}")
+        cited.append({"n": i, "id": d.get("id", ""), "title": title})
+    context = "\n\n".join(blocks)
+
+    multi = len(docs) > 1
+    prompt = f"""You are a research assistant helping a systematic reviewer make sense of their documents.
+Answer the QUESTION using ONLY the DOCUMENTS below. Do not use outside knowledge. Cite claims with the
+document number in square brackets, like [1] or [2][3]. If the documents do not contain the answer, say so plainly.
+
+Write a genuinely useful, substantive answer in clean Markdown. Favour flowing prose over lists:
+- Open with a short overview paragraph (2-4 sentences) that directly answers the question.
+- Organise the rest under a few **bold section labels** written on their own line (for example **Methods**, **Findings**, **Limitations**), each followed by a short paragraph. Do NOT make the section label itself a bullet.
+- Use bullet points ("- ") sparingly, and only for a genuine list of 3 or more parallel items. Never put a single sentence or a single fact on its own bullet, and never nest a bullet directly under a label that has only one point.
+- Prefer specifics over generalities: weave the actual figures, effect sizes, sample sizes, comparisons, and named methods into the sentences.
+- Keep it tight and skimmable, not padded. Do not add a "References" section (the interface lists sources separately).
+{"- When several documents are relevant, synthesise across them and note where they agree or differ, citing each." if multi else ""}
+
+DOCUMENTS:
+{context}
+
+QUESTION: {question}
+
+Answer (Markdown, grounded in the documents, with [n] citations):"""
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    answer = ""
+    if model:
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            answer = (getattr(r, "content", "") or "").strip()
+        except Exception as e:
+            print(f"[documents_ask] LLM call failed: {e}")
+    if not answer:
+        answer = "The model is unavailable or returned no answer. Please try again."
+    return {"answer": answer, "documents": cited}
+
+
+class RouteIntentRequest(BaseModel):
+    message: str
+    has_documents: Optional[bool] = None   # are documents (uploaded/retrieved) already in play?
+    model: Optional[str] = None
+
+
+@app.post("/api/route/intent")
+def route_intent(req: RouteIntentRequest):
+    """Route a home-chat message to the right tool so the single chat does the
+    lightest thing that answers the user, instead of always running the full
+    retrieval pipeline. Returns one of:
+      - "documents": answer / summarise / compare / extract from documents ALREADY
+                     in play (uploaded or retrieved). Handled by the doc-QA tool.
+      - "search":    build, refine, or run a literature search (the heavy pipeline).
+      - "chat":      general conversation, capability or how-to questions, greetings
+                     — no retrieval and no documents needed.
+    """
+    from langchain_core.messages import HumanMessage
+
+    msg = (req.message or "").strip()
+    if not msg:
+        return {"intent": "search"}
+    has_docs = bool(req.has_documents)
+    context_line = (
+        "There ARE documents already available to answer from."
+        if has_docs else
+        "There are NO documents loaded yet."
+    )
+    # Bias: with no research topic and no docs, a bare command like "summarize" is
+    # still a document action (it just has nothing to act on yet) — NOT a search.
+    prompt = f"""You route each message for a systematic-review assistant to exactly one tool. Pick the tool that does the LEAST work needed to satisfy the user; only choose "search" when they genuinely want to find or refine literature.
+
+Context: {context_line}
+
+Tools:
+- documents = the user wants to act on documents that already exist (or that they clearly expect to already exist): summarize, describe, explain, compare, list, extract data, or answer a question about "this/these/the paper(s)/the uploaded file(s)/the results". Examples: "summarize the uploaded article", "make the summary more descriptive", "what sample sizes did they use?", "which of these were RCTs?", "compare the interventions", "extract the outcomes", "explain the methods".
+- search = the user wants to find NEW studies or build/refine a literature search or research question. This usually names a research TOPIC, population, intervention, or asks for a query/PICO/strategy. Examples: "find studies on statins and stroke", "I want to review the effect of vitamin D on falls in older adults", "generate a search strategy", "refine the query to include children", "add RCTs from the last 5 years".
+- chat = general conversation, greetings, or questions about the assistant/how to use it that need neither documents nor a search. Examples: "hi", "what can you do?", "how does screening work here?", "thanks".
+
+Rules:
+- A command that summarizes/compares/extracts/explains is "documents" even if no documents are loaded yet.
+- A message that states a research topic or clinical question to investigate is "search".
+- When unsure between documents and search: choose "documents" if documents are available, otherwise "search".
+
+Message: "{msg}"
+
+Reply with ONLY one word: documents, search, or chat."""
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    intent = "search"
+    if model:
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            out = (getattr(r, "content", "") or "").strip().lower()
+            if "document" in out:
+                intent = "documents"
+            elif "chat" in out:
+                intent = "chat"
+            else:
+                intent = "search"
+        except Exception as e:
+            print(f"[route_intent] {e}")
+    return {"intent": intent}
+
+
+class AssistantChatRequest(BaseModel):
+    message: str
+    history: Optional[List[Dict[str, str]]] = None   # [{role, content}] recent turns
+    model: Optional[str] = None
+
+
+@app.post("/api/assistant/chat")
+def assistant_chat(req: AssistantChatRequest):
+    """A lightweight general-purpose reply for messages that need neither a
+    literature search nor the document corpus (greetings, capability / how-to
+    questions). Keeps the single chat conversational without spinning up retrieval."""
+    from langchain_core.messages import HumanMessage
+
+    msg = (req.message or "").strip()
+    if not msg:
+        return {"answer": ""}
+    convo = ""
+    for turn in (req.history or [])[-6:]:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        convo += f"{role}: {turn.get('content', '')}\n"
+    prompt = f"""You are the assistant inside a systematic-review platform. You help users search the literature, screen studies, extract data, appraise risk of bias, and write up reviews. Answer the user's message directly and concisely in clean Markdown.
+
+If they ask what you can do or how to use the platform, explain briefly and, when useful, tell them they can attach their own PDFs/Word/Excel files or just describe a research goal to start a search. Do not invent findings or cite documents you have not been given.
+
+{convo}User: {msg}
+
+Assistant:"""
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    answer = ""
+    if model:
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            answer = (getattr(r, "content", "") or "").strip()
+        except Exception as e:
+            print(f"[assistant_chat] {e}")
+    if not answer:
+        answer = "I can help you build a literature search, screen studies, extract data, and write up your review. Describe a research goal, or attach your own PDFs, Word, or Excel files to work from."
+    return {"answer": answer}
 
 
 @app.post("/api/extract/tables")

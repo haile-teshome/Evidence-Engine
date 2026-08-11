@@ -60,15 +60,18 @@ export function IntegrityCheck() {
 
   return (
     <Card className="p-3 space-y-2">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 text-sm font-medium"><ShieldAlert className="size-4 text-primary" />Research integrity check</div>
-        <Button size="sm" variant="outline" onClick={run} disabled={busy || !items.length}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-2 min-w-0">
+          <ShieldAlert className="size-4 text-primary mt-0.5 shrink-0" />
+          <div className="min-w-0">
+            <div className="text-sm font-medium leading-tight">Research integrity check</div>
+            <p className="text-xs text-muted-foreground leading-snug">Flags included studies that are retracted or under an expression of concern (OpenAlex + Crossref).</p>
+          </div>
+        </div>
+        <Button size="sm" variant="outline" className="shrink-0" onClick={run} disabled={busy || !items.length}>
           {busy ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <ShieldAlert className="size-3.5 mr-1.5" />}Check {items.length} included
         </Button>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Flags any included study that has been retracted or carries an expression of concern, using retraction metadata from OpenAlex and Crossref. Including a retracted study is a serious, avoidable error.
-      </p>
 
       {results && (
         <div className="space-y-2">

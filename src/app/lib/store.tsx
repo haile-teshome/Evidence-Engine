@@ -73,6 +73,10 @@ export type HistoryEntry = {
   adversarial_query: string;
 };
 
+// A document Q&A exchange on Home: a question answered from the documents in
+// play, with the sources cited. Persisted so it survives a refresh like history.
+export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean };
+
 export type ExtractedTable = { title: string; type: string; data: string[][]; caption?: string };
 export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[] };
 
@@ -139,6 +143,7 @@ type Ctx = {
 
   // Strategy
   history: HistoryEntry[]; setHistory: React.Dispatch<React.SetStateAction<HistoryEntry[]>>;
+  docQa: DocQaTurn[]; setDocQa: React.Dispatch<React.SetStateAction<DocQaTurn[]>>;
   pico: Pico; setPico: React.Dispatch<React.SetStateAction<Pico>>;
   inclusion: string[]; setInclusion: (v: string[]) => void;
   exclusion: string[]; setExclusion: (v: string[]) => void;
@@ -317,6 +322,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [files, setFiles] = useState<File[]>([]);
 
   const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [docQa, setDocQa] = useState<DocQaTurn[]>([]);
   const [pico, setPico] = useState<Pico>({ population: "", intervention: "", comparator: "", outcome: "" });
   const [inclusion, setInclusion] = useState<string[]>([]);
   const [exclusion, setExclusion] = useState<string[]>([]);
@@ -501,7 +507,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => { apiConfig.model = model; }, [model]);
 
   const snapshot = () => ({
-    history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
+    history, docQa, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
     sources, numPerSource, model,
     rawPapers, uniquePapers, duplicatesCount, qualityReports, qualityArchive,
     excludedByQuality: Array.from(excludedByQuality),
@@ -546,6 +552,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     };
 
     setHistory(d.history || []);
+    setDocQa((d.docQa || []).filter((t: DocQaTurn) => !t.busy));   // drop any turn that was mid-flight when saved
     setPico(d.pico || { population: "", intervention: "", comparator: "", outcome: "" });
     setInclusion(d.inclusion || []);
     setExclusion(d.exclusion || []);
@@ -630,7 +637,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
     }, 600);
     return () => clearTimeout(t);
-  }, [history, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
+  }, [history, docQa, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
       sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
       searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
@@ -670,7 +677,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const reset = () => {
-    setHistory([]); setPico({ population: "", intervention: "", comparator: "", outcome: "" });
+    setHistory([]); setDocQa([]); setPico({ population: "", intervention: "", comparator: "", outcome: "" });
     setInclusion([]); setExclusion([]); setQuery(""); setUnifiedSearchQuery(""); setPerDbQueries({});
     setSimulation(null); setDbTestResults(null); setAgenticTrace(null); setAgenticSummary(null);
     setRawPapers(null); setUniquePapers(null); setDuplicatesCount(0);
@@ -693,7 +700,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const value: Ctx = {
     page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, files, setFiles,
-    history, setHistory, pico, setPico, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
+    history, setHistory, docQa, setDocQa, pico, setPico, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
     unifiedSearchQuery, setUnifiedSearchQuery, perDbQueries, setPerDbQueries, simulation, setSimulation,
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
     simulationRuns, addSimulationRun, clearSimulationRuns,
