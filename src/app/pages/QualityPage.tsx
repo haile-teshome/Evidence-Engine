@@ -18,7 +18,7 @@ import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import {
   Copy, ShieldCheck, ShieldAlert, AlertTriangle, ArrowRight, CheckCircle2, Search,
-  Pencil, History, RotateCcw, FileDown, Plus, Trash2, Loader2, HelpCircle, ChevronRight, Quote,
+  Pencil, History, RotateCcw, FileDown, Plus, Trash2, Loader2, HelpCircle, ChevronRight, ChevronDown, Quote,
 } from "lucide-react";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import {
@@ -183,6 +183,7 @@ export function QualityPage() {
 
   const [excludeRule, setExcludeRule] = useState<"none" | "any_high" | "two_or_more_high">("none");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [qualityTab, setQualityTab] = useState<"appraisal" | "integrity">("appraisal");
   const [q, setQ] = useState("");
   // Active instrument tab (empty = first group). Reviews that mix study designs
   // get one tab per risk-of-bias tool so each figure + paper list stays focused.
@@ -431,9 +432,19 @@ export function QualityPage() {
 
   return (
     <div className="space-y-4">
+      {/* Tab toggle: risk-of-bias appraisal vs a research-integrity report. */}
+      <div className="inline-flex items-center gap-1 rounded-lg border bg-muted/50 p-0.5 w-fit">
+        {([["appraisal", "Risk of bias", ShieldCheck], ["integrity", "Research integrity", ShieldAlert]] as const).map(([id, label, Icon]) => (
+          <button key={id} onClick={() => setQualityTab(id)}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 h-8 text-sm font-medium transition-colors ${qualityTab === id ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+            <Icon className="size-3.5" />{label}
+          </button>
+        ))}
+      </div>
+
+      {qualityTab === "appraisal" && (<>
       {!reports && (
         <>
-          <IntegrityCheck />
           <Alert>
             <AlertDescription>
               Risk-of-bias appraisal of your <strong>included</strong> articles, with a rubric matched to each study
@@ -529,36 +540,31 @@ export function QualityPage() {
             </>}
           />
 
-          <IntegrityCheck />
-
-          {/* One tab per risk-of-bias instrument used. The figure and paper list
-              below are scoped to the active tab. */}
-          {instrumentGroups.length > 1 && (
-            <Tabs
-              value={activeGroup?.label}
-              onValueChange={(v) => {
-                setActiveInstrument(v);
-                const g = instrumentGroups.find(x => x.label === v);
-                setSelectedId(g?.reports[0]?.paper_id ?? null);
-              }}
-            >
-              <TabsList className="flex flex-wrap h-auto gap-1">
-                {instrumentGroups.map(g => (
-                  <TabsTrigger key={g.label} value={g.label} className="text-xs">{g.label}</TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
-          )}
-
           <Card className="p-4">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="font-medium">Risk-of-bias appraisal{instrumentGroups.length > 1 && activeGroup ? `: ${activeGroup.label}` : ""}</h3>
-              <div className="text-xs text-muted-foreground">
-                Select an article, then click a judgment chip to override it.
-              </div>
+            {/* Instrument tabs live in the panel header; the paper list + figure
+                below are scoped to the active tab. */}
+            <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
+              {instrumentGroups.length > 1 ? (
+                <Tabs
+                  value={activeGroup?.label}
+                  onValueChange={(v) => {
+                    setActiveInstrument(v);
+                    const g = instrumentGroups.find(x => x.label === v);
+                    setSelectedId(g?.reports[0]?.paper_id ?? null);
+                  }}
+                >
+                  <TabsList className="flex flex-wrap h-auto gap-1">
+                    {instrumentGroups.map(g => (
+                      <TabsTrigger key={g.label} value={g.label} className="text-xs">{g.label}</TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
+              ) : (
+                <h3 className="font-medium">Risk-of-bias appraisal</h3>
+              )}
             </div>
             {/* ── Two-pane: paper list (left) + selected appraisal (right) ───── */}
-            <div className="flex gap-4 h-[calc(100vh-26rem)] min-h-[26rem]">
+            <div className="flex gap-4 h-[calc(100vh-22rem)] min-h-[32rem]">
               {/* LEFT: searchable paper list */}
               <div className="w-80 shrink-0 rounded-md border overflow-hidden flex flex-col">
                 <div className="p-2 border-b">
@@ -648,22 +654,26 @@ export function QualityPage() {
                 )}
               </div>
             </div>
-          </Card>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-            <Button variant="outline" onClick={() => runAssess()} disabled={running}>Re-run Appraisal</Button>
-            <Button variant="outline" onClick={() => exportAssessments(reports, overrides)}>
-              <FileDown className="size-4 mr-2" />Export (CSV + JSON)
-            </Button>
-            <Button variant="outline" onClick={() => exportBiasFigure(reports, overrides)}>
-              <FileDown className="size-4 mr-2" />Figure (SVG)
-            </Button>
-            <Button variant="outline" onClick={() => s.setPage("prisma")}>
-              <ArrowRight className="size-4 mr-2" />Continue to Diagramming
-            </Button>
-          </div>
+            {/* Outputs are part of the appraisal box; the integrity check is a
+                tucked-away option toggled from here. */}
+            <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 mt-3">
+              <Button variant="outline" size="sm" className="h-8" onClick={() => exportAssessments(reports, overrides)}>
+                <FileDown className="size-3.5 mr-1.5" />Export (CSV + JSON)
+              </Button>
+              <Button variant="outline" size="sm" className="h-8" onClick={() => exportBiasFigure(reports, overrides)}>
+                <FileDown className="size-3.5 mr-1.5" />Figure (SVG)
+              </Button>
+              <Button size="sm" className="h-8 shadow-sm" onClick={() => s.setPage("prisma")}>
+                <ArrowRight className="size-3.5 mr-1.5" />Continue to Diagramming
+              </Button>
+            </div>
+          </Card>
         </>
       )}
+      </>)}
+
+      {qualityTab === "integrity" && <IntegrityCheck />}
     </div>
   );
 }

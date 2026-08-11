@@ -140,9 +140,9 @@ function PaperList({ papers }: { papers: PaperRef[] }) {
 
 const BOX_STYLE = "border border-[#a3c4c2] bg-white rounded text-xs leading-snug p-2.5 text-[#0f172a] w-full";
 const EXCLUDED_BOX_STYLE = "border border-[#a3c4c2] bg-white rounded text-xs leading-snug p-2.5 text-[#0f172a] w-full";
-const PHASE_BAR = "text-white text-[10px] font-bold tracking-widest uppercase writing-vertical flex items-center justify-center bg-[#0d6b66] px-2 select-none";
+const PHASE_BAR = "text-white text-[10px] font-bold tracking-widest uppercase writing-vertical flex items-center justify-center bg-[#0d6b66] w-7 shrink-0 select-none";
 // Light teal panel behind each phase group, in our colour.
-const SECTION_PANEL = "flex items-stretch rounded-lg bg-[#eef6f5] overflow-hidden";
+const SECTION_PANEL = "flex items-stretch bg-[#eef6f5]";
 
 // ---------------------------------------------------------------------------
 // Exclusion box (right side, with expandable paper list)
@@ -522,19 +522,18 @@ export function PrismaFlow({
 
   // ---- Render ---------------------------------------------------------------
 
-  // Premium connector chips: a soft circular badge with a lucide arrow.
-  const ARROW = (
-    <div className="flex justify-center py-1">
-      <div className="grid place-items-center size-7 rounded-full bg-muted/70 text-muted-foreground/80 ring-1 ring-black/[0.04] dark:ring-white/[0.05] shadow-sm">
-        <ArrowDown className="size-4" strokeWidth={2.25} />
-      </div>
+  // Clean flow connectors: a solid teal line with a triangular arrowhead.
+  const DOWN = "#0d6b66";
+  const DownArrow = () => (
+    <div className="flex flex-col items-center justify-center">
+      <div className="w-[2.5px] h-7 rounded-full" style={{ background: DOWN }} />
+      <div className="size-0 -mt-px" style={{ borderLeft: "5px solid transparent", borderRight: "5px solid transparent", borderTop: `9px solid ${DOWN}` }} />
     </div>
   );
-  const HARROW = (
-    <div className="flex items-center justify-center">
-      <div className="grid place-items-center size-6 rounded-full bg-muted/70 text-muted-foreground/80 ring-1 ring-black/[0.04] dark:ring-white/[0.05] shadow-sm">
-        <ArrowRight className="size-3.5" strokeWidth={2.25} />
-      </div>
+  const RightArrow = () => (
+    <div className="flex items-center self-center w-full">
+      <div className="h-[2.5px] flex-1 rounded-full" style={{ background: DOWN }} />
+      <div className="size-0 -ml-px" style={{ borderTop: "5px solid transparent", borderBottom: "5px solid transparent", borderLeft: `9px solid ${DOWN}` }} />
     </div>
   );
 
@@ -570,14 +569,14 @@ export function PrismaFlow({
 
       {/* PRISMA 2020 diagram */}
       <div className="overflow-x-auto">
-        <div className="min-w-[700px]">
+        <div className="min-w-[700px] rounded-xl overflow-hidden border border-[#cfe3e1]">
 
           {/* ── IDENTIFICATION ─────────────────────────────────────────── */}
           <div className={SECTION_PANEL}>
             <div className={`${PHASE_BAR} self-stretch`} style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Identification</div>
             <div className="flex-1 p-2.5 space-y-2">
               {/* Row 1: two source boxes side by side */}
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2">
                 <div className={BOX_STYLE}>
                   <div className="font-semibold mb-0.5">
                     <EditableText value={lbl("dbTitle", "Studies from databases/registers")} onSave={v => setL("dbTitle", v)} />
@@ -602,7 +601,7 @@ export function PrismaFlow({
 
               {/* Row 2: "removed before screening" box branches off on the right.
                   The main flow arrow lives between this phase and Screening. */}
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 items-start">
                 <div />
                 <div />
                 <div className={BOX_STYLE}>
@@ -618,10 +617,10 @@ export function PrismaFlow({
           </div>
 
           {/* Flow arrow between Identification and Screening. */}
-          <div className="flex items-stretch my-1">
-            <div className={PHASE_BAR} style={{ visibility: "hidden", writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Screening</div>
-            <div className="flex-1 px-2.5 py-2">
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2">{ARROW}<div /><div /></div>
+          <div className="flex items-stretch bg-[#eef6f5]">
+            <div className="bg-[#0d6b66] w-7 shrink-0" />
+            <div className="flex-1 px-2.5 py-1">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2"><DownArrow /><div /><div /></div>
             </div>
           </div>
 
@@ -630,14 +629,14 @@ export function PrismaFlow({
             <div className={`${PHASE_BAR} self-stretch`} style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Screening</div>
             <div className="flex-1 p-2.5 space-y-0">
               {/* Row: screened → excluded */}
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 items-start">
                 <div className={BOX_STYLE}>
                   <span className="font-semibold">
                     <EditableText value={lbl("screenedTitle", "Studies screened")} onSave={v => setL("screenedTitle", v)} />
                   </span>
                   {" "}(<span className="font-bold text-[#166534]">n = <EditableNumber value={n("screened", screened)} onSave={v => setN("screened", v)} /></span>)
                 </div>
-                <div className="flex items-start justify-center pt-2"><div className="grid place-items-center size-6 rounded-full bg-muted/70 text-muted-foreground/80 ring-1 ring-black/[0.04] dark:ring-white/[0.05] shadow-sm"><ArrowRight className="size-3.5" strokeWidth={2.25} /></div></div>
+                <RightArrow />
                 <div className={EXCLUDED_BOX_STYLE}>
                   <div className="font-semibold mb-0.5">
                     <EditableText value={lbl("absExcTitle", "Studies excluded")} onSave={v => setL("absExcTitle", v)} />
@@ -653,17 +652,17 @@ export function PrismaFlow({
               </div>
 
               {/* Down arrow, centered under the left (flow) column */}
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 py-2.5">{ARROW}<div /><div /></div>
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 py-2.5"><DownArrow /><div /><div /></div>
 
               {/* Row: sought for retrieval → not retrieved */}
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 items-start">
                 <div className={BOX_STYLE}>
                   <span className="font-semibold">
                     <EditableText value={lbl("soughtTitle", "Studies sought for retrieval")} onSave={v => setL("soughtTitle", v)} />
                   </span>
                   {" "}(<span className="font-bold text-[#166534]">n = <EditableNumber value={n("soughtRetrieval", assessed)} onSave={v => setN("soughtRetrieval", v)} /></span>)
                 </div>
-                {HARROW}
+                <RightArrow />
                 <div className={EXCLUDED_BOX_STYLE}>
                   <span className="font-semibold">
                     <EditableText value={lbl("notRetrievedTitle", "Studies not retrieved")} onSave={v => setL("notRetrievedTitle", v)} />
@@ -673,18 +672,18 @@ export function PrismaFlow({
               </div>
 
               {/* Down arrow, centered under the left (flow) column */}
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 py-2.5">{ARROW}<div /><div /></div>
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 py-2.5"><DownArrow /><div /><div /></div>
 
               {/* Row: assessed for eligibility → excluded at full text.
                   Reasons + counts only, no per-study disclosure. */}
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 items-start">
                 <div className={BOX_STYLE}>
                   <span className="font-semibold">
                     <EditableText value={lbl("assessedTitle", "Studies assessed for eligibility")} onSave={v => setL("assessedTitle", v)} />
                   </span>
                   {" "}(<span className="font-bold text-[#166534]">n = <EditableNumber value={n("assessed", assessed)} onSave={v => setN("assessed", v)} /></span>)
                 </div>
-                <div className="flex items-start justify-center pt-2"><div className="grid place-items-center size-6 rounded-full bg-muted/70 text-muted-foreground/80 ring-1 ring-black/[0.04] dark:ring-white/[0.05] shadow-sm"><ArrowRight className="size-3.5" strokeWidth={2.25} /></div></div>
+                <RightArrow />
                 <div className={EXCLUDED_BOX_STYLE}>
                   <div className="font-semibold mb-0.5">
                     <EditableText value={lbl("ftExcTitle", "Studies excluded")} onSave={v => setL("ftExcTitle", v)} />
@@ -707,16 +706,16 @@ export function PrismaFlow({
           {/* Between-phase arrow: mirror the panel layout (invisible phase-bar
               spacer + p-2.5 + the same gap-2 grid) so it lines up exactly under
               the flow column, instead of an approximate padding. */}
-          <div className="flex items-stretch my-1">
-            <div className={PHASE_BAR} style={{ visibility: "hidden", writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Included</div>
-            <div className="flex-1 px-2.5 py-2">
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2">{ARROW}<div /><div /></div>
+          <div className="flex items-stretch bg-[#eef6f5]">
+            <div className="bg-[#0d6b66] w-7 shrink-0" />
+            <div className="flex-1 px-2.5 py-1">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2"><DownArrow /><div /><div /></div>
             </div>
           </div>
-          <div className={`mt-1 ${SECTION_PANEL}`}>
+          <div className={SECTION_PANEL}>
             <div className={`${PHASE_BAR} self-stretch`} style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}>Included</div>
             <div className="flex-1 p-2.5 space-y-2">
-              <div className="grid grid-cols-[5fr_16px_6fr] gap-2 items-start">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 items-start">
                 <div className={BOX_STYLE}>
                   <span className="font-semibold">
                     <EditableText value={lbl("includedTitle", "Studies included in review")} onSave={v => setL("includedTitle", v)} />
@@ -782,7 +781,7 @@ function buildPrisma2020Svg(d: SvgData): string {
   const PANEL = "#eef6f5";    // light phase-group background
   const LIGHT = "#f0fdf4";    // highlighted boxes
   const BORDER = "#a3c4c2";   // soft box strokes
-  const ARROW = "#4ade80";    // connector arrows
+  const ARROW = "#0d6b66";    // connector arrows (match the phase bars)
   const TEXT = "#0f172a";
   const GRAY = "#475569";
   const FONT = `font-family="Calibri, Arial, sans-serif"`;
@@ -819,12 +818,12 @@ function buildPrisma2020Svg(d: SvgData): string {
   }
 
   function arrow(x1: number, y1: number, x2: number, y2: number, _horizontal = false) {
-    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${ARROW}" stroke-width="2.25" stroke-linecap="round" marker-end="url(#arr)"/>`;
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="$<DownArrow />" stroke-width="2.6" stroke-linecap="round" marker-end="url(#arr)"/>`;
   }
 
   parts.push(
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} 900" width="${W}" height="900" ${FONT}>`,
-    `<defs><marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${ARROW}"/></marker></defs>`,
+    `<defs><marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="$<DownArrow />"/></marker></defs>`,
     `<rect width="${W}" height="900" fill="#ffffff"/>`,
   );
 

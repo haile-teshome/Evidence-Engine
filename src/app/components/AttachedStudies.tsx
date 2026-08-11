@@ -5,7 +5,7 @@ import { getPdfBlob } from "../lib/pdfBlobs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
-import { Wand2, Trash2, X, FileText, Loader2, ExternalLink } from "lucide-react";
+import { Trash2, X, FileText, Loader2, ExternalLink } from "lucide-react";
 
 // Panel to review the studies the user attached: a list on the left, a preview
 // (PDF or extracted text + metadata) on the right, with Enhance / remove actions.
@@ -19,7 +19,7 @@ export function AttachedStudies({
   studyImport: ReturnType<typeof useStudyImport>;
 }) {
   const s = useStore();
-  const { uploaded, enhanceWithAI, clearStudies, removeStudy, busy, progress } = studyImport;
+  const { uploaded, clearStudies, removeStudy, busy, progress } = studyImport;
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   // Keep a valid selection as the list changes.
@@ -44,10 +44,6 @@ export function AttachedStudies({
                 {progress ? `${progress.done}/${progress.total}` : "Working…"}
               </span>
             )}
-            <Button size="sm" variant="outline" onClick={enhanceWithAI} disabled={busy || !uploaded.length}
-              title="Fix stray characters and broken words from PDF extraction, and pull clean titles, authors, year, and abstracts">
-              <Wand2 className="size-3.5 mr-1.5" />Clean up text
-            </Button>
             <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => { clearStudies(); onOpenChange(false); }} disabled={!uploaded.length}>
               <Trash2 className="size-3.5 mr-1.5" />Clear all
             </Button>

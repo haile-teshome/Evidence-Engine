@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useStore } from "./store";
 import { importStudies, isAccepted, UPLOAD_SOURCE, ImportedStudy } from "./pdfImport";
-import { registerPdfBlobs } from "./pdfBlobs";
+import { registerPdfBlobs, removePdfBlob } from "./pdfBlobs";
 import { AIService } from "./apiClient";
 import type { Paper } from "./apiClient";
 import { toast } from "sonner";
@@ -15,15 +15,28 @@ export function useStudyImport() {
 
   function loadIntoCorpus(studies: ImportedStudy[]) {
     if (!studies.length) return;
-    const papers = studies.map(x => x.paper);
-    const ftMap = Object.fromEntries(studies.filter(x => x.fullText).map(x => [x.paper.id, x.fullText!]));
-    registerPdfBlobs(studies.filter(x => x.objectUrl).map(x => ({ id: x.paper.id, url: x.objectUrl! })));
-
+    // A re-upload of a document already in the corpus (matched by title) must map
+    // onto the EXISTING paper id, so its file, rendered HTML, and refreshed text
+    // attach to the id the rest of the app references. Otherwise the corpus keeps
+    // the old id while the preview data lands under a throwaway new id.
     const existing = (s.rawPapers || []).filter(p => p.source === UPLOAD_SOURCE);
-    const seen = new Set(existing.map(p => p.title.toLowerCase().trim()));
-    const fresh = papers.filter(p => !seen.has(p.title.toLowerCase().trim()));
-    const all = [...existing, ...fresh];
+    const idByTitle = new Map(existing.map(p => [p.title.toLowerCase().trim(), p.id]));
 
+    const freshPapers: Paper[] = [];
+    const ftMap: Record<string, NonNullable<ImportedStudy["fullText"]>> = {};
+    const blobEntries: { id: string; blob?: Blob; mime?: string; html?: string }[] = [];
+
+    for (const x of studies) {
+      const key = x.paper.title.toLowerCase().trim();
+      const existingId = idByTitle.get(key);
+      const id = existingId || x.paper.id;
+      if (!existingId) { freshPapers.push(x.paper); idByTitle.set(key, id); }
+      if (x.fullText) ftMap[id] = { ...x.fullText, paper_id: id };
+      if (x.objectBlob || x.html) blobEntries.push({ id, blob: x.objectBlob, mime: x.objectMime, html: x.html });
+    }
+
+    registerPdfBlobs(blobEntries);
+    const all = [...existing, ...freshPapers];
     s.setRawPapers(all);
     s.setUniquePapers(all);
     s.setDuplicatesCount(0);
@@ -48,9 +61,9 @@ export function useStudyImport() {
       loadIntoCorpus(studies);
       if (studies.length) {
         toast.success(`Attached ${studies.length} stud${studies.length === 1 ? "y" : "ies"}`
-          + (failed.length ? `. ${failed.length} could not be read (scanned/image-only?)` : ""));
+          + (failed.length ? `. ${failed.length} could not be read (unsupported or corrupt file?)` : ""));
       } else {
-        toast.error("None of the files yielded extractable text (scanned/image-only PDFs?).");
+        toast.error("Could not read those files (unsupported or corrupt?).");
       }
     } catch (e: any) {
       toast.error(e?.message || "Attach failed");
@@ -94,6 +107,7 @@ export function useStudyImport() {
   }
 
   function clearStudies() {
+    (s.rawPapers || []).filter(p => p.source === UPLOAD_SOURCE).forEach(p => removePdfBlob(p.id));
     const keep = (s.rawPapers || []).filter(p => p.source !== UPLOAD_SOURCE);
     s.setRawPapers(keep.length ? keep : null);
     s.setUniquePapers(keep.length ? keep : null);
@@ -105,6 +119,7 @@ export function useStudyImport() {
       const next = (list || []).filter(p => p.id !== id);
       return next.length ? next : null;
     };
+    removePdfBlob(id);
     s.setRawPapers(drop(s.rawPapers));
     s.setUniquePapers(drop(s.uniquePapers));
     s.setFullTexts(prev => { const n = { ...prev }; delete n[id]; return n; });

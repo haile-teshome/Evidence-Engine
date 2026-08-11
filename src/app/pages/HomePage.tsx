@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useStore, HistoryEntry } from "../lib/store";
 import { AIService, DataAggregator } from "../lib/mockServices";
 import type { ClarifyingQuestion, Paper } from "../lib/mockServices";
 import { useStudyImport } from "../lib/useStudyImport";
 import { AttachedStudies } from "../components/AttachedStudies";
 import { Card } from "../components/ui/card";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
+import { getPdfBlob, getPdfBlobMime, getDocHtml, docFilesReady, registerPdfBlobs } from "../lib/pdfBlobs";
+import { importStudies, ACCEPTED_EXTS } from "../lib/pdfImport";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -14,10 +17,14 @@ import { PicoCards } from "../components/PicoCards";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2, Hand } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2, Hand, Files } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
 import { ProtocolPanel } from "../components/ProtocolPanel";
+
+// File-picker filter, derived from the importer's accepted extensions so the two
+// never drift apart.
+const ACCEPT_ATTR = ACCEPTED_EXTS.map(e => "." + e).join(",");
 
 function ReferencesBySource({ refs, idPrefix }: { refs: { title: string; url: string; source: string; id: string }[]; idPrefix?: string }) {
   // The backend re-orders papers so that papers from the same source are
@@ -667,12 +674,218 @@ function RelevanceExplorer() {
   );
 }
 
+// Inline Markdown: **bold** as bold, and [n] citations as clickable buttons that
+// open a preview of source n.
+function renderInline(text: string, onCite: (n: number) => void, keyBase: string): ReactNode[] {
+  const out: ReactNode[] = [];
+  const re = /\*\*([^*]+)\*\*|\[(\d+)\]/g;
+  let last = 0;
+  let k = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[1] !== undefined) {
+      out.push(<strong key={`${keyBase}-${k++}`} className="font-semibold text-foreground">{m[1]}</strong>);
+    } else {
+      const n = Number(m[2]);
+      out.push(
+        <button key={`${keyBase}-${k++}`} type="button" onClick={() => onCite(n)}
+          style={{ fontSize: "inherit" }}
+          className="align-baseline text-primary font-medium hover:underline">[{n}]</button>,
+      );
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+// Render a document-Q&A answer as light Markdown: headings, bullet / numbered
+// lists, and paragraphs, with inline **bold** and clickable [n] citations.
+function renderAnswer(text: string, onCite: (n: number) => void): ReactNode[] {
+  const lines = (text || "").replace(/\r/g, "").split("\n");
+  const blocks: ReactNode[] = [];
+  let list: { ordered: boolean; items: string[] } | null = null;
+  let bi = 0;
+
+  const flushList = () => {
+    if (!list) return;
+    const items = list.items;
+    const key = `l${bi++}`;
+    if (list.ordered) {
+      blocks.push(
+        <ol key={key} className="list-decimal pl-5 space-y-1 my-1.5">
+          {items.map((it, i) => <li key={i}>{renderInline(it, onCite, `${key}-${i}`)}</li>)}
+        </ol>,
+      );
+    } else {
+      blocks.push(
+        <ul key={key} className="list-disc pl-5 space-y-1 my-1.5">
+          {items.map((it, i) => <li key={i}>{renderInline(it, onCite, `${key}-${i}`)}</li>)}
+        </ul>,
+      );
+    }
+    list = null;
+  };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) { flushList(); continue; }
+
+    const heading = line.match(/^(#{1,6})\s+(.*)$/);
+    if (heading) {
+      flushList();
+      blocks.push(
+        <p key={`h${bi++}`} className="font-semibold text-foreground mt-2 first:mt-0">
+          {renderInline(heading[2], onCite, `h${bi}`)}
+        </p>,
+      );
+      continue;
+    }
+
+    const bullet = line.match(/^\s*[-*•]\s+(.*)$/);
+    if (bullet) {
+      if (!list || list.ordered) { flushList(); list = { ordered: false, items: [] }; }
+      list.items.push(bullet[1]);
+      continue;
+    }
+
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (numbered) {
+      if (!list || !list.ordered) { flushList(); list = { ordered: true, items: [] }; }
+      list.items.push(numbered[1]);
+      continue;
+    }
+
+    flushList();
+    blocks.push(
+      <p key={`p${bi++}`} className="leading-relaxed">{renderInline(line, onCite, `p${bi}`)}</p>,
+    );
+  }
+  flushList();
+  return blocks;
+}
+
 export function HomePage() {
   const s = useStore();
   const studyImport = useStudyImport();
   const attachRef = useRef<HTMLInputElement>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [input, setInput] = useState("");
+  // Conversational Q&A over the documents in play (retrieved / uploaded / cited
+  // in explanations). Answered by the same main chat, shown as conversation turns.
+  // Persisted in the store so they survive a refresh, like the search history.
+  const qaTurns = s.docQa;
+  const setQaTurns = s.setDocQa;
+  const [previewDoc, setPreviewDoc] = useState<{ id: string; title: string; text: string; url?: string; fileUrl?: string; fileMime?: string; fileInline?: boolean; html?: string; uploaded?: boolean } | null>(null);
+  const [previewMode, setPreviewMode] = useState<"doc" | "text">("doc");
+  const reattachRef = useRef<HTMLInputElement>(null);
+  const reattachId = useRef<string | null>(null);
+  const docCorpus = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { id: string; title: string; text: string; source: string; url?: string }[] = [];
+    for (const p of (s.rawPapers || [])) {
+      if (!p.id || seen.has(p.id)) continue;
+      const text = (s.fullTexts[p.id]?.text || p.abstract || "").trim();
+      if (!text) continue;
+      seen.add(p.id);
+      out.push({ id: p.id, title: p.title || "Untitled", text, source: p.source, url: p.url });
+    }
+    return out;
+  }, [s.rawPapers, s.fullTexts]);
+  const uploadedDocs = docCorpus.filter(d => d.source === "Local PDFs");
+
+  // Freshly attached documents become the focus of the NEXT message, so "summarize
+  // this" acts on what the user just attached rather than the whole corpus. We
+  // detect newly-added uploads by diffing their ids; documents restored from a
+  // saved session on mount are NOT treated as freshly attached.
+  const [pendingDocIds, setPendingDocIds] = useState<string[]>([]);
+  const knownUploadIds = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const cur = new Set(uploadedDocs.map(d => d.id));
+    if (knownUploadIds.current === null) { knownUploadIds.current = cur; return; }  // baseline on first run
+    const added = [...cur].filter(id => !knownUploadIds.current!.has(id));
+    knownUploadIds.current = cur;
+    if (added.length) setPendingDocIds(prev => Array.from(new Set([...prev, ...added])));
+  }, [uploadedDocs]);
+  // Keep only ids that still exist, resolved to their documents.
+  const pendingDocs = useMemo(
+    () => pendingDocIds.map(id => docCorpus.find(d => d.id === id)).filter(Boolean) as typeof docCorpus,
+    [pendingDocIds, docCorpus],
+  );
+
+  const openDocPreview = async (id: string) => {
+    const d = docCorpus.find(x => x.id === id);
+    if (!d) return;
+    await docFilesReady;   // ensure persisted previews are rehydrated after a reload
+    const remotePdf = s.fullTexts[id]?.pdf_url;
+    const fileUrl = getPdfBlob(id) || remotePdf || undefined;
+    const fileMime = getPdfBlobMime(id) || (remotePdf ? "application/pdf" : undefined);
+    const html = getDocHtml(id);
+    // We can show the actual document when: it's a PDF or plain text (iframe), or
+    // it's a Word doc we've rendered to HTML at import. Otherwise fall back to the
+    // extracted text, with the original offered as a download.
+    const fileInline = !!html || (!!fileUrl && (fileMime === "application/pdf" || (fileMime || "").startsWith("text/")));
+    setPreviewMode(fileInline ? "doc" : "text");
+    setPreviewDoc({ id, title: d.title, text: d.text, url: d.url, fileUrl, fileMime, fileInline, html, uploaded: d.source === "Local PDFs" });
+  };
+
+  // Re-attach an uploaded document's original file so its actual-document preview
+  // works. Needed for documents added before the file was captured/persisted; the
+  // picked file is bound to the SAME paper id the app already references.
+  const promptReattach = (id: string) => { reattachId.current = id; reattachRef.current?.click(); };
+  const onReattachPicked = async (file: File | undefined) => {
+    const id = reattachId.current; reattachId.current = null;
+    if (reattachRef.current) reattachRef.current.value = "";
+    if (!file || !id) return;
+    try {
+      const { studies } = await importStudies([file]);
+      const st = studies[0];
+      if (!st || (!st.objectBlob && !st.html)) { toast.error("Could not read that file as a document."); return; }
+      registerPdfBlobs([{ id, blob: st.objectBlob, mime: st.objectMime, html: st.html }]);
+      if (st.fullText) s.setFullTexts(prev => ({ ...prev, [id]: { ...st.fullText!, paper_id: id } }));
+      await openDocPreview(id);
+      toast.success("Original document attached");
+    } catch (e: any) {
+      toast.error(e?.message || "Could not attach that file.");
+    }
+  };
+
+  // A general reply for messages that need neither a search nor the documents
+  // (greetings, "what can you do?", how-to). Appended as a chat turn, no sources.
+  async function runChat(message: string) {
+    const qq = message.trim();
+    if (!qq) return;
+    setInput("");
+    const idx = qaTurns.length;
+    setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true }]);
+    const history = qaTurns.flatMap(t => [
+      { role: "user", content: t.question },
+      { role: "assistant", content: t.answer },
+    ]);
+    try {
+      const answer = await AIService.chat(qq, history);
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: answer || "Sorry, I couldn't respond just now.", sources: [], busy: false } : x));
+    } catch (e: any) {
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: e?.message || "Sorry, that failed. Please try again.", busy: false } : x));
+    }
+  }
+
+  // Answer a question from a set of documents and append it as a chat turn.
+  async function runDocQA(question: string, set: typeof docCorpus) {
+    const qq = question.trim();
+    if (!qq) return;
+    if (!set.length) { toast.error("No documents to ask about yet. Run a search or attach studies."); return; }
+    setInput("");
+    const idx = qaTurns.length;
+    setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true }]);
+    try {
+      const r = await AIService.askDocuments(qq, set.map(d => ({ id: d.id, title: d.title, text: d.text.slice(0, 4000) })));
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: r.answer, sources: r.documents, busy: false } : x));
+    } catch (e: any) {
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: e?.message || "Sorry, that failed. Please try again.", busy: false } : x));
+    }
+  }
   const [refining, setRefining] = useState(false);
   const [refinement, setRefinement] = useState<null | {
     field: "population" | "intervention" | "comparator" | "outcome";
@@ -727,6 +940,35 @@ export function HomePage() {
     const t = text.trim();
     if (!t) return;
     setInput("");
+
+    // Route every message to the lightest tool so a command like "summarize" or a
+    // general question doesn't kick off the full clarify + PICO + retrieval
+    // pipeline. Only a genuine search goal runs that. Skipped for refinements
+    // (skipClarify), which are always a deliberate search action.
+    if (!opts.skipClarify) {
+      let intent: "documents" | "search" | "chat" = "search";
+      try {
+        intent = await AIService.routeIntent(t, docCorpus.length > 0);
+      } catch {
+        intent = docCorpus.length > 0 && /\?\s*$/.test(t) ? "documents" : "search";
+      }
+      if (intent === "documents") {
+        // Focus on freshly-attached documents when present, else the whole corpus.
+        const set = pendingDocs.length ? pendingDocs : docCorpus;
+        if (set.length > 0) { setPendingDocIds([]); await runDocQA(t, set); return; }
+        // Nothing to act on yet — answer conversationally instead of retrieving.
+        await runChat(t);
+        return;
+      }
+      if (intent === "chat") {
+        // If they just attached something, act on it rather than replying generically.
+        if (pendingDocs.length) { setPendingDocIds([]); await runDocQA(t, pendingDocs); return; }
+        await runChat(t);
+        return;
+      }
+      // Genuine search: newly-attached docs stay in the corpus but lose "focus".
+      setPendingDocIds([]);
+    }
 
     // 0. Ask the user to disambiguate underspecified PICO elements BEFORE the
     //    search runs. The system used to silently infer these, which caused
@@ -1030,6 +1272,43 @@ export function HomePage() {
         </div>
       ))}
 
+      {/* Document Q&A turns, answered by the main chat and shown inline. */}
+      {qaTurns.map((turn, i) => (
+        <div key={`qa-${i}`} className="space-y-3">
+          <div className="flex justify-end">
+            <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2 max-w-2xl">{turn.question}</div>
+          </div>
+          <Card className="p-4">
+            {turn.busy ? (
+              <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Reading your documents…</div>
+            ) : (
+              <div className="space-y-2">
+                <div className="text-sm leading-relaxed space-y-1.5 text-foreground/90">
+                  {renderAnswer(turn.answer, n => { const src = turn.sources.find(x => x.n === n); if (src) openDocPreview(src.id); })}
+                </div>
+                {(() => {
+                  const cited = new Set((turn.answer.match(/\[(\d+)\]/g) || []).map(m => Number(m.replace(/[^0-9]/g, ""))));
+                  const shown = cited.size ? turn.sources.filter(x => cited.has(x.n)) : [];
+                  return shown.length ? (
+                    <div className="text-xs text-muted-foreground pt-2 border-t flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                      <span className="font-medium">Sources:</span>
+                      {shown.map(src => (
+                        <button key={src.n} type="button" onClick={() => openDocPreview(src.id)}
+                          style={{ fontSize: "inherit" }}
+                          className="text-primary hover:underline text-left whitespace-normal break-words max-w-full" title="Preview this document">
+                          [{src.n}] {src.title}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null;
+                })()}
+              </div>
+            )}
+          </Card>
+        </div>
+      ))}
+
+
       {analyzing && task && (
         <AnalysisProgress
           stages={task.stages as Stage[]}
@@ -1204,8 +1483,24 @@ export function HomePage() {
       <div className={`fixed bottom-0 left-72 z-30 px-6 py-4 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
         <div className="max-w-4xl mx-auto pointer-events-auto">
           <input ref={attachRef} type="file" multiple
-            accept=".pdf,.docx,.doc,.txt,.md,.csv,.tsv,.xlsx,.xls,.ris,.bib,.nbib" className="hidden"
+            accept={ACCEPT_ATTR} className="hidden"
             onChange={e => { if (e.target.files?.length) studyImport.importFiles(Array.from(e.target.files)); e.currentTarget.value = ""; }} />
+          {/* Freshly-attached documents that will be included with the next message. */}
+          {pendingDocs.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 mb-2 px-1">
+              {pendingDocs.map(d => (
+                <span key={d.id} className="inline-flex items-center gap-1 max-w-[16rem] bg-primary/10 text-primary border border-primary/20 rounded-full pl-2 pr-1 py-0.5 text-xs">
+                  <Paperclip className="size-3 shrink-0" />
+                  <span className="truncate">{d.title}</span>
+                  <button type="button" onClick={() => setPendingDocIds(prev => prev.filter(x => x !== d.id))}
+                    className="shrink-0 rounded-full hover:bg-primary/20 p-0.5" title="Don't include this in the next message">
+                    <X className="size-3" />
+                  </button>
+                </span>
+              ))}
+              <span className="inline-flex items-center text-xs text-muted-foreground px-1">will be included in your next message</span>
+            </div>
+          )}
           <form onSubmit={(e) => { e.preventDefault(); handleSubmit(input); }}
             className="flex gap-2 items-center bg-card/95 backdrop-blur border rounded-full shadow-lg pl-2 pr-2 py-2">
             <Button type="button" size="icon" variant="ghost" className="rounded-full shrink-0 size-9"
@@ -1222,25 +1517,79 @@ export function HomePage() {
             <Input value={input} onChange={e => setInput(e.target.value)}
               placeholder="Ask a question or refine your research goal..."
               className="flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0 px-0" />
-            {s.history.length > 0 && (
-            <Button
-              type="button"
-              size="sm"
-              variant="ghost"
-              onClick={suggestRefinement}
-              disabled={refining || analyzing}
-              className="rounded-full"
-              title="Get a clarifying question to refine your search"
-            >
-              <Wand2 className="size-4 mr-1.5" />{refining ? "…" : "Refine"}
-            </Button>
-          )}
           <Button type="submit" disabled={analyzing || !input.trim()} className="rounded-full"><Send className="size-4 mr-2" />Send</Button>
           </form>
         </div>
       </div>
 
       <AttachedStudies open={attachOpen} onOpenChange={setAttachOpen} studyImport={studyImport} />
+
+      {/* Preview of a cited source document — the actual file (PDF / text) when it
+          can be rendered inline, otherwise the extracted text with a download. */}
+      <Dialog open={!!previewDoc} onOpenChange={o => { if (!o) setPreviewDoc(null); }}>
+        <DialogContent className="sm:max-w-6xl w-[95vw] h-[92vh] flex flex-col p-5 gap-3">
+          <DialogHeader className="pr-8 shrink-0">
+            <DialogTitle className="text-base leading-snug">{previewDoc?.title}</DialogTitle>
+          </DialogHeader>
+          <div className="flex items-center justify-between gap-2 shrink-0">
+            {previewDoc?.fileInline ? (
+              <div className="inline-flex rounded-md border p-0.5 text-xs">
+                {(["doc", "text"] as const).map(mode => (
+                  <button key={mode} type="button" onClick={() => setPreviewMode(mode)}
+                    className={`px-2.5 h-6 rounded font-medium transition-colors ${previewMode === mode ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}>
+                    {mode === "doc" ? "Document" : "Text"}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                {previewDoc?.fileUrl ? "Extracted text — original can't render inline" : "Extracted text"}
+              </span>
+            )}
+            <div className="flex items-center gap-3 shrink-0">
+              {/* No original captured for this uploaded doc (added before it was
+                  stored) — let the user re-attach it to see the real document. */}
+              {previewDoc?.uploaded && !previewDoc?.fileUrl && !previewDoc?.html && (
+                <button type="button" onClick={() => previewDoc && promptReattach(previewDoc.id)}
+                  className="text-xs text-primary hover:underline font-medium">Show original document ↥</button>
+              )}
+              {previewDoc?.fileUrl && (
+                <a href={previewDoc.fileUrl} download={previewDoc.title} className="text-xs text-primary hover:underline">Download original ↧</a>
+              )}
+              {previewDoc?.url && /^https?:\/\//.test(previewDoc.url) && (
+                <a href={previewDoc.url} target="_blank" rel="noreferrer" className="text-xs text-primary hover:underline">Open source ↗</a>
+              )}
+            </div>
+          </div>
+          {previewDoc?.fileInline && previewMode === "doc" ? (
+            previewDoc.html ? (
+              <div className="flex-1 overflow-auto rounded-md border bg-white">
+                <div className="doc-preview mx-auto max-w-3xl px-10 py-8 text-[15px] leading-relaxed text-neutral-800"
+                  dangerouslySetInnerHTML={{ __html: previewDoc.html }} />
+              </div>
+            ) : (
+              <iframe title="Document preview" src={previewDoc.fileUrl} className="flex-1 w-full rounded-md border bg-white" />
+            )
+          ) : (
+            <div className="flex-1 min-h-0 flex flex-col gap-2">
+              {previewDoc?.uploaded && !previewDoc?.fileUrl && !previewDoc?.html && (
+                <div className="shrink-0 text-xs text-muted-foreground bg-muted/50 border rounded-md px-3 py-2">
+                  The original file for this document was not stored (it was added before file preview was available).
+                  <button type="button" onClick={() => previewDoc && promptReattach(previewDoc.id)}
+                    className="ml-1 text-primary hover:underline font-medium">Show original document</button> to view it as the real file.
+                </div>
+              )}
+              <div className="overflow-auto text-sm whitespace-pre-wrap leading-relaxed text-foreground/90 flex-1 rounded-md border p-4">
+                {previewDoc?.text}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Hidden picker used to re-attach an uploaded doc's original file. */}
+      <input ref={reattachRef} type="file" accept={ACCEPT_ATTR} className="hidden"
+        onChange={e => onReattachPicked(e.target.files?.[0])} />
     </div>
   );
 }
