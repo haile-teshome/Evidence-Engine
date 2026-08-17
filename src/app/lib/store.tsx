@@ -71,11 +71,15 @@ export type HistoryEntry = {
   inclusion: string[];
   exclusion: string[];
   adversarial_query: string;
+  ts?: number;                   // creation time, so search and chat turns can be interleaved chronologically
+  // Deep-scan adaptive round: the supplementary query the agent ran (or the user
+  // edited), why, and what it added. Present only when deep scan was on.
+  deep_scan?: { query: string; rationale: string; tactic: string; retrieved: number; added: number };
 };
 
 // A document Q&A exchange on Home: a question answered from the documents in
 // play, with the sources cited. Persisted so it survives a refresh like history.
-export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean };
+export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean; ts?: number };
 
 export type ExtractedTable = { title: string; type: string; data: string[][]; caption?: string };
 export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[] };
@@ -95,6 +99,7 @@ export type ScreeningPass = {
   excluded: number;
   durationSec: number;
   results: ScreenResult[];       // snapshot of the full set (for restore/compare)
+  label?: string;                // optional user nickname for the run
 };
 
 export type TaskStage = {
@@ -229,6 +234,10 @@ type Ctx = {
   // Snowball
   snowballResults: any[] | null; setSnowballResults: (v: any[] | null) => void;
   snowballScreened: ScreenResult[] | null; setSnowballScreened: (v: ScreenResult[] | null) => void;
+  // Citation ids the reviewer has selected to carry forward. Persisted (and null
+  // until first seeded) so the selection survives tab switches and isn't re-seeded
+  // from the AI verdicts on every remount.
+  snowballChosen: string[] | null; setSnowballChosen: React.Dispatch<React.SetStateAction<string[] | null>>;
 
   // Full-text acquisition
   fullTexts: Record<string, FullTextRecord>; setFullTexts: React.Dispatch<React.SetStateAction<Record<string, FullTextRecord>>>;
@@ -418,6 +427,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const [snowballResults, setSnowballResults] = useState<any[] | null>(null);
   const [snowballScreened, setSnowballScreened] = useState<ScreenResult[] | null>(null);
+  const [snowballChosen, setSnowballChosen] = useState<string[] | null>(null);
 
   const [extractedPapers, setExtractedPapers] = useState<ExtractedPaper[] | null>(null);
   const [fullTexts, setFullTexts] = useState<Record<string, FullTextRecord>>({});
@@ -517,7 +527,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     abstractOverrides,
     fullTextOverrides,
     rerankThreshold, rerankResults,
-    results, screeningArchive, fullTextResults, snowballResults, snowballScreened, extractedPapers, prisma,
+    results, screeningArchive, screeningDuration, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, extractedPapers, prisma,
     // Planning (search-design) outputs + per-tab run results so a session keeps
     // everything that's been run, including acquired full texts. The local
     // autosave drops fullTexts only as a fallback if it would exceed the
@@ -580,9 +590,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setRerankResults(prev => pick(d.rerankResults, prev));
     setResults(prev => pick(d.results, prev));
     setScreeningArchive(prev => pick(d.screeningArchive, prev, []) ?? []);
+    // Run timings. On an authoritative load the incoming session is the truth,
+    // so take its value (0 if the session predates this field). On a
+    // reconciliation, a positive incoming duration fills in a missing one but a
+    // 0/absent value must not overwrite a real measurement the store already has.
+    if (authoritative) setScreeningDuration(typeof d.screeningDuration === "number" ? d.screeningDuration : 0);
+    else if (typeof d.screeningDuration === "number" && d.screeningDuration > 0) setScreeningDuration(d.screeningDuration);
     setFullTextResults(prev => pick(d.fullTextResults, prev));
+    if (authoritative) setFtDuration(typeof d.ftDuration === "number" ? d.ftDuration : 0);
+    else if (typeof d.ftDuration === "number" && d.ftDuration > 0) setFtDuration(d.ftDuration);
     setSnowballResults(prev => pick(d.snowballResults, prev));
     setSnowballScreened(prev => pick(d.snowballScreened, prev));
+    setSnowballChosen(Array.isArray(d.snowballChosen) ? d.snowballChosen : null);
     setExtractedPapers(prev => pick(d.extractedPapers, prev));
     if (d.prisma) setPrisma(d.prisma);
     // Planning + per-tab run outputs.
@@ -642,7 +661,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
       searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive, fullTextResults,
-      snowballResults, snowballScreened, extractedPapers, prisma,
+      snowballResults, snowballScreened, snowballChosen, extractedPapers, prisma,
       simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
       writingEnriched, writingSummary, writingMethodsMain,
       currentSessionId, currentSessionTitle]);
@@ -689,7 +708,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setMetaUseKnappHartung(false);
     setMetaExtractions(null); setMetaRun(null);
     setResults(null); setScreeningArchive([]); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
-    setSnowballResults(null); setSnowballScreened(null); setExtractedPapers(null);
+    setSnowballResults(null); setSnowballScreened(null); setSnowballChosen(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
     setWritingEnriched({}); setWritingSummary(""); setWritingMethodsMain("");
     setPrisma({ identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0, excluded_total: 0, exclusion_breakdown: {}, included_final: 0 });
@@ -717,7 +736,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     metaTau2Method, setMetaTau2Method, metaUseKnappHartung, setMetaUseKnappHartung,
     metaExtractions, setMetaExtractions, metaRun, setMetaRun,
     results, setResults, screeningArchive, setScreeningArchive, screeningDuration, setScreeningDuration, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
-    snowballResults, setSnowballResults, snowballScreened, setSnowballScreened,
+    snowballResults, setSnowballResults, snowballScreened, setSnowballScreened, snowballChosen, setSnowballChosen,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,
     writingMethodsMain, setWritingMethodsMain,

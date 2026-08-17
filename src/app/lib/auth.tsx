@@ -1,108 +1,82 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
-import { apiFetch, REVIEWER_ID_KEY, DEFAULT_REVIEWER_ID } from "./backendClient";
-import { useBackendReady } from "./backendReady";
+import { apiFetch, getAuthToken, setAuthSession, clearAuthSession } from "./backendClient";
 
-// Local reviewer profiles replace cloud accounts. A "user" is just a named
-// profile (with an optional email) stored in the local backend. There are no
-// passwords or sign-in. You pick or create a profile, and its id scopes your
-// sessions and per-reviewer decisions in multi-reviewer projects.
+// Local accounts: each user signs up with an email + password (hashed on the
+// backend) and logs in to their own account. The account id scopes all sessions
+// and per-reviewer decisions, exactly as the old profile id did, so projects and
+// autosave keep working per account. There is no cloud; everything is local.
 
 export type AuthUser = { id: string; email: string; name?: string };
-
-const DEFAULT_USER: AuthUser = { id: DEFAULT_REVIEWER_ID, email: "", name: "You" };
+export type AuthStatus = "loading" | "authed" | "anon";
 
 type AuthCtx = {
   user: AuthUser | null;
-  loading: boolean;
-  reviewers: AuthUser[];
-  addReviewer: (name: string, email?: string) => Promise<void>;
-  selectReviewer: (id: string) => void;
-  signOut: () => void;                 // switch back to the default local profile
-  refreshReviewers: () => Promise<void>;
+  status: AuthStatus;
+  login: (email: string, password: string) => Promise<void>;
+  signup: (email: string, password: string, name?: string) => Promise<void>;
+  signOut: () => Promise<void>;
 };
 
 const Ctx = createContext<AuthCtx | null>(null);
 
-async function loadReviewers(): Promise<AuthUser[]> {
-  try {
-    const r = await apiFetch("/reviewers");
-    const list: AuthUser[] = (r.reviewers || []).map((x: any) => ({
-      id: x.id,
-      email: x.email || "",
-      name: x.name || "Reviewer",
-    }));
-    return list.length ? list : [DEFAULT_USER];
-  } catch {
-    // Backend not up yet (or offline). Fall back to the default profile so the
-    // app is always usable locally.
-    return [DEFAULT_USER];
-  }
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(DEFAULT_USER);
-  const [reviewers, setReviewers] = useState<AuthUser[]>([DEFAULT_USER]);
-  const [loading, setLoading] = useState(true);
-  const backendReady = useBackendReady();
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [status, setStatus] = useState<AuthStatus>("loading");
 
-  // Load reviewer profiles on mount, and again once the backend finishes
-  // starting (on a cold start the first call falls back to the default profile).
+  // Restore the session on mount by validating any stored token with the backend.
   useEffect(() => {
     let active = true;
     (async () => {
-      const list = await loadReviewers();
-      if (!active) return;
-      setReviewers(list);
-      setUser(prev => {
-        // Keep the currently-selected profile; just refresh its record.
-        let savedId = prev?.id || DEFAULT_REVIEWER_ID;
-        try { savedId = prev?.id || localStorage.getItem(REVIEWER_ID_KEY) || DEFAULT_REVIEWER_ID; } catch { /* ignore */ }
-        const found = list.find(r => r.id === savedId) || list.find(r => r.id === DEFAULT_REVIEWER_ID) || list[0] || DEFAULT_USER;
-        try { localStorage.setItem(REVIEWER_ID_KEY, found.id); } catch { /* ignore */ }
-        return found;
-      });
-      setLoading(false);
+      if (!getAuthToken()) { if (active) setStatus("anon"); return; }
+      try {
+        const r = await apiFetch("/auth/me");
+        if (!active) return;
+        setUser(r.user);
+        setStatus("authed");
+      } catch {
+        clearAuthSession();
+        if (active) setStatus("anon");
+      }
     })();
     return () => { active = false; };
-  }, [backendReady]);
+  }, []);
 
-  async function refreshReviewers() {
-    setReviewers(await loadReviewers());
+  async function adopt(r: { token: string; user: AuthUser }) {
+    setAuthSession(r.token, r.user.id);
+    setUser(r.user);
+    setStatus("authed");
   }
 
-  function selectReviewer(id: string) {
-    const found = reviewers.find(r => r.id === id) || DEFAULT_USER;
-    setUser(found);
-    try { localStorage.setItem(REVIEWER_ID_KEY, found.id); } catch { /* ignore */ }
+  async function login(email: string, password: string) {
+    const r = await apiFetch("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+    await adopt(r);
   }
 
-  async function addReviewer(name: string, email?: string) {
-    const r = await apiFetch("/reviewers", { method: "POST", body: JSON.stringify({ name, email: email || "" }) });
-    const nu: AuthUser = { id: r.reviewer.id, email: r.reviewer.email || "", name: r.reviewer.name };
-    setReviewers(await loadReviewers());
-    setUser(nu);
-    try { localStorage.setItem(REVIEWER_ID_KEY, nu.id); } catch { /* ignore */ }
+  async function signup(email: string, password: string, name?: string) {
+    const r = await apiFetch("/auth/signup", { method: "POST", body: JSON.stringify({ email, password, name: name || "" }) });
+    await adopt(r);
   }
 
-  function signOut() {
-    selectReviewer(DEFAULT_REVIEWER_ID);
+  async function signOut() {
+    try { await apiFetch("/auth/logout", { method: "POST" }); } catch { /* ignore */ }
+    clearAuthSession();
+    setUser(null);
+    setStatus("anon");
   }
 
   return (
-    <Ctx.Provider value={{ user, loading, reviewers, addReviewer, selectReviewer, signOut, refreshReviewers }}>
+    <Ctx.Provider value={{ user, status, login, signup, signOut }}>
       {children}
     </Ctx.Provider>
   );
 }
 
 const noopAuth: AuthCtx = {
-  user: DEFAULT_USER,
-  loading: false,
-  reviewers: [DEFAULT_USER],
-  addReviewer: async () => { throw new Error("AuthProvider missing"); },
-  selectReviewer: () => { /* noop */ },
-  signOut: () => { /* noop */ },
-  refreshReviewers: async () => { /* noop */ },
+  user: null,
+  status: "anon",
+  login: async () => { throw new Error("AuthProvider missing"); },
+  signup: async () => { throw new Error("AuthProvider missing"); },
+  signOut: async () => { /* noop */ },
 };
 
 export function useAuth() {

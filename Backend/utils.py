@@ -1,4 +1,5 @@
 import re
+import os
 import json
 import streamlit as st
 from typing import List, Dict, Any, Tuple, Optional, Callable
@@ -57,58 +58,68 @@ class AIService:
         return paper.id, ScreeningResult(decision="EXCLUDE", reason="Failed to parse AI response")
 
     @staticmethod
+    def _cloud_key(provider: str, explicit: str = "") -> str:
+        """Resolve an LLM provider key, most specific first:
+          1. explicit arg (thread-passed keys),
+          2. per-request header (browser passphrase-encrypted mode, unlocked),
+          3. OS keychain (device-keychain mode),
+          4. backend environment variable.
+        Keys are used only to construct the model; this backend never persists
+        them beyond the OS keychain the user explicitly opted into."""
+        from request_creds import get_cred
+        import keychain
+        env = {
+            "openai": Config.OPENAI_API_KEY,
+            "anthropic": Config.ANTHROPIC_API_KEY,
+            "google": Config.GEMINI_API_KEY,
+        }.get(provider, "")
+        return (explicit or "").strip() or get_cred(provider) or keychain.get_key(provider) or env
+
+    @staticmethod
+    def _build_model(model_name: str, keys: dict | None = None):
+        """Construct a chat model for `model_name`. Cloud providers (gpt/claude/
+        gemini) require a key from the request or environment; anything else runs
+        locally via Ollama and needs no key. Returns None if a required cloud key
+        is missing, so callers surface an 'unavailable' message."""
+        keys = keys or {}
+        name_lower = (model_name or "").lower()
+        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        try:
+            if "gpt" in name_lower:
+                key = AIService._cloud_key("openai", keys.get("openai", ""))
+                if not key:
+                    print("[get_model] OpenAI API key not provided for", model_name)
+                    return None
+                return ChatOpenAI(model=model_name, api_key=key, temperature=0)
+            if "claude" in name_lower:
+                key = AIService._cloud_key("anthropic", keys.get("anthropic", ""))
+                if not key:
+                    print("[get_model] Anthropic API key not provided for", model_name)
+                    return None
+                return ChatAnthropic(model=model_name, api_key=key, temperature=0)
+            if "gemini" in name_lower:
+                key = AIService._cloud_key("google", keys.get("google", ""))
+                if not key:
+                    print("[get_model] Google API key not provided for", model_name)
+                    return None
+                return ChatGoogleGenerativeAI(model=model_name, api_key=key, temperature=0)
+            # DEFAULT / LOCAL: Ollama (llama3, mistral, qwen, LEADS, …) — no key.
+            return ChatOllama(model=model_name, temperature=0, base_url=ollama_base)
+        except Exception as e:
+            print(f"[get_model] AI connection error for {model_name}: {e}")
+            return None
+
+    @staticmethod
     def get_model_with_keys(model_name: str, keys: dict):
-        """Thread-safe model initializer that doesn't rely on st.session_state."""
-        name_lower = model_name.lower()
-        if "gpt" in name_lower:
-            return ChatOpenAI(model=model_name, api_key=keys.get('openai'), temperature=0)
-        elif "claude" in name_lower:
-            return ChatAnthropic(model=model_name, api_key=keys.get('anthropic'), temperature=0)
-        # Add Gemini and Ollama logic following the same pattern...
-        return ChatOllama(model=model_name, temperature=0, base_url="http://localhost:11434")
-        
+        """Thread-safe model initializer. Prefers the explicit `keys` dict, then
+        per-request / environment keys. Safe to call from worker threads."""
+        return AIService._build_model(model_name, keys)
+
     @staticmethod
     def get_model(model_name: str):
-        """Initializes model based on selection with user-provided API keys."""
-        name_lower = model_name.lower()
-        try:
-            # Import here to avoid circular imports
-            import streamlit as st
-            
-            # Check for Cloud Providers first with user-provided API keys
-            if "gpt" in name_lower:
-                # Use user-provided API key from session state or config
-                api_key = st.session_state.get('openai_api_key', Config.OPENAI_API_KEY)
-                if not api_key:
-                    st.error("🔑 OpenAI API key required for GPT models. Please set it in the sidebar.")
-                    return None
-                return ChatOpenAI(model=model_name, api_key=api_key, temperature=0)
-            elif "claude" in name_lower:
-                # Use user-provided API key from session state or config
-                api_key = st.session_state.get('anthropic_api_key', Config.ANTHROPIC_API_KEY)
-                if not api_key:
-                    st.error("🔑 Anthropic API key required for Claude models. Please set it in the sidebar.")
-                    return None
-                return ChatAnthropic(model=model_name, api_key=api_key, temperature=0)
-            elif "gemini" in name_lower:
-                # Use user-provided API key from session state or config
-                api_key = st.session_state.get('gemini_api_key', Config.GEMINI_API_KEY)
-                if not api_key:
-                    st.error("🔑 Google Gemini API key required for Gemini models. Please set it in the sidebar.")
-                    return None
-                return ChatGoogleGenerativeAI(model=model_name, api_key=api_key, temperature=0)
-            
-            # DEFAULT/LOCAL: Use ChatOllama for everything else (like llama3, mistral, phi)
-            # We add a base_url to ensure it connects to your local instance
-            return ChatOllama(
-                model=model_name, 
-                temperature=0,
-                base_url="http://localhost:11434" # Explicitly point to local Ollama
-            )
-        except Exception as e:
-            # STOP SILENCING ERRORS: Tell the user why it failed
-            st.error(f"🤖 AI Connection Error: {str(e)}")
-            return None
+        """Initialize a model. Cloud keys come from the user's per-request headers
+        (stored only in their browser) or backend environment variables."""
+        return AIService._build_model(model_name, None)
 
     # @staticmethod
     # def _extract_json(text: str) -> Optional[Any]:
@@ -632,6 +643,56 @@ the phrase "Mediterranean diet" MUST appear in intervention_synonyms exactly as 
         if not blocks:
             return ""
         return " AND ".join(blocks)
+
+    @staticmethod
+    def propose_supplementary_query(
+        pico: PICOCriteria,
+        current_query: str,
+        inclusion: List[str],
+        exclusion: List[str],
+        kept_titles: List[str],
+        model_name: str,
+    ) -> Dict[str, Any]:
+        """Given the current search and the relevant studies already found,
+        propose ONE supplementary boolean query that would surface additional
+        eligible studies the first query likely missed. Powers the single
+        adaptive round of the Home "deep scan": it does not replace the primary
+        documented search, it complements it (logged as a supplementary search)."""
+        model = AIService.get_model(model_name)
+        titles_text = "\n".join(f"- {t}" for t in (kept_titles or [])[:15]) or "(none found yet)"
+        incl = "; ".join(inclusion or []) or "(none specified)"
+        excl = "; ".join(exclusion or []) or "(none specified)"
+        prompt = f"""You are a systematic-review search specialist. A first search has already run and returned the relevant studies listed below. Propose ONE supplementary PubMed-style boolean query that would surface ADDITIONAL eligible studies the first query most likely MISSED — for example synonyms or spelling variants, a related intervention, an under-covered comparator, an adjacent population, or a study design not yet represented. Do not simply restate the original query.
+
+PICO:
+- Population: {pico.population or 'any'}
+- Intervention: {pico.intervention or 'any'}
+- Comparator: {pico.comparator or 'any'}
+- Outcome: {pico.outcome or 'any'}
+
+Eligibility (include): {incl}
+Eligibility (exclude): {excl}
+
+Original query:
+{current_query}
+
+Relevant studies already found:
+{titles_text}
+
+Return ONLY JSON in this shape:
+{{"query": "<a well-formed boolean query>", "rationale": "<one sentence naming the coverage gap it targets>", "tactic": "<2-4 word label, e.g. 'synonym expansion'>"}}"""
+        try:
+            response = model.invoke([HumanMessage(content=prompt)])
+            data = AIService._extract_json(response.content)
+            if isinstance(data, dict) and str(data.get("query", "")).strip():
+                return {
+                    "query": str(data.get("query", "")).strip(),
+                    "rationale": str(data.get("rationale", "")).strip(),
+                    "tactic": str(data.get("tactic", "")).strip(),
+                }
+        except Exception as e:
+            print(f"Supplementary query error: {e}")
+        return {"query": "", "rationale": "", "tactic": ""}
 
     @staticmethod
     def _adapt_query_for_source(query: str, source: str) -> str:

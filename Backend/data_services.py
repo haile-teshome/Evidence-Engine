@@ -286,10 +286,14 @@ class SemanticScholarService:
             "limit": max_results,
             "fields": "title,abstract,paperId"
         }
-        headers = {"x-api-key": Config.SEMANTIC_SCHOLAR_API_KEY} if hasattr(Config, 'SEMANTIC_SCHOLAR_API_KEY') else {}
-        
+        # Semantic Scholar works fully keyless; a key (per-request or env) only
+        # raises the rate limit, so it is applied when present and skipped otherwise.
+        from request_creds import get_cred
+        s2_key = get_cred("semantic_scholar") or getattr(Config, "SEMANTIC_SCHOLAR_KEY", "")
+        headers = {"x-api-key": s2_key} if s2_key else {}
+
         try:
-            url = Config.SEMANTIC_SCHOLAR_API_URL if hasattr(Config, 'SEMANTIC_SCHOLAR_API_URL') else "https://api.semanticscholar.org/graph/v1/paper/search"
+            url = getattr(Config, "SEMANTIC_SCHOLAR_URL", "https://api.semanticscholar.org/graph/v1/paper/search")
             # Use the throttled_request helper instead of requests.get
             response = throttled_request(url, params=params, headers=headers)
             data = response.json()
@@ -315,10 +319,17 @@ class COREService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         params = {"q": query, "limit": max_results}
-        headers = {"Authorization": f"Bearer {Config.CORE_API_KEY}"} if hasattr(Config, 'CORE_API_KEY') else {}
-        
+        # CORE is the only source that genuinely requires a key. Without one
+        # (per-request or env) we skip it quietly so the rest of the search still
+        # runs, rather than erroring on a 401.
+        from request_creds import get_cred
+        core_key = get_cred("core") or getattr(Config, "CORE_API_KEY", "")
+        if not core_key:
+            return []
+        headers = {"Authorization": f"Bearer {core_key}"}
+
         try:
-            url = Config.CORE_API_URL if hasattr(Config, 'CORE_API_URL') else "https://api.core.ac.uk/v3/search/works"
+            url = getattr(Config, "CORE_API_URL", "https://api.core.ac.uk/v3/search/works")
             # Use the throttled_request helper
             response = throttled_request(url, params=params, headers=headers)
             data = response.json()

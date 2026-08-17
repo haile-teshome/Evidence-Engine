@@ -1,6 +1,8 @@
 // Real HTTP client for the Evidence Engine backend.
 // Mirrors the contract of `mockServices.ts` so pages stay unchanged.
 
+import { requestHeaders, type LlmProvider } from "./keystore";
+
 export type Pico = { population: string; intervention: string; comparator: string; outcome: string };
 export type Paper = { id: string; source: string; title: string; abstract: string; url: string; year?: number; authors?: string };
 
@@ -191,6 +193,25 @@ export const apiConfig: { model: string; baseUrl: string } = {
   baseUrl: (import.meta as any)?.env?.VITE_API_BASE_URL || "/api",
 };
 
+// ---------------------------------------------------------------------------
+// LLM provider keys are managed by the keystore (./keystore), which stores them
+// either in the OS keychain (via the backend) or AES-GCM-encrypted in this
+// browser. Requests attach whatever the keystore exposes for the current mode.
+// ---------------------------------------------------------------------------
+
+// Which provider key a given model needs, or null for local (no key) models.
+export function providerForModel(model: string): LlmProvider | null {
+  const m = (model || "").toLowerCase();
+  if (m.includes("gpt")) return "openai";
+  if (m.includes("claude")) return "anthropic";
+  if (m.includes("gemini")) return "google";
+  return null;
+}
+
+export function keyHeaders(): Record<string, string> {
+  return requestHeaders();
+}
+
 const AGENTS = ["Population Agent", "Intervention Agent", "Outcome Agent", "Study Design Agent"];
 const SOURCES_POOL = [
   "PubMed",
@@ -209,7 +230,7 @@ const SOURCES_POOL = [
 async function postJSON<T = any>(path: string, body: any, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${apiConfig.baseUrl}${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...keyHeaders() },
     body: JSON.stringify(body ?? {}),
     signal,
   });
@@ -225,7 +246,7 @@ async function postJSON<T = any>(path: string, body: any, signal?: AbortSignal):
 }
 
 async function getJSON<T = any>(path: string, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(`${apiConfig.baseUrl}${path}`, { method: "GET", signal });
+  const res = await fetch(`${apiConfig.baseUrl}${path}`, { method: "GET", headers: keyHeaders(), signal });
   const text = await res.text();
   let json: any = null;
   try { json = text ? JSON.parse(text) : null; } catch { /* non-json */ }
@@ -320,6 +341,23 @@ export const AIService = {
     return r.query || "";
   },
 
+  // One adaptive "deep scan" round: given the relevant studies found so far,
+  // propose a supplementary query targeting coverage the first search missed.
+  async proposeSupplementaryQuery(
+    pico: Pico,
+    query: string,
+    inclusion: string[],
+    exclusion: string[],
+    keptTitles: string[],
+    signal?: AbortSignal,
+  ): Promise<{ query: string; rationale: string; tactic: string }> {
+    return postJSON<{ query: string; rationale: string; tactic: string }>(
+      "/search/supplementary",
+      { pico, query, inclusion, exclusion, kept_titles: keptTitles, model: apiConfig.model },
+      signal,
+    );
+  },
+
   async getPicoSuggestion(goal: string, category: string): Promise<string[]> {
     const r = await postJSON<{ suggestions: string[] }>("/pico/brainstorm", {
       goal: goal || "", element: category,
@@ -362,18 +400,39 @@ export const AIService = {
 
   // Pre-fill a structured extraction template from a paper's full text in one
   // call. Returns { field_id: value }; a first draft the reviewer confirms.
+  // Back-compat: returns just the { field_id: value } map (a first draft).
   async extractFields(
     text: string,
     fields: { id: string; label: string; type: string; options?: string[]; description?: string }[],
     title = "",
     signal?: AbortSignal,
+    tables = "",
   ): Promise<Record<string, any>> {
-    const r = await postJSON<{ values: Record<string, any> }>(
+    const r = await this.extractFieldsRich(text, fields, title, signal, tables);
+    return r.values;
+  },
+
+  // Rich variant: values PLUS per-field provenance (source quote, confidence,
+  // needs_review) so the reviewer can verify AI-filled values at a glance.
+  async extractFieldsRich(
+    text: string,
+    fields: { id: string; label: string; type: string; options?: string[]; description?: string }[],
+    title = "",
+    signal?: AbortSignal,
+    tables = "",
+  ): Promise<{
+    values: Record<string, any>;
+    fields: {
+      id: string; label: string; type: string; value: any;
+      source_quote: string; confidence: "high" | "low" | "none"; needs_review: boolean;
+    }[];
+  }> {
+    const r = await postJSON<{ values: Record<string, any>; fields?: any[] }>(
       "/extract/fields",
-      { text, fields, title, model: apiConfig.model },
+      { text, fields, title, tables, model: apiConfig.model },
       signal,
     );
-    return r.values || {};
+    return { values: r.values || {}, fields: r.fields || [] };
   },
 
   async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal): Promise<ScreenResult> {
@@ -743,6 +802,66 @@ export const DataAggregator = {
       },
       signal,
     );
+  },
+
+  // Streaming rerank: same result as rerankByRelevance, but reports progress as
+  // each article finishes scoring (done/total) so the caller can show which
+  // article it's on. Throws if the stream can't be established; callers should
+  // fall back to the blocking rerankByRelevance for non-abort failures.
+  async rerankByRelevanceStream(
+    papers: Paper[],
+    pico: Pico,
+    inclusion: string[] = [],
+    exclusion: string[] = [],
+    threshold = -0.2,
+    topK?: number,
+    signal?: AbortSignal,
+    quantileKeep?: number,
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<RerankResult> {
+    const res = await fetch(`${apiConfig.baseUrl}/papers/rerank/stream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        papers, pico, inclusion, exclusion,
+        threshold,
+        quantile_keep: quantileKeep,
+        top_k: topK,
+        model: apiConfig.model,
+      }),
+      signal,
+    });
+    if (!res.ok || !res.body) throw new Error(`rerank stream failed (${res.status})`);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let result: RerankResult | null = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const rawEv = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let event = "message";
+        let data = "";
+        for (const line of rawEv.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        let parsed: any;
+        try { parsed = JSON.parse(data); } catch { continue; }
+        if (event === "progress") onProgress?.(parsed.done || 0, parsed.total || 0);
+        else if (event === "done") result = parsed;
+        else if (event === "error") throw new Error(parsed?.message || "rerank stream error");
+      }
+    }
+    if (!result) throw new Error("rerank stream ended without result");
+    return result;
   },
 };
 

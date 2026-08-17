@@ -267,7 +267,15 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
   return (
     <>
       <div className="border-b p-4 space-y-3.5 bg-gradient-to-b from-muted/40 to-transparent">
-        <div className="font-medium leading-snug">{paper.Paper_Title}</div>
+        {paper.Paper_URL ? (
+          <a href={paper.Paper_URL} target="_blank" rel="noreferrer"
+             className="group block font-medium leading-snug hover:text-primary transition-colors" title="Open the full article">
+            {paper.Paper_Title}
+            <ExternalLink className="inline size-3.5 ml-1.5 align-[-1px] opacity-40 group-hover:opacity-90 transition-opacity" />
+          </a>
+        ) : (
+          <div className="font-medium leading-snug">{paper.Paper_Title}</div>
+        )}
         <div className="flex items-stretch gap-4 sm:gap-6 flex-wrap">
           <InlineStat icon={FileText} value={paper.Source || "—"} label="Source" />
           <PaneDivider />
@@ -297,6 +305,9 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
                   <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">{t.type} · {t.data.length} row{t.data.length === 1 ? "" : "s"}</span>
                   <div className="flex items-center gap-1">
                     <CopyTableButton data={t.data} />
+                    <Button size="sm" variant="ghost" onClick={() => exportTable(paper, t, i, format)} className="h-7 px-2 text-muted-foreground" title={`Export ${fmtLabel}`}>
+                      <Download className="size-4 mr-1.5" />Export
+                    </Button>
                     <Button size="sm" variant="ghost" onClick={() => setMaxIdx(i)} className="h-7 px-2 text-muted-foreground" title="Maximize table">
                       <Maximize2 className="size-4 mr-1.5" />Expand
                     </Button>
@@ -306,14 +317,10 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
                   <GridTable data={t.data} />
                 </div>
                 {t.caption && <div className="text-xs italic text-muted-foreground leading-relaxed">{t.caption}</div>}
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  <Button variant="outline" onClick={() => exportTable(paper, t, i, format)}><Download className="size-4 mr-2" />Export {fmtLabel}</Button>
-                  {paper.Paper_URL && <a href={paper.Paper_URL} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 h-9 text-sm font-medium bg-primary text-primary-foreground rounded-lg shadow-sm hover:bg-primary/90 transition-colors active:scale-[0.98] motion-reduce:active:scale-100"><ExternalLink className="size-4" />View full article</a>}
-                </div>
               </TabsContent>
             ))}
           </Tabs>
-        ) : <Alert><AlertDescription>No tables found in this article.</AlertDescription></Alert>}
+        ) : <Alert><AlertDescription>No tables found in this article. Click the title above to open it and check for tables in figures or the full text.</AlertDescription></Alert>}
       </div>
 
       {/* Full-screen view of a single table. */}

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { motion } from "motion/react";
 import { useStore, TextExtractionResult, TextEvidenceItem } from "../lib/store";
 import { AIService } from "../lib/mockServices";
 import { Card } from "../components/ui/card";
@@ -34,12 +35,12 @@ const PRESETS = [
 type FormField = { id: string; label: string; type: string; options: string[]; description?: string };
 const slug = (x: string) => (x || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "field";
 const DEFAULT_FORM_FIELDS: FormField[] = [
-  { id: "design", label: "Study design", type: "text", options: [] },
-  { id: "sample_size", label: "Sample size", type: "number", options: [] },
-  { id: "population", label: "Population", type: "text", options: [] },
-  { id: "intervention", label: "Intervention", type: "text", options: [] },
-  { id: "outcome", label: "Primary outcome", type: "text", options: [] },
-  { id: "result", label: "Main result / effect size", type: "text", options: [] },
+  { id: "design", label: "Study design", type: "text", options: [], description: "the study design, e.g. randomized controlled trial, cohort, case-control, or cross-sectional survey" },
+  { id: "sample_size", label: "Sample size", type: "number", options: [], description: "the total number of participants analysed (N); check the abstract, methods, or a baseline/flow table" },
+  { id: "population", label: "Population", type: "text", options: [], description: "who was studied: age range, condition, and setting" },
+  { id: "intervention", label: "Intervention", type: "text", options: [], description: "the intervention or exposure studied; write 'none (observational)' if the study has no intervention" },
+  { id: "outcome", label: "Primary outcome", type: "text", options: [], description: "the primary outcome measure or main variable assessed" },
+  { id: "result", label: "Main result / effect size", type: "text", options: [], description: "the main quantitative finding WITH its value: a correlation coefficient (r), beta, odds/risk/hazard ratio, or mean difference, including its confidence interval or p-value if reported" },
 ];
 
 // Section → badge palette. Falls back to slate for unrecognised labels.
@@ -101,6 +102,7 @@ export function TextExtractionPage() {
   useEffect(() => { try { localStorage.setItem("ee:extract-form", JSON.stringify(fields)); } catch { /* ignore */ } }, [fields]);
   const [mode, setMode] = useState<"ask" | "form">("ask");
   const [formCollapsed, setFormCollapsed] = useState(false);
+  const [resultsCollapsed, setResultsCollapsed] = useState(false);
   const [openHints, setOpenHints] = useState<Set<string>>(new Set());
   const [deselected, setDeselected] = useState<Set<string>>(new Set());
   const [formBusy, setFormBusy] = useState(false);
@@ -202,7 +204,12 @@ export function TextExtractionPage() {
         await Promise.all(batch.map(async p => {
           setFormCurrent(p.title || "Untitled");   // in series this is exact; concurrent shows the batch
           try {
-            const values = await AIService.extractFields(p.text || "", spec, p.title || "");
+            // Feed extracted tables too — numeric results and effect sizes live
+            // in tables, not the prose. Big lever for sample-size/effect fields.
+            const tables = ((p as any).tables || [])
+              .map((t: any) => [t.caption, ...(t.rows || []).map((r: any[]) => r.join(" | "))].join("\n"))
+              .join("\n\n");
+            const values = await AIService.extractFields(p.text || "", spec, p.title || "", undefined, tables);
             rows.push({ paper_id: p.paper_id, title: p.title || "Untitled", values });
             setFormRows([...rows]);
           } catch { /* skip failed article */ }
@@ -357,11 +364,13 @@ export function TextExtractionPage() {
     <div className="space-y-3">
       {/* Mode toggle: free-text question vs a structured extraction form. */}
       <div className="inline-flex rounded-lg border bg-muted/40 p-0.5 text-sm">
-        <button onClick={() => setMode("ask")} className={`inline-flex items-center gap-1.5 rounded-md px-3 h-8 font-medium transition-colors ${mode === "ask" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
-          <ScanText className="size-3.5" />Ask
+        <button onClick={() => setMode("ask")} className={`relative inline-flex items-center gap-1.5 rounded-md px-3 h-8 font-medium transition-colors ${mode === "ask" ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+          {mode === "ask" && <motion.span layoutId="textextract-mode" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded-md bg-card shadow-sm" />}
+          <span className="relative z-10 inline-flex items-center gap-1.5"><ScanText className="size-3.5" />Ask</span>
         </button>
-        <button onClick={() => setMode("form")} className={`inline-flex items-center gap-1.5 rounded-md px-3 h-8 font-medium transition-colors ${mode === "form" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
-          <FormInput className="size-3.5" />Form
+        <button onClick={() => setMode("form")} className={`relative inline-flex items-center gap-1.5 rounded-md px-3 h-8 font-medium transition-colors ${mode === "form" ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+          {mode === "form" && <motion.span layoutId="textextract-mode" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded-md bg-card shadow-sm" />}
+          <span className="relative z-10 inline-flex items-center gap-1.5"><FormInput className="size-3.5" />Form</span>
         </button>
       </div>
 
@@ -622,12 +631,16 @@ export function TextExtractionPage() {
           {formRows.length > 0 && (
             <Card className="p-0 overflow-hidden">
               <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b bg-gradient-to-b from-muted/40 to-transparent">
-                <span className="text-sm font-medium">Results <span className="text-xs text-muted-foreground font-normal">· {formRows.length} article{formRows.length === 1 ? "" : "s"} × {fields.length} field{fields.length === 1 ? "" : "s"}</span></span>
+                <button onClick={() => setResultsCollapsed(c => !c)} className="flex items-center gap-2 text-sm font-medium min-w-0 hover:text-primary" title={resultsCollapsed ? "Expand results" : "Collapse results"}>
+                  {resultsCollapsed ? <ChevronRight className="size-4 shrink-0" /> : <ChevronDown className="size-4 shrink-0" />}
+                  <span>Results <span className="text-xs text-muted-foreground font-normal">· {formRows.length} article{formRows.length === 1 ? "" : "s"} × {fields.length} field{fields.length === 1 ? "" : "s"}</span></span>
+                </button>
                 <div className="flex items-center gap-2">
                   <Button size="sm" className="h-8 shadow-sm" onClick={exportFormXlsx}><FileSpreadsheet className="size-3.5 mr-1.5" />Excel</Button>
                   <Button size="sm" variant="outline" className="h-8" onClick={exportFormCsv}><Download className="size-3.5 mr-1.5" />CSV</Button>
                 </div>
               </div>
+              {!resultsCollapsed && (
               <div className="overflow-auto max-h-[30rem]">
                 <table className="w-full text-xs border-collapse">
                   <thead className="bg-muted sticky top-0 z-10 [&_th]:text-[11px] [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wider [&_th]:text-muted-foreground">
@@ -646,6 +659,7 @@ export function TextExtractionPage() {
                   </tbody>
                 </table>
               </div>
+              )}
             </Card>
           )}
         </>

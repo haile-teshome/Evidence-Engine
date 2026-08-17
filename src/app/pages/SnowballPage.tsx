@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { motion } from "motion/react";
 import { useStore } from "../lib/store";
-import { AIService, ScreenResult } from "../lib/mockServices";
+import { AIService, ScreenResult, Paper } from "../lib/mockServices";
 import { effectiveFullTextDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -32,36 +33,40 @@ export function SnowballPage() {
   // null = "All seeds"; otherwise the seed paper title whose citations are shown.
   const [selectedSeed, setSelectedSeed] = useState<string | null>(null);
   const [q, setQ] = useState("");
-  // Citation ids the reviewer has chosen to carry into the main results.
-  const [chosen, setChosen] = useState<Set<string>>(new Set());
+  // Citation ids the reviewer has chosen, read from the store so the selection
+  // persists across tab switches instead of resetting on remount.
+  const chosen = new Set(s.snowballChosen ?? []);
   const fetchTask = s.tasks["snowball"];
   const screenTask = s.tasks["snowball-screen"];
   const running = fetchTask?.status === "running";
   const screening = screenTask?.status === "running";
 
-  // Seed the selection from the AI's INCLUDE verdicts whenever a fresh
-  // screening run lands; the reviewer can then check/uncheck from there.
+  // Seed the selection from the AI's INCLUDE verdicts ONCE, when a fresh
+  // screening run lands and nothing has been selected yet (snowballChosen is
+  // null). After that the reviewer's checks/unchecks are authoritative and are
+  // never overwritten on remount or re-render.
   useEffect(() => {
     const sc = s.snowballScreened, rs = s.snowballResults;
     if (!sc || !rs) return;
+    if (s.snowballChosen != null) return;   // already seeded / has a manual selection
     const dmap = new Map<string, string>();
     sc.forEach(r => {
       if (r.paper_id) dmap.set(r.paper_id, r.Decision);
       if (r.Title) dmap.set(r.Title.toLowerCase().trim(), r.Decision);
     });
-    const init = new Set<string>();
+    const init: string[] = [];
     rs.forEach(p => {
       const d = dmap.get(p.id) || dmap.get((p.title || "").toLowerCase().trim());
-      if (d === "INCLUDE") init.add(p.id);
+      if (d === "INCLUDE") init.push(p.id);
     });
-    setChosen(init);
-  }, [s.snowballScreened]);
+    s.setSnowballChosen(init);
+  }, [s.snowballScreened, s.snowballResults, s.snowballChosen]);
 
   function toggleChosen(id: string) {
-    setChosen(prev => {
-      const next = new Set(prev);
+    s.setSnowballChosen(prev => {
+      const next = new Set(prev ?? []);
       if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
+      return [...next];
     });
   }
 
@@ -113,6 +118,7 @@ export function SnowballPage() {
       const seenT = new Set<string>();
       const unique = all.filter(p => seenT.has((p.title || "").toLowerCase()) ? false : (seenT.add((p.title || "").toLowerCase()), true));
       s.setSnowballResults(unique);
+      s.setSnowballChosen(null);   // fresh citations → re-seed selection from the next screening pass
       if (signal.aborted) {
         s.updateTask("snowball", { status: "canceled" });
         toast.info(`Canceled: ${unique.length} unique citations gathered`);
@@ -165,37 +171,32 @@ export function SnowballPage() {
   }
 
   function addToMain() {
-    if (!s.snowballResults || !s.results) return;
-    // Map any AI verdicts by id and title so we can recover the full ScreenResult
-    // for a chosen citation regardless of which key the row used.
-    const byKey = new Map<string, ScreenResult>();
-    (s.snowballScreened || []).forEach(r => {
-      if (r.paper_id) byKey.set(r.paper_id, r);
-      if (r.Title) byKey.set(r.Title.toLowerCase().trim(), r);
-    });
-    const toAdd: ScreenResult[] = [];
+    if (!s.snowballResults) return;
+    const chosenSet = new Set(s.snowballChosen ?? []);
+    // Don't re-add papers already in the corpus or already screened.
+    const existingIds = new Set([
+      ...((s.uniquePapers || []).map(p => p.id)),
+      ...((s.results || []).map(r => r.paper_id)),
+    ]);
+    const toAdd: Paper[] = [];
     for (const p of s.snowballResults) {
-      if (!chosen.has(p.id)) continue;
-      const r = byKey.get(p.id) || byKey.get((p.title || "").toLowerCase().trim());
-      // The reviewer chose it, so it carries forward as an INCLUDE, even if the
-      // AI excluded it, or it was never AI-screened at all.
-      if (r) {
-        toAdd.push({ ...r, Decision: "INCLUDE" });
-      } else {
-        toAdd.push({
-          paper_id: p.id, Source: p.source, Title: p.title, URL: p.url, Abstract: p.abstract || "",
-          Decision: "INCLUDE", Reason: "Manually re-included from citation snowballing.",
-          Agent_Trace: {},
-        });
-      }
+      if (!chosenSet.has(p.id) || existingIds.has(p.id)) continue;
+      toAdd.push({
+        id: p.id, source: p.source || "Citation snowballing", title: p.title || "",
+        abstract: p.abstract || "", url: p.url || "", year: p.year, authors: p.authors,
+      });
     }
-    if (toAdd.length === 0) { toast.error("No articles selected to add."); return; }
-    s.setResults([...s.results, ...toAdd]);
-    s.setPrisma(p => ({ ...p, identified: p.identified + (s.snowballResults?.length || 0), included_final: p.included_final + toAdd.length }));
-    toast.success(`Added ${toAdd.length} article${toAdd.length === 1 ? "" : "s"} to main results`);
+    if (toAdd.length === 0) { toast.error("No new articles to add — they are already in the corpus."); return; }
+    // Add as UNSCREENED corpus candidates (not forced includes): they join the
+    // abstract-screening "Screen new" queue, so every snowballed paper still goes
+    // through screening unless the reviewer includes it by hand on that tab.
+    s.setUniquePapers([...(s.uniquePapers || []), ...toAdd]);
+    s.setRawPapers([...(s.rawPapers || []), ...toAdd]);
+    s.setPrisma(p => ({ ...p, identified: p.identified + toAdd.length }));
+    toast.success(`Added ${toAdd.length} article${toAdd.length === 1 ? "" : "s"} to the screening queue. Run “Screen new” on Abstract Screening to screen them.`);
   }
   function clearAll() {
-    s.setSnowballResults(null); s.setSnowballScreened(null);
+    s.setSnowballResults(null); s.setSnowballScreened(null); s.setSnowballChosen(null);
   }
 
   const results = s.snowballResults;
@@ -259,9 +260,10 @@ export function SnowballPage() {
                 <button
                   key={d.value}
                   onClick={() => setType(d.value)}
-                  className={`px-2.5 text-xs rounded-[5px] transition-colors ${type === d.value ? "bg-primary text-primary-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}
+                  className={`relative px-2.5 text-xs rounded-[5px] transition-colors ${type === d.value ? "text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
                 >
-                  {d.label}
+                  {type === d.value && <motion.span layoutId="snowball-direction" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded-[5px] bg-primary shadow-sm" />}
+                  <span className="relative z-10">{d.label}</span>
                 </button>
               ))}
             </div>
@@ -364,10 +366,10 @@ export function SnowballPage() {
                 <label className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0 cursor-pointer pl-1" title="Select / deselect all shown">
                   <Checkbox
                     checked={shown.length > 0 && shown.every(p => chosen.has(p.id))}
-                    onCheckedChange={(c) => setChosen(prev => {
-                      const next = new Set(prev);
+                    onCheckedChange={(c) => s.setSnowballChosen(prev => {
+                      const next = new Set(prev ?? []);
                       shown.forEach(p => { if (c) next.add(p.id); else next.delete(p.id); });
-                      return next;
+                      return [...next];
                     })}
                   />
                   Select all
@@ -475,8 +477,9 @@ export function SnowballPage() {
             <Button variant="outline" onClick={screen} disabled={screening}>
               <Network className="size-4 mr-2" />{screening ? "Screening..." : screened ? "Re-screen with AI" : "AI-screen for me"}
             </Button>
-            <Button onClick={addToMain} disabled={chosen.size === 0}>
-              <Plus className="size-4 mr-2" />Add {chosen.size} to Main Results
+            <Button onClick={addToMain} disabled={chosen.size === 0}
+              title="Add the selected citations to the corpus as unscreened. They join the Abstract Screening “Screen new” queue rather than being auto-included.">
+              <Plus className="size-4 mr-2" />Add {chosen.size} to screening queue
             </Button>
             <Button variant="outline" onClick={clearAll}><Trash2 className="size-4 mr-2" />Clear Results</Button>
           </div>

@@ -476,18 +476,37 @@ export function SimulationPage() {
     <div className="space-y-3">
       {/* ── Header: wide base query + vertical action buttons ─────────────── */}
       <Card className="p-3 space-y-3">
-        <div className="flex items-start gap-3">
-          <div className="flex-1 min-w-0">
+        <div className="flex items-stretch gap-3">
+          <div className="flex-1 min-w-0 flex flex-col">
             <label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Base query · all databases</label>
-            <Textarea value={s.unifiedSearchQuery} onChange={e => updateUnified(e.target.value)} rows={3} className="font-mono text-sm mt-1 min-h-[5.5rem] max-h-40 overflow-auto" />
+            <Textarea value={s.unifiedSearchQuery} onChange={e => updateUnified(e.target.value)} className="font-mono text-sm mt-1 flex-1 min-h-[5.5rem] overflow-auto resize-none" />
           </div>
-          <div className="flex flex-col gap-2 w-44 shrink-0 pt-5">
-            <Button variant="outline" onClick={adaptToDatabases} disabled={adapting || optRunning} className="w-full justify-start" title="Convert the base query into each database's native syntax (PubMed tags, Europe PMC, Semantic Scholar, arXiv abs:, …)">
-              {adapting ? <Loader2 className="size-4 mr-2 animate-spin" /> : <Wand2 className="size-4 mr-2" />}Adapt to databases
+          <div className="flex flex-col gap-2 w-56 shrink-0 pt-5">
+            {/* Two query-prep actions: each explains what it does so "adapt" vs
+                "optimize" is unambiguous. */}
+            <Button variant="outline" onClick={adaptToDatabases} disabled={adapting || optRunning}
+              className="w-full h-auto items-start justify-start text-left whitespace-normal py-2.5 px-3"
+              title="Convert the base query into each database's native syntax (PubMed tags, Europe PMC, Semantic Scholar, arXiv abs:, …). No change to the search terms.">
+              <span className="mt-0.5 size-8 rounded-md grid place-items-center bg-primary/10 text-primary shrink-0">
+                {adapting ? <Loader2 className="size-4 animate-spin" /> : <Wand2 className="size-4" />}
+              </span>
+              <span className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-sm font-medium leading-tight">Adapt to databases</span>
+                <span className="text-[11px] font-normal text-muted-foreground leading-snug">Rewrite into each database's native syntax</span>
+              </span>
             </Button>
-            <Button variant="outline" onClick={runAiOptimize} disabled={optRunning} className="w-full justify-start">
-              <Bot className="size-4 mr-2" />AI Optimize
+            <Button variant="outline" onClick={runAiOptimize} disabled={adapting || optRunning}
+              className="w-full h-auto items-start justify-start text-left whitespace-normal py-2.5 px-3"
+              title="Use AI to refine each database's query for better recall and precision (adds synonyms, fixes tags, trims noise), then previews the yield per source.">
+              <span className="mt-0.5 size-8 rounded-md grid place-items-center bg-violet-100 text-violet-600 dark:bg-violet-950/40 dark:text-violet-300 shrink-0">
+                {optRunning ? <Loader2 className="size-4 animate-spin" /> : <Bot className="size-4" />}
+              </span>
+              <span className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-sm font-medium leading-tight">AI Optimize</span>
+                <span className="text-[11px] font-normal text-muted-foreground leading-snug">Tune each query for recall and precision</span>
+              </span>
             </Button>
+            <div className="h-px bg-border my-0.5" />
             <Button onClick={runSimulation} disabled={optRunning} className="w-full justify-start">
               <Play className="size-4 mr-2" />Run Planning
             </Button>
