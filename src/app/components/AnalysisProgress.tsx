@@ -12,49 +12,6 @@ export type Stage = {
   detail?: string;
 };
 
-const FLAVOR: Record<string, string[]> = {
-  pico: [
-    "Decomposing your question into PICO elements…",
-    "Identifying the target population…",
-    "Pinpointing the intervention and comparator…",
-    "Choosing the outcome of interest…",
-  ],
-  query: [
-    "Drafting a high-sensitivity PubMed search string…",
-    "Translating concepts into MeSH terms…",
-    "Wiring up boolean operators…",
-  ],
-  papers: [
-    "Querying PubMed for matching abstracts…",
-    "Pulling records from Europe PMC…",
-    "Asking Semantic Scholar for related work…",
-    "Gathering an initial evidence sample…",
-  ],
-  rerank: [
-    "Scoring articles for PICO relevance with LEADS…",
-    "Filtering out tangential hits…",
-    "Ranking by per-PICO eligibility…",
-  ],
-  question: [
-    "Phrasing the formal research question…",
-    "Tightening clinical specificity…",
-  ],
-  summary: [
-    "Sketching the research landscape…",
-    "Weighing what's known vs. what's gap…",
-    "Drafting a scoping evaluation…",
-  ],
-  suggestions: [
-    "Brainstorming refinement angles…",
-    "Considering subgroups and outcome timeframes…",
-    "Looking for sharper framings…",
-  ],
-  adversarial: [
-    "Building a contrarian search to stress-test the question…",
-    "Looking for null findings and counter-evidence…",
-  ],
-};
-
 function formatElapsed(ms: number) {
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s`;
@@ -80,11 +37,15 @@ export function AnalysisProgress({
   }, []);
 
   const running = stages.find(s => s.status === "running");
-  const flavor = running ? FLAVOR[running.id] || [] : [];
-  const flavorText = flavor.length
-    ? flavor[Math.floor(Date.now() / 3500) % flavor.length]
-    : running?.detail || "";
   const doneCount = stages.filter(s => s.status === "done").length;
+  const allDone = doneCount === stages.length && stages.length > 0;
+  // Overall progress, not a repeat of the running step (the stage list already
+  // names and spins that): how far through the pipeline we are.
+  const statusText = allDone
+    ? "Analysis complete"
+    : running
+    ? `${doneCount} of ${stages.length} steps complete`
+    : "Preparing analysis…";
   const pct = Math.round((doneCount / stages.length) * 100);
   const elapsed = formatElapsed(Date.now() - startedAt);
 
@@ -101,7 +62,7 @@ export function AnalysisProgress({
           </div>
           <div className="flex-1">
             <div className="text-sm font-medium">{title}</div>
-            <div className="text-xs text-muted-foreground min-h-[1.1em]">{flavorText || "Preparing analysis…"}</div>
+            <div className="text-xs text-muted-foreground min-h-[1.1em] truncate">{statusText}</div>
           </div>
           <div className="text-xs tabular-nums text-muted-foreground">{elapsed}</div>
           {onCancel && (

@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription } from "../components/ui/alert";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, Layers, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { ScreenResult, FullTextResult } from "../lib/apiClient";
@@ -764,45 +765,38 @@ export function WritingPage() {
 
   return (
     <div className="space-y-3">
-      {/* ── Compact header: stats + bulk export ─────────────────────────────── */}
-      <Card className="p-3">
-        <div className="flex items-end gap-3 flex-wrap">
-          <div className="mr-auto min-w-0">
-            <h2 className="font-medium leading-tight">Writing Assistant</h2>
-            <div className="flex flex-wrap items-center gap-1.5 mt-1">
-              <Pill icon={BookOpen}>{merged.length} articles</Pill>
-              <Pill icon={Layers} title="Pipeline stage these articles came from">{stage}</Pill>
-              {enrichedCount > 0 && <Pill icon={CheckCircle2} tone="green" title="Full metadata fetched (cached this session)">{enrichedCount} enriched</Pill>}
-              {enriching && <Pill icon={Loader2} spin>fetching metadata…</Pill>}
-            </div>
-          </div>
-          <div className="flex items-center gap-2 flex-wrap">
-            <Button variant="outline" size="sm" onClick={() => enrichAll(includedPapers, true)} disabled={enriching}>
-              <RefreshCw className="size-3.5 mr-1.5" />Re-fetch
-            </Button>
-            <Select value={format} onValueChange={v => setFormat(v as CiteFormat)}>
-              <SelectTrigger className="h-9 w-[7.5rem]"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                {CITE_FORMATS.map(f => <SelectItem key={f.value} value={f.value}>{f.value}</SelectItem>)}
-              </SelectContent>
-            </Select>
-            <Button variant="outline" size="sm" onClick={copyAll}>
-              <Copy className="size-3.5 mr-1.5" />Copy all
-            </Button>
-            <Button size="sm" onClick={downloadAll}>
-              <Download className="size-3.5 mr-1.5" />.{fmtCfg.ext}
-            </Button>
-          </div>
-        </div>
-      </Card>
+      {/* ── Control pane: article stats (left) + bulk export actions (right) ── */}
+      <ControlPane
+        stats={<>
+          <InlineStat icon={BookOpen} value={merged.length} label="Articles" hint={stage} />
+          {enrichedCount > 0 && <><PaneDivider /><InlineStat icon={CheckCircle2} tone="success" value={enrichedCount} label="Enriched" /></>}
+        </>}
+        actions={<>
+          <Button variant="outline" size="sm" className="h-8" onClick={() => enrichAll(includedPapers, true)} disabled={enriching} title="Re-fetch full metadata (authors, journal, year) for every article">
+            {enriching ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="size-3.5 mr-1.5" />}Re-fetch
+          </Button>
+          <Select value={format} onValueChange={v => setFormat(v as CiteFormat)}>
+            <SelectTrigger className="h-8 w-[7.5rem]" title="Citation format"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {CITE_FORMATS.map(f => <SelectItem key={f.value} value={f.value}>{f.value}</SelectItem>)}
+            </SelectContent>
+          </Select>
+          <Button variant="outline" size="sm" className="h-8" onClick={copyAll} title="Copy all citations to the clipboard">
+            <Copy className="size-3.5 mr-1.5" />Copy all
+          </Button>
+          <Button size="sm" className="h-8" onClick={downloadAll} title={`Download all citations as a .${fmtCfg.ext} file`}>
+            <Download className="size-3.5 mr-1.5" />.{fmtCfg.ext}
+          </Button>
+        </>}
+      />
 
       <Tabs defaultValue="citations">
         <TabsList>
-          <TabsTrigger value="citations" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Citations</TabsTrigger>
-          <TabsTrigger value="methods" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Search strategy</TabsTrigger>
-          <TabsTrigger value="writeup" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Methods</TabsTrigger>
-          <TabsTrigger value="studies" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Included studies</TabsTrigger>
-          <TabsTrigger value="ask" className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm">Ask evidence</TabsTrigger>
+          <TabsTrigger value="citations">Citations</TabsTrigger>
+          <TabsTrigger value="methods">Search strategy</TabsTrigger>
+          <TabsTrigger value="writeup">Methods</TabsTrigger>
+          <TabsTrigger value="studies">Included studies</TabsTrigger>
+          <TabsTrigger value="ask">Ask evidence</TabsTrigger>
         </TabsList>
 
         {/* ── Citations: searchable paper list (left) + citation detail (right) ── */}
@@ -1200,25 +1194,5 @@ function CitationDetail({ row, format, enriching }: { row: { p: PaperMeta; n: nu
         </div>
       </div>
     </>
-  );
-}
-
-// Compact count pill (matches the other pages).
-function Pill({
-  icon: Icon, children, tone = "default", title, spin = false,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  children: React.ReactNode;
-  tone?: "default" | "green";
-  title?: string;
-  spin?: boolean;
-}) {
-  const cls = tone === "green"
-    ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-    : "bg-muted text-muted-foreground border-transparent";
-  return (
-    <span title={title} className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${cls}`}>
-      <Icon className={`size-3 ${spin ? "animate-spin" : ""}`} />{children}
-    </span>
   );
 }

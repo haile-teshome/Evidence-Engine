@@ -38,6 +38,8 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
 
   const [selPaper, setSelPaper] = useState<string>("");
   const [form, setForm] = useState<Record<string, any>>({});
+  // AI provenance per field id: the supporting quote + whether it needs review.
+  const [prov, setProv] = useState<Record<string, { source_quote: string; confidence: string; needs_review: boolean }>>({});
   const [aiBusy, setAiBusy] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -83,8 +85,12 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
     if (!text) { toast.error("No text for this article. Acquire full text first, or fill it in manually."); return; }
     setAiBusy(true);
     try {
-      const vals = await AIService.extractFields(
-        text, fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options })), p?.title || "",
+      const tables = (s.fullTexts[selPaper]?.tables || [])
+        .map((t: any) => [t.caption, ...(t.rows || []).map((r: any[]) => r.join(" | "))].join("\n"))
+        .join("\n\n");
+      const { values: vals, fields: prF } = await AIService.extractFieldsRich(
+        text, fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options, description: (f as any).description })),
+        p?.title || "", undefined, tables,
       );
       // Fill only empty fields; never overwrite what the reviewer already typed.
       setForm(prev => {
@@ -94,7 +100,9 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
         }
         return next;
       });
-      toast.success("Pre-filled empty fields from the text. Confirm every value.");
+      setProv(Object.fromEntries(prF.map(f => [f.id, { source_quote: f.source_quote, confidence: f.confidence, needs_review: f.needs_review }])));
+      const nReview = prF.filter(f => f.needs_review && f.value !== "" && f.value != null).length;
+      toast.success(`Pre-filled from the text. ${nReview} value${nReview === 1 ? "" : "s"} flagged to verify against the source.`);
     } catch (e: any) {
       toast.error(e?.message || "AI pre-fill failed");
     } finally {
@@ -230,12 +238,26 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
                     <div key={group} className="space-y-2">
                       <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{group}</div>
                       <div className="grid grid-cols-2 gap-x-4 gap-y-2">
-                        {gfields.map(f => (
+                        {gfields.map(f => {
+                          const pv = prov[f.id];
+                          const hasVal = form[f.id] !== undefined && form[f.id] !== "";
+                          return (
                           <label key={f.id} className="text-xs space-y-1">
-                            <span className="text-muted-foreground">{f.label}</span>
+                            <span className="flex items-center gap-1.5">
+                              <span className="text-muted-foreground">{f.label}</span>
+                              {pv?.needs_review && hasVal && (
+                                <span title="AI-filled — verify against the source" className="text-[9px] px-1 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400">verify</span>
+                              )}
+                            </span>
                             {renderInput(f)}
+                            {pv?.source_quote && (
+                              <span className="block text-[10px] text-muted-foreground/80 italic truncate" title={pv.source_quote}>
+                                &ldquo;{pv.source_quote}&rdquo;
+                              </span>
+                            )}
                           </label>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   ))}

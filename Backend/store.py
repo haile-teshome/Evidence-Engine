@@ -23,6 +23,9 @@ Design notes
 
 from __future__ import annotations
 
+import contextvars
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -30,7 +33,7 @@ import secrets
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -130,12 +133,93 @@ def _new_id(prefix: str) -> str:
     return f"{prefix}_{int(time.time() * 1000):x}_{secrets.token_hex(8)}"
 
 
-def current_user(x_reviewer_id: Optional[str] = Header(default=None)) -> str:
-    """Resolve the acting reviewer from the ``X-Reviewer-Id`` header.
+# ---------------------------------------------------------------------------
+# Authentication: local accounts (email + salted-hashed password) and bearer
+# tokens. Passwords are hashed with PBKDF2-HMAC-SHA256 (stdlib, no native dep);
+# the plaintext is never stored. A valid token, resolved in middleware, pins the
+# acting reviewer so the X-Reviewer-Id header alone can't impersonate an account.
+# ---------------------------------------------------------------------------
 
-    Local mode has no real auth: the frontend sends the selected profile id, and
-    we default to the built-in ``"local"`` profile when none is supplied.
-    """
+_PBKDF2_ITERS = 200_000
+_TOKEN_TTL_DAYS = 30
+_authed_uid: "contextvars.ContextVar[str]" = contextvars.ContextVar("authed_uid", default="")
+
+
+def _hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERS)
+    return f"pbkdf2_sha256${_PBKDF2_ITERS}${salt.hex()}${dk.hex()}"
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    try:
+        algo, iters, salt_hex, hash_hex = (stored or "").split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), int(iters))
+        return hmac.compare_digest(dk.hex(), hash_hex)
+    except Exception:
+        return False
+
+
+def _create_token(uid: str) -> str:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    kv_set(f"authtoken:{token}", {
+        "uid": uid,
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(days=_TOKEN_TTL_DAYS)).isoformat(),
+    })
+    return token
+
+
+def _uid_for_token(token: str) -> str:
+    if not token:
+        return ""
+    rec = kv_get(f"authtoken:{token}")
+    if not rec:
+        return ""
+    try:
+        if datetime.fromisoformat(rec.get("expires_at", "")) < datetime.now(timezone.utc):
+            kv_del(f"authtoken:{token}")
+            return ""
+    except Exception:
+        pass
+    return rec.get("uid", "")
+
+
+def _bearer(authorization: Optional[str]) -> str:
+    if not authorization:
+        return ""
+    parts = authorization.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1].strip()
+    return ""
+
+
+def resolve_auth(authorization: Optional[str]) -> None:
+    """Middleware hook: if a valid bearer token is present, pin the acting uid for
+    this request so current_user() returns the authenticated account."""
+    _authed_uid.set(_uid_for_token(_bearer(authorization)))
+
+
+def _public_reviewer(rec: dict) -> dict:
+    """A reviewer/account record with the password hash stripped, safe to return."""
+    return {
+        "id": rec.get("id"),
+        "name": rec.get("name") or "You",
+        "email": rec.get("email", ""),
+        "created_at": rec.get("created_at"),
+    }
+
+
+def current_user(x_reviewer_id: Optional[str] = Header(default=None)) -> str:
+    """Resolve the acting reviewer. A verified auth token (set in middleware) wins;
+    otherwise fall back to the ``X-Reviewer-Id`` header, defaulting to ``"local"``
+    so the app still works before anyone has signed in."""
+    authed = _authed_uid.get()
+    if authed:
+        return authed
     return (x_reviewer_id or "").strip() or "local"
 
 
@@ -159,7 +243,7 @@ def _reviewer_record(uid: str) -> dict:
 
 @router.get("/reviewers")
 def list_reviewers():
-    items = kv_get_by_prefix("reviewer:")
+    items = [_public_reviewer(r) for r in kv_get_by_prefix("reviewer:")]
     # Ensure the default local profile always exists in the list.
     if not any(r.get("id") == "local" for r in items):
         items.insert(0, {"id": "local", "name": "You", "email": "", "created_at": _now()})
@@ -177,7 +261,91 @@ def create_reviewer(body: ReviewerCreate):
         "created_at": _now(),
     }
     kv_set(f"reviewer:{uid}", rec)
-    return {"reviewer": rec}
+    return {"reviewer": _public_reviewer(rec)}
+
+
+# ---- Auth: local accounts (signup / login / logout / me) ------------------
+
+class SignupBody(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+
+class LoginBody(BaseModel):
+    email: str
+    password: str
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _claim_local_data(uid: str) -> None:
+    """One-time migration: when the FIRST account is created, move the work built
+    under the default ``local`` profile to that account so nothing is lost."""
+    if kv_get("meta:local_claimed"):
+        return
+    moved = 0
+    for s in kv_get_by_prefix("session:local:"):
+        sid = s.get("id")
+        if not sid:
+            continue
+        kv_set(f"session:{uid}:{sid}", s)
+        kv_del(f"session:local:{sid}")
+        moved += 1
+    kv_set("meta:local_claimed", {"uid": uid, "at": _now(), "moved": moved})
+
+
+@router.post("/auth/signup")
+def auth_signup(body: SignupBody):
+    email = (body.email or "").strip().lower()
+    if not _EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if len(body.password or "") < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    if kv_get(f"emailidx:{email}"):
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+    uid = _new_id("rev")
+    rec = {
+        "id": uid,
+        "name": (body.name or email.split("@")[0]).strip(),
+        "email": email,
+        "password_hash": _hash_password(body.password),
+        "created_at": _now(),
+    }
+    kv_set(f"reviewer:{uid}", rec)
+    kv_set(f"emailidx:{email}", uid)
+    _claim_local_data(uid)
+    token = _create_token(uid)
+    return {"token": token, "user": _public_reviewer(rec)}
+
+
+@router.post("/auth/login")
+def auth_login(body: LoginBody):
+    email = (body.email or "").strip().lower()
+    uid = kv_get(f"emailidx:{email}")
+    rec = kv_get(f"reviewer:{uid}") if uid else None
+    if not rec or not _verify_password(body.password or "", rec.get("password_hash", "")):
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    token = _create_token(uid)
+    return {"token": token, "user": _public_reviewer(rec)}
+
+
+@router.post("/auth/logout")
+def auth_logout(request: Request):
+    token = _bearer(request.headers.get("authorization"))
+    if token:
+        kv_del(f"authtoken:{token}")
+    return {"ok": True}
+
+
+@router.get("/auth/me")
+def auth_me():
+    uid = _authed_uid.get()
+    rec = kv_get(f"reviewer:{uid}") if uid else None
+    if not rec:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return {"user": _public_reviewer(rec)}
 
 
 # ---- Sessions -------------------------------------------------------------

@@ -10,9 +10,12 @@
 // host this backend for remote collaboration, only the server-side identity
 // check changes; this client stays the same.
 
-export const REVIEWER_ID_KEY = "ee_reviewer_id";
+import { keyHeaders } from "./apiClient";
 
-// The built-in single-user profile every install starts with.
+export const REVIEWER_ID_KEY = "ee_reviewer_id";
+export const AUTH_TOKEN_KEY = "ee_auth_token";
+
+// The built-in single-user profile used before anyone has signed in.
 export const DEFAULT_REVIEWER_ID = "local";
 
 export function getReviewerId(): string {
@@ -23,12 +26,35 @@ export function getReviewerId(): string {
   }
 }
 
+// Auth session token (from login/signup). Stored locally; sent as a bearer token
+// so the backend resolves the acting account server-side.
+export function getAuthToken(): string {
+  try { return localStorage.getItem(AUTH_TOKEN_KEY) || ""; } catch { return ""; }
+}
+
+export function setAuthSession(token: string, reviewerId: string): void {
+  try {
+    localStorage.setItem(AUTH_TOKEN_KEY, token);
+    localStorage.setItem(REVIEWER_ID_KEY, reviewerId);
+  } catch { /* storage unavailable */ }
+}
+
+export function clearAuthSession(): void {
+  try {
+    localStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(REVIEWER_ID_KEY);
+  } catch { /* ignore */ }
+}
+
 export async function apiFetch(path: string, opts: RequestInit = {}) {
+  const token = getAuthToken();
   const res = await fetch(`/api${path}`, {
     ...opts,
     headers: {
       "Content-Type": "application/json",
       "X-Reviewer-Id": getReviewerId(),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...keyHeaders(),   // per-request cloud-model keys (local-only, see apiClient)
       ...(opts.headers || {}),
     },
   });

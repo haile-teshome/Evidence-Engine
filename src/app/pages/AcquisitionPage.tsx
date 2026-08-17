@@ -209,7 +209,7 @@ export function AcquisitionPage() {
         .map(r => [r.paper_id, r]),
     ).values(),
   );
-  if (included.length === 0) return <Alert><AlertDescription>No included articles from screening yet.</AlertDescription></Alert>;
+  if (included.length === 0) return <EmptyState icon={FileSearch} title="No included articles to acquire" description="The current abstract-screening run included 0 articles, so there is no full text to fetch. Include some articles (or restore a screening run that has includes) to acquire their full text here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
 
   async function runFetch(onlyMissing = false) {
     const queue = onlyMissing ? included.filter(p => s.fullTexts[p.paper_id]?.status !== "found") : included;
@@ -360,7 +360,7 @@ export function AcquisitionPage() {
               </Button>
               {missing > 0 && (
                 <Button size="sm" variant="outline" className="h-8" onClick={() => runFetch(true)}>
-                  <RefreshCcw className="size-3.5 mr-1.5" />Retry missing ({missing})
+                  <RefreshCcw className="size-3.5 mr-1.5" />Retry missing
                 </Button>
               )}
             </>

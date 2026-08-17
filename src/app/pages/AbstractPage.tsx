@@ -9,11 +9,15 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { PopoverContent, PopoverTrigger, PopoverClose, ScrollAwarePopover } from "../components/ui/popover";
-import { Search, Download, Minus, Zap, ChevronRight, ChevronDown, Maximize2, Minimize2, Plus, RotateCcw, History, X, Check, FileText, CheckCircle2, XCircle, Clock, GripVertical, Sparkles } from "lucide-react";
+import { Search, Download, Minus, Zap, ChevronRight, ChevronDown, Maximize2, Minimize2, Plus, RotateCcw, History, X, Check, FileText, CheckCircle2, XCircle, Clock, GripVertical, Sparkles, Pencil, CircleDashed } from "lucide-react";
 import { RapidScreen } from "../components/RapidScreen";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 
 // ---- styling helpers -------------------------------------------------------
 
@@ -322,8 +326,19 @@ export function AbstractPage() {
 
   const [projectRefresh, setProjectRefresh] = useState(0);
   const [rapidOpen, setRapidOpen] = useState(false);
+  const [confirmNew, setConfirmNew] = useState(false);
   const [maxOpen, setMaxOpen] = useState(false);
+  const [tableQuery, setTableQuery] = useState("");
   const [histOpen, setHistOpen] = useState(false);
+  const [histQuery, setHistQuery] = useState("");
+  const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
+  const [labelDraft, setLabelDraft] = useState("");
+  const startEditLabel = (id: string, current?: string) => { setEditingLabelId(id); setLabelDraft(current || ""); };
+  const saveLabel = (id: string) => {
+    const v = labelDraft.trim();
+    s.setScreeningArchive(prev => prev.map(p => p.id === id ? { ...p, label: v || undefined } : p));
+    setEditingLabelId(null);
+  };
 
   // Reorderable (non-frozen) columns. Keep/Decision/Title stay pinned. The
   // order persists per browser so the reviewer's layout sticks.
@@ -351,6 +366,14 @@ export function AbstractPage() {
     n.has(id) ? n.delete(id) : n.add(id);
     return n;
   });
+
+  // Client-side row filter for the results table (title / reason / decision).
+  const tableQ = tableQuery.trim().toLowerCase();
+  const visibleRows = r
+    ? (tableQ
+        ? r.filter(row => `${row.Title} ${row.Reason} ${row.Decision} ${effectiveAbstractDecision(row, s.abstractOverrides)}`.toLowerCase().includes(tableQ))
+        : r)
+    : [];
 
   return (
     <div className="space-y-4">
@@ -385,6 +408,7 @@ export function AbstractPage() {
           <ControlPane
             stats={<>
               <InlineStat icon={FileText} value={r.length} label="Screened" />
+              <InlineStat icon={CircleDashed} value={newToScreen} label="Unscreened" tone={newToScreen > 0 ? "amber" : "neutral"} />
               <PaneDivider />
               <InlineStat icon={CheckCircle2} value={passed.length} label="Included" tone="success" hint={r.length ? `${Math.round((passed.length / r.length) * 100)}%` : undefined} />
               <InlineStat icon={XCircle} value={excluded.length} label="Excluded" tone="danger" hint={r.length ? `${Math.round((excluded.length / r.length) * 100)}%` : undefined} />
@@ -398,9 +422,11 @@ export function AbstractPage() {
                 </Button>
               ) : (
                 <>
-                  <Button size="sm" className="h-8 shadow-sm" onClick={() => runSearch("incremental")} disabled={newToScreen === 0}
-                    title={newToScreen === 0 ? "No unscreened articles in the corpus" : "Screen only articles not already screened, keeping existing decisions and overrides"}>
-                    <Plus className="size-3.5 mr-1.5" />Screen new{newToScreen ? ` (${newToScreen})` : ""}
+                  <Button size="sm" className="h-8 shadow-sm"
+                    onClick={() => setConfirmNew(true)}
+                    disabled={newToScreen === 0}
+                    title={newToScreen === 0 ? "No unscreened articles in the corpus" : `Screen ${newToScreen} article${newToScreen === 1 ? "" : "s"} not already screened, keeping existing decisions and overrides`}>
+                    <Plus className="size-3.5 mr-1.5" />Screen new
                   </Button>
                   <Button size="sm" variant="outline" className="h-8" onClick={() => runSearch("full")}
                     title="Re-screen every article from scratch. The current screening is archived first, so you can restore it.">
@@ -412,55 +438,158 @@ export function AbstractPage() {
               <Button size="sm" onClick={() => setRapidOpen(true)} className="h-8 shadow-sm bg-amber-400 hover:bg-amber-500 text-amber-950 border-amber-400 dark:bg-amber-500 dark:hover:bg-amber-400 dark:text-amber-950" title="Review records fast with the keyboard">
                 <Zap className="size-3.5 mr-1.5" />Rapid screen
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-8 px-2" title="Expand the table to full screen">
-                <Maximize2 className="size-4" />
-              </Button>
-              <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)} className="h-8 px-2" title="Download results as Excel (XLSX)">
-                <Download className="size-4" />
-              </Button>
             </>}
           />
 
-          {/* Run history: every screening pass, restorable. */}
-          {s.screeningArchive.length > 0 && (
-            <Card className="p-3">
-              <button className="flex items-center gap-1.5 text-sm font-medium w-full text-left" onClick={() => setHistOpen(o => !o)}>
-                {histOpen ? <ChevronDown className="size-4" /> : <ChevronRight className="size-4" />}
-                <History className="size-4 text-primary" />Run history
-                <span className="text-xs text-muted-foreground font-normal ml-1">{s.screeningArchive.length} pass{s.screeningArchive.length === 1 ? "" : "es"}</span>
-              </button>
-              {histOpen && (
-                <div className="mt-2 space-y-1.5">
-                  {[...s.screeningArchive].reverse().map((pass, idx) => {
-                    const isLatest = idx === 0;
-                    return (
-                      <div key={pass.id} className="flex items-center gap-3 text-xs rounded-md border px-3 py-2">
-                        <span className={`px-1.5 py-0.5 rounded font-medium ${pass.mode === "incremental" ? "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300" : "bg-muted text-muted-foreground"}`}>
-                          {pass.mode === "incremental" ? "Incremental" : "Full"}
-                        </span>
-                        <span className="text-muted-foreground">{new Date(pass.ranAt).toLocaleString()}</span>
-                        <span className="text-muted-foreground">·</span>
-                        <span>{pass.screenedNow} screened · {pass.totalAfter} total</span>
-                        <span className="text-emerald-600">{pass.included} incl</span>
-                        <span className="text-rose-600">{pass.excluded} excl</span>
-                        <span className="ml-auto flex items-center gap-2">
-                          {isLatest ? (
-                            <span className="text-muted-foreground italic">current</span>
-                          ) : (
-                            <Button size="sm" variant="outline" className="h-7"
-                              onClick={() => { s.setResults(pass.results); toast.success("Restored this screening pass"); }}
-                              title="Replace the current results with this archived pass (overrides are kept)">
-                              <RotateCcw className="size-3.5 mr-1.5" />Restore
-                            </Button>
-                          )}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </Card>
+          {/* Live progress sits directly under the control pane while a re-run is
+              in flight, so the running state reads top-down (stats → progress). */}
+          {running && task && (
+            <TaskProgressCard
+              task={task}
+              title="Abstract screening with per-PICO appraisal"
+              onCancel={() => s.cancelTask("abstract-screen")}
+            />
           )}
+
+          {/* Run history: deliberately understated — a muted text toggle rather
+              than a full card, collapsed by default so it stays out of the way. */}
+          {s.screeningArchive.length > 0 && (
+            <div>
+              <button className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors" onClick={() => setHistOpen(o => !o)} title="Show previous screening passes">
+                {histOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+                <History className="size-3.5" />Run history
+                <span className="opacity-70">({s.screeningArchive.length})</span>
+              </button>
+              {histOpen && (() => {
+                // Systematic run number = chronological order (Run 1 = first pass).
+                const passes = s.screeningArchive.map((p, i) => ({ ...p, runNo: i + 1 })).reverse();   // newest first
+                // The pass currently loaded into the table is the one whose results
+                // array IS s.results (restore sets that reference). Falls back to the
+                // newest pass when no match (e.g. after a reload re-hydrates arrays).
+                const activeId = passes.find(p => p.results === s.results)?.id ?? passes[0]?.id;
+                const q = histQuery.trim().toLowerCase();
+                const filtered = q
+                  ? passes.filter(p => [
+                      `run ${p.runNo}`, p.label || "", p.mode, p.model || "", new Date(p.ranAt).toLocaleString(),
+                      `${p.screenedNow} screened`, `${p.totalAfter} total`,
+                      `${p.included} included`, `${p.excluded} excluded`,
+                    ].join(" ").toLowerCase().includes(q))
+                  : passes;
+                return (
+                  <Card className="mt-2 p-0 overflow-hidden shadow-sm ring-1 ring-black/[0.02]">
+                    {/* Search bar */}
+                    <div className="flex items-center gap-2 px-3 py-2 border-b bg-muted/30">
+                      <Search className="size-3.5 text-muted-foreground shrink-0" />
+                      <input
+                        value={histQuery}
+                        onChange={e => setHistQuery(e.target.value)}
+                        placeholder="Search passes by date, mode, or model…"
+                        className="flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                      />
+                      <span className="text-[11px] text-muted-foreground tabular-nums shrink-0">
+                        {filtered.length}/{passes.length}
+                      </span>
+                      {histQuery && (
+                        <button type="button" onClick={() => setHistQuery("")} className="text-muted-foreground hover:text-foreground shrink-0" title="Clear search">
+                          <X className="size-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    {/* Scrollable list */}
+                    {/* Cap the visible list at ~4 passes; the rest scroll. */}
+                    <div className="max-h-56 overflow-y-auto divide-y divide-border/60">
+                      {filtered.length === 0 ? (
+                        <div className="px-3 py-8 text-center text-xs text-muted-foreground">No passes match "{histQuery}".</div>
+                      ) : filtered.map((pass) => {
+                        const isActive = pass.id === activeId;
+                        return (
+                          <div key={pass.id} className="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors">
+                            <span className={`shrink-0 w-16 text-center px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wide ${pass.mode === "incremental" ? "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300" : "bg-muted text-muted-foreground"}`}>
+                              {pass.mode === "incremental" ? "Incr." : "Full"}
+                            </span>
+                            <div className="min-w-0 flex-1">
+                              {/* Line 1: run name + editable nickname — one uniform size */}
+                              <div className="flex items-center gap-1.5 min-w-0 text-xs leading-tight">
+                                <span className="font-semibold text-foreground shrink-0">Run {pass.runNo}</span>
+                                {editingLabelId === pass.id ? (
+                                  <input
+                                    autoFocus
+                                    value={labelDraft}
+                                    onChange={e => setLabelDraft(e.target.value)}
+                                    onKeyDown={e => { if (e.key === "Enter") e.currentTarget.blur(); }}
+                                    onBlur={() => saveLabel(pass.id)}
+                                    placeholder="Add a nickname…"
+                                    maxLength={40}
+                                    className="flex-1 min-w-0 bg-transparent border-b border-primary/50 outline-none text-xs font-semibold text-primary placeholder:font-normal placeholder:text-muted-foreground/70"
+                                  />
+                                ) : pass.label ? (
+                                  <button type="button" className="group inline-flex items-center gap-1 min-w-0 text-xs" onClick={() => startEditLabel(pass.id, pass.label)} title="Rename this run">
+                                    <span className="shrink-0 text-muted-foreground/50">·</span>
+                                    <span className="truncate font-semibold text-primary">{pass.label}</span>
+                                    <Pencil className="size-3 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                                  </button>
+                                ) : (
+                                  <button type="button" className="inline-flex items-center gap-1 text-xs text-muted-foreground/70 hover:text-foreground shrink-0 transition-colors" onClick={() => startEditLabel(pass.id, "")} title="Add a nickname">
+                                    <Pencil className="size-3" />Add name
+                                  </button>
+                                )}
+                              </div>
+                              {/* Line 2: when it ran, how long, and the model — muted, smaller */}
+                              <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                                <span className="shrink-0 tabular-nums">{new Date(pass.ranAt).toLocaleString()}</span>
+                                <span className="shrink-0 text-muted-foreground/40">·</span>
+                                <Clock className="size-3 shrink-0" />
+                                <span className="tabular-nums shrink-0">{formatDuration(pass.durationSec)}</span>
+                                {pass.model && <><span className="shrink-0 text-muted-foreground/40">·</span><span className="truncate">{pass.model}</span></>}
+                              </div>
+                            </div>
+                            <div className="ml-auto flex items-center gap-3 shrink-0">
+                              <div className="hidden sm:flex items-center gap-1.5 text-[11px] tabular-nums">
+                                <span className="text-muted-foreground">{pass.screenedNow} screened</span>
+                                <span className="text-muted-foreground/40">·</span>
+                                <span className="font-medium text-emerald-600">{pass.included} incl</span>
+                                <span className="text-muted-foreground/40">·</span>
+                                <span className="font-medium text-rose-600">{pass.excluded} excl</span>
+                              </div>
+                              {isActive ? (
+                                <span className="inline-flex items-center gap-1 h-6 px-2 text-[11px] font-medium text-primary rounded-full bg-primary/10">
+                                  <CheckCircle2 className="size-3" />Current
+                                </span>
+                              ) : (
+                                <Button size="sm" variant="outline" className="h-6 px-2 text-[11px] gap-1"
+                                  onClick={() => {
+                                    s.setResults(pass.results);
+                                    toast.success(`Restored Run ${pass.runNo}${pass.label ? ` (“${pass.label}”)` : ""} · ${pass.included} included`);
+                                  }}
+                                  title="Load this archived pass into the table (reviewer overrides are kept)">
+                                  <RotateCcw className="size-3" />Restore
+                                </Button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Card>
+                );
+              })()}
+            </div>
+          )}
+
+          <AlertDialog open={confirmNew} onOpenChange={setConfirmNew}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Screen {newToScreen} new article{newToScreen === 1 ? "" : "s"}?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Only articles not already screened will be reviewed. Existing decisions and your overrides are kept.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction onClick={() => runSearch("incremental")}>Screen {newToScreen}</AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
           <RapidScreen
             open={rapidOpen}
@@ -479,10 +608,41 @@ export function AbstractPage() {
 
           <Card className="p-4">
             <div className={maxOpen ? "fixed inset-0 z-50 bg-background p-4 flex flex-col gap-2" : ""}>
-              {maxOpen && (
-                <div className="flex items-center justify-between shrink-0">
-                  <h3 className="font-medium">Screening Results ({r.length})</h3>
-                  <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
+              {maxOpen ? (
+                <div className="flex items-center gap-3 shrink-0">
+                  <h3 className="font-medium shrink-0">Screening Results ({r.length})</h3>
+                  <div className="relative flex-1 min-w-0">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
+                    <input value={tableQuery} onChange={e => setTableQuery(e.target.value)} placeholder="Filter results…"
+                      className="w-full h-8 pl-8 pr-7 rounded-md border bg-background text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring placeholder:text-muted-foreground" />
+                    {tableQuery && <button type="button" onClick={() => setTableQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" title="Clear filter"><X className="size-3.5" /></button>}
+                  </div>
+                  <div className="ml-auto flex items-center gap-1 shrink-0">
+                    {tableQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleRows.length}/{r.length}</span>}
+                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)} className="h-8 px-2" title="Download results as Excel (XLSX)">
+                      <Download className="size-4" />
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
+                  </div>
+                </div>
+              ) : (
+                /* Table toolbar: filter on the left (fills the header), tools pinned top-right. */
+                <div className="flex items-center gap-2 mb-1.5">
+                  <div className="relative flex-1 min-w-0">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
+                    <input value={tableQuery} onChange={e => setTableQuery(e.target.value)} placeholder="Filter results by title, reason, or decision…"
+                      className="w-full h-8 pl-8 pr-7 rounded-md border bg-background text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring placeholder:text-muted-foreground" />
+                    {tableQuery && <button type="button" onClick={() => setTableQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" title="Clear filter"><X className="size-3.5" /></button>}
+                  </div>
+                  <div className="ml-auto flex items-center gap-1 shrink-0">
+                    {tableQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleRows.length}/{r.length}</span>}
+                    <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Expand the table to full screen">
+                      <Maximize2 className="size-4" />
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
+                      <Download className="size-4" />
+                    </Button>
+                  </div>
                 </div>
               )}
               <div className={`rounded-lg border overflow-auto ${maxOpen ? "flex-1 min-h-0" : "max-h-[600px]"}`}>
@@ -512,7 +672,10 @@ export function AbstractPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {r.map(row => {
+                  {tableQuery && visibleRows.length === 0 && (
+                    <tr><td colSpan={3 + orderedCols.length} className="px-3 py-10 text-center text-sm text-muted-foreground">No results match "{tableQuery}".</td></tr>
+                  )}
+                  {visibleRows.map(row => {
                     const pa = row.Pico_Assessment;
                     const eff = effectiveAbstractDecision(row, s.abstractOverrides);
                     const isOverridden = eff !== row.Decision;
@@ -635,7 +798,9 @@ export function AbstractPage() {
         </>
       )}
 
-      {task && task.status === "running" && (
+      {/* First run (no results yet): no control pane exists, so the progress card
+          shows here. Once results exist it renders under the control pane above. */}
+      {!r && task && task.status === "running" && (
         <TaskProgressCard
           task={task}
           title="Abstract screening with per-PICO appraisal"

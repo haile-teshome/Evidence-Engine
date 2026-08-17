@@ -13,9 +13,13 @@ import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { PopoverContent, PopoverTrigger, PopoverClose, ScrollAwarePopover } from "../components/ui/popover";
-import { FlaskConical, Check, Minus, X as XIcon, Download, Zap, FileSearch, ChevronRight, ChevronDown, Maximize2, Minimize2, FileText, CheckCircle2, XCircle, Clock, Sparkles, GripVertical } from "lucide-react";
+import { FlaskConical, Check, Minus, X as XIcon, Download, Zap, FileSearch, ChevronRight, ChevronDown, Maximize2, Minimize2, FileText, CheckCircle2, XCircle, Clock, Sparkles, GripVertical, Plus, Search, CircleDashed } from "lucide-react";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import { EmptyState } from "../components/EmptyState";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "../components/ui/alert-dialog";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 
@@ -31,7 +35,9 @@ export function FullTextPage() {
   const task = s.tasks["full-text-screen"];
   const running = task?.status === "running";
   const [rapidOpen, setRapidOpen] = useState(false);
+  const [confirmNew, setConfirmNew] = useState(false);
   const [maxOpen, setMaxOpen] = useState(false);
+  const [ftQuery, setFtQuery] = useState("");
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const toggleRow = (id: string) => setExpanded(prev => {
     const n = new Set(prev);
@@ -69,7 +75,11 @@ export function FullTextPage() {
   // rescued at the abstract stage (by checking its Keep box) now joins the
   // full-text queue, and one they dropped is removed.
   const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
-  if (passed.length === 0) return <EmptyState icon={FileSearch} title="No articles passed abstract screening" description="Adjust your inclusion criteria and re-run abstract screening." action={{ label: "Back to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
+  // Only show the empty state when there is genuinely nothing to display. If a
+  // full-text pass already ran, keep showing it even when the CURRENT abstract
+  // run includes 0 papers (e.g. after restoring a different screening pass), so
+  // completed full-text work isn't hidden by swapping abstract runs.
+  if (passed.length === 0 && !s.fullTextResults) return <EmptyState icon={FileSearch} title="No articles passed abstract screening" description="The current screening run included 0 articles. Adjust your inclusion criteria and re-run abstract screening, or restore a run that has included articles." action={{ label: "Back to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
 
   // Screen `targets`. When `append`, keep the existing results and add the new
   // rows (used to screen papers added after the first run, e.g. via snowball);
@@ -238,11 +248,17 @@ export function FullTextPage() {
       {ft && (() => {
             const includedEff = ft.filter(x => effectiveFullTextDecision(x, s.fullTextOverrides) === "Include").length;
             const excludedEff = ft.filter(x => effectiveFullTextDecision(x, s.fullTextOverrides) === "Exclude").length;
+            // Client-side row filter for the results table (title / reason / decision).
+            const ftQ = ftQuery.trim().toLowerCase();
+            const visibleFt = ftQ
+              ? ft.filter(row => `${row.Title} ${row.Reason} ${row.Decision} ${effectiveFullTextDecision(row, s.fullTextOverrides)}`.toLowerCase().includes(ftQ))
+              : ft;
             return (
               <>
                 <ControlPane
                   stats={<>
                     <InlineStat icon={FileText} value={ft.length} label="Articles" />
+                    <InlineStat icon={CircleDashed} value={newPapers.length} label="Pending" tone={newPapers.length > 0 ? "amber" : "neutral"} />
                     <PaneDivider />
                     <InlineStat icon={CheckCircle2} value={includedEff} label="Included" tone="success" hint={ft.length ? `${Math.round((includedEff / ft.length) * 100)}%` : undefined} />
                     <InlineStat icon={XCircle} value={excludedEff} label="Excluded" tone="danger" hint={ft.length ? `${Math.round((excludedEff / ft.length) * 100)}%` : undefined} />
@@ -256,11 +272,12 @@ export function FullTextPage() {
                       </Button>
                     ) : (
                       <>
-                        {newPapers.length > 0 && (
-                          <Button size="sm" className="h-8 shadow-sm" onClick={() => run(newPapers, true)}>
-                            <FlaskConical className="size-3.5 mr-1.5" />Screen {newPapers.length} new
-                          </Button>
-                        )}
+                        <Button size="sm" className="h-8 shadow-sm"
+                          onClick={() => setConfirmNew(true)}
+                          disabled={newPapers.length === 0}
+                          title={newPapers.length === 0 ? "No newly included articles to screen" : `Screen ${newPapers.length} newly included article${newPapers.length === 1 ? "" : "s"}`}>
+                          <Plus className="size-3.5 mr-1.5" />Screen new
+                        </Button>
                         <Button size="sm" variant="outline" className="h-8" onClick={() => run(passed, false)}>
                           <FlaskConical className="size-3.5 mr-1.5" />Re-run all
                         </Button>
@@ -268,16 +285,24 @@ export function FullTextPage() {
                     )}
                     <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
                     <Button size="sm" onClick={() => setRapidOpen(true)} className="h-8 shadow-sm bg-amber-400 hover:bg-amber-500 text-amber-950 border-amber-400 dark:bg-amber-500 dark:hover:bg-amber-400 dark:text-amber-950" title="Review records fast with the keyboard">
-                      <Zap className="size-3.5 mr-1.5" />Rapid review
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-8 px-2" title="Expand the table to full screen">
-                      <Maximize2 className="size-4" />
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides)} className="h-8 px-2" title="Download results as Excel (XLSX)">
-                      <Download className="size-4" />
+                      <Zap className="size-3.5 mr-1.5" />Rapid screen
                     </Button>
                   </>}
                 />
+                <AlertDialog open={confirmNew} onOpenChange={setConfirmNew}>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Screen {newPapers.length} new article{newPapers.length === 1 ? "" : "s"}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        Only newly included articles not yet full-text screened will be reviewed. Existing decisions and overrides are kept.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction onClick={() => run(newPapers, true)}>Screen {newPapers.length}</AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
                 <RapidScreen
                   open={rapidOpen}
                   onClose={() => setRapidOpen(false)}
@@ -303,10 +328,41 @@ export function FullTextPage() {
                 )}
                 <Card className="p-4">
                 <div className={maxOpen ? "fixed inset-0 z-50 bg-background p-4 flex flex-col gap-2" : ""}>
-            {maxOpen && (
-              <div className="flex items-center justify-between shrink-0">
-                <h3 className="font-medium">Full-Text Results ({ft.length})</h3>
-                <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
+            {maxOpen ? (
+              <div className="flex items-center gap-3 shrink-0">
+                <h3 className="font-medium shrink-0">Full-Text Results ({ft.length})</h3>
+                <div className="relative flex-1 min-w-0">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
+                  <input value={ftQuery} onChange={e => setFtQuery(e.target.value)} placeholder="Filter results…"
+                    className="w-full h-8 pl-8 pr-7 rounded-md border bg-background text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring placeholder:text-muted-foreground" />
+                  {ftQuery && <button type="button" onClick={() => setFtQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" title="Clear filter"><XIcon className="size-3.5" /></button>}
+                </div>
+                <div className="ml-auto flex items-center gap-1 shrink-0">
+                  {ftQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleFt.length}/{ft.length}</span>}
+                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides)} className="h-8 px-2" title="Download results as Excel (XLSX)">
+                    <Download className="size-4" />
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
+                </div>
+              </div>
+            ) : (
+              /* Table toolbar: filter on the left (fills the header), tools pinned top-right. */
+              <div className="flex items-center gap-2 mb-1.5">
+                <div className="relative flex-1 min-w-0">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
+                  <input value={ftQuery} onChange={e => setFtQuery(e.target.value)} placeholder="Filter results by title, reason, or decision…"
+                    className="w-full h-8 pl-8 pr-7 rounded-md border bg-background text-xs outline-none focus-visible:ring-1 focus-visible:ring-ring placeholder:text-muted-foreground" />
+                  {ftQuery && <button type="button" onClick={() => setFtQuery("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" title="Clear filter"><XIcon className="size-3.5" /></button>}
+                </div>
+                <div className="ml-auto flex items-center gap-1 shrink-0">
+                  {ftQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleFt.length}/{ft.length}</span>}
+                  <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Expand the table to full screen">
+                    <Maximize2 className="size-4" />
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
+                    <Download className="size-4" />
+                  </Button>
+                </div>
               </div>
             )}
             <div className={`rounded-lg border overflow-auto ${maxOpen ? "flex-1 min-h-0" : "max-h-[600px]"}`}>
@@ -336,7 +392,10 @@ export function FullTextPage() {
                 </tr>
               </thead>
               <tbody>
-                {ft.map(row => {
+                {ftQuery && visibleFt.length === 0 && (
+                  <tr><td colSpan={3 + movableCols.length} className="px-3 py-10 text-center text-sm text-muted-foreground">No results match "{ftQuery}".</td></tr>
+                )}
+                {visibleFt.map(row => {
                   const eff = effectiveFullTextDecision(row, s.fullTextOverrides);
                   const isOverridden = eff !== row.Decision;
                   const keep = eff === "Include";

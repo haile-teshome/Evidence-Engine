@@ -132,6 +132,72 @@ app.add_middleware(
 )
 
 
+# Capture per-request LLM / database keys the user supplied from their browser
+# into a request-scoped ContextVar. Keys travel as headers, are used only to
+# construct model / data clients for this request, and are never persisted here.
+from request_creds import set_request_creds, HEADER_TO_CRED
+
+
+from store import resolve_auth as _resolve_auth
+
+
+@app.middleware("http")
+async def _capture_request_credentials(request, call_next):
+    creds = {}
+    for header, cred in HEADER_TO_CRED.items():
+        val = request.headers.get(header)
+        if val:
+            creds[cred] = val.strip()
+    set_request_creds(creds)
+    # Resolve a bearer token (if any) to the authenticated account for this request.
+    _resolve_auth(request.headers.get("authorization"))
+    return await call_next(request)
+
+
+# --- OS keychain storage for LLM keys (the "device keychain" storage mode) -----
+import keychain as _keychain
+
+
+class KeychainSetRequest(BaseModel):
+    provider: str
+    key: str
+
+
+class KeychainProviderRequest(BaseModel):
+    provider: str
+
+
+@app.get("/api/keys/status")
+def keys_status():
+    """Report whether OS-keychain storage is available and which providers
+    currently have a key stored there. No secrets are returned."""
+    return {"available": _keychain.available(), "providers": _keychain.status()}
+
+
+@app.post("/api/keys/set")
+def keys_set(req: KeychainSetRequest):
+    provider = (req.provider or "").strip().lower()
+    if provider not in _keychain.PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unknown provider")
+    key = (req.key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail="Empty key")
+    try:
+        _keychain.set_key(provider, key)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Keychain unavailable: {e}")
+    return {"ok": True, "providers": _keychain.status()}
+
+
+@app.post("/api/keys/delete")
+def keys_delete(req: KeychainProviderRequest):
+    provider = (req.provider or "").strip().lower()
+    if provider not in _keychain.PROVIDERS:
+        raise HTTPException(status_code=400, detail="Unknown provider")
+    _keychain.delete_key(provider)
+    return {"ok": True, "providers": _keychain.status()}
+
+
 def _default_model() -> str:
     """Default screening model.
 
@@ -766,6 +832,30 @@ class AdversarialRequest(BaseModel):
 def pico_adversarial(req: AdversarialRequest):
     q = AIService.generate_adversarial_query(_to_pico(req.pico), resolve_for_thinking(req.model))
     return {"query": q}
+
+
+class SupplementaryQueryRequest(BaseModel):
+    pico: PicoIn
+    query: str = ""
+    inclusion: List[str] = Field(default_factory=list)
+    exclusion: List[str] = Field(default_factory=list)
+    kept_titles: List[str] = Field(default_factory=list)
+    model: Optional[str] = None
+
+
+@app.post("/api/search/supplementary")
+def search_supplementary(req: SupplementaryQueryRequest):
+    """One adaptive round for the Home deep scan: propose a supplementary query
+    from the relevant studies found so far, so the caller can fetch a second
+    (separately logged) batch without touching the primary documented search."""
+    return AIService.propose_supplementary_query(
+        _to_pico(req.pico),
+        req.query,
+        req.inclusion,
+        req.exclusion,
+        req.kept_titles,
+        resolve_for_thinking(req.model),
+    )
 
 
 class BrainstormRequest(BaseModel):
@@ -1607,43 +1697,12 @@ class RerankRequest(BaseModel):
     top_k: Optional[int] = None
 
 
-@app.post("/api/papers/rerank")
-def papers_rerank(req: RerankRequest):
-    """Score each paper against PICO using LEADS-native, return ranked list
-    with per-paper LEADS scores. Use LEADS unconditionally (this is its
-    trained task) regardless of which model the user selected for thinking
-    tasks elsewhere."""
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
-    pico = _to_pico(req.pico)
-    # Route to LEADS specifically: this is exactly the per-PICO relevance task
-    # the model was fine-tuned for. Override whatever the caller asked for.
-    model_name = resolve_model_name(req.model) or LEADS_MODEL_NAME
-
-    def _score_one(p_in: PaperIn) -> Dict[str, Any]:
-        bp = _to_backend_paper(p_in)
-        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion)
-        score = float(raw.get("_leads_score", 0.0))
-        return {
-            "paper": p_in.dict() if hasattr(p_in, "dict") else p_in.__dict__,
-            "leads_score": score,
-            "decision": str(raw.get("decision", "Exclude")),
-            "reason": raw.get("reason", ""),
-        }
-
-    scored: List[Dict[str, Any]] = []
-    workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, len(req.papers) or 1))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for fut in as_completed([ex.submit(_score_one, p) for p in req.papers]):
-            try:
-                scored.append(fut.result())
-            except Exception as e:
-                print(f"[papers_rerank] worker error: {e}")
-
+def _rerank_finalize(req: RerankRequest, scored: List[Dict[str, Any]], model_name: str) -> Dict[str, Any]:
+    """Sort the scored papers, decide the relevance floor, and build the response
+    payload. Shared by the blocking and streaming rerank endpoints."""
     # Sort descending by LEADS score (most relevant first).
     scored.sort(key=lambda r: r["leads_score"], reverse=True)
 
-    # ---- Decide the effective relevance floor -------------------------------
     cutoff_mode: str = "auto"
     quantile_cutoff: Optional[float] = None
     cutoff_reason: str = ""
@@ -1683,6 +1742,94 @@ def papers_rerank(req: RerankRequest):
         "total_kept": len(kept),
         "model_used": model_name,
     }
+
+
+def _rerank_score_one_factory(req: RerankRequest, pico, model_name: str):
+    """Build the per-paper scoring closure used by both rerank endpoints."""
+    def _score_one(p_in: PaperIn) -> Dict[str, Any]:
+        bp = _to_backend_paper(p_in)
+        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion)
+        score = float(raw.get("_leads_score", 0.0))
+        return {
+            "paper": p_in.dict() if hasattr(p_in, "dict") else p_in.__dict__,
+            "leads_score": score,
+            "decision": str(raw.get("decision", "Exclude")),
+            "reason": raw.get("reason", ""),
+        }
+    return _score_one
+
+
+@app.post("/api/papers/rerank")
+def papers_rerank(req: RerankRequest):
+    """Score each paper against PICO using LEADS-native, return ranked list
+    with per-paper LEADS scores. Use LEADS unconditionally (this is its
+    trained task) regardless of which model the user selected for thinking
+    tasks elsewhere."""
+    _ss["inclusion_list"] = list(req.inclusion or [])
+    _ss["exclusion_list"] = list(req.exclusion or [])
+    pico = _to_pico(req.pico)
+    # Route to LEADS specifically: this is exactly the per-PICO relevance task
+    # the model was fine-tuned for. Override whatever the caller asked for.
+    model_name = resolve_model_name(req.model) or LEADS_MODEL_NAME
+    _score_one = _rerank_score_one_factory(req, pico, model_name)
+
+    scored: List[Dict[str, Any]] = []
+    workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, len(req.papers) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for fut in as_completed([ex.submit(_score_one, p) for p in req.papers]):
+            try:
+                scored.append(fut.result())
+            except Exception as e:
+                print(f"[papers_rerank] worker error: {e}")
+
+    return _rerank_finalize(req, scored, model_name)
+
+
+@app.post("/api/papers/rerank/stream")
+def papers_rerank_stream(req: RerankRequest):
+    """Same scoring as /papers/rerank, but streamed: emit a `progress` event as
+    each paper finishes so the caller can show which article is being scored,
+    then a final `done` event carrying the full ranked payload."""
+    _ss["inclusion_list"] = list(req.inclusion or [])
+    _ss["exclusion_list"] = list(req.exclusion or [])
+    pico = _to_pico(req.pico)
+    model_name = resolve_model_name(req.model) or LEADS_MODEL_NAME
+    _score_one = _rerank_score_one_factory(req, pico, model_name)
+
+    total = len(req.papers)
+    event_queue: "queue.Queue" = queue.Queue()
+
+    def _run():
+        scored: List[Dict[str, Any]] = []
+        try:
+            workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, total or 1))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                done_n = 0
+                for fut in as_completed([ex.submit(_score_one, p) for p in req.papers]):
+                    try:
+                        scored.append(fut.result())
+                    except Exception as e:
+                        print(f"[papers_rerank_stream] worker error: {e}")
+                    done_n += 1
+                    event_queue.put(("progress", {"done": done_n, "total": total}))
+            event_queue.put(("done", _rerank_finalize(req, scored, model_name)))
+        except Exception as e:
+            event_queue.put(("error", {"message": str(e)}))
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    def _gen():
+        while True:
+            try:
+                event_type, data = event_queue.get(timeout=600)
+            except queue.Empty:
+                yield f"event: error\ndata: {_json.dumps({'message': 'timeout'})}\n\n"
+                return
+            yield f"event: {event_type}\ndata: {_json.dumps(data)}\n\n"
+            if event_type in ("done", "error"):
+                return
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 class ScreenFullTextRequest(BaseModel):
@@ -2819,70 +2966,61 @@ def _retrieve_relevant_chunks(text: str, query: str, top_k: int = 6, chunk_chars
 
 class ExtractFieldsRequest(BaseModel):
     text: str
-    fields: List[Dict[str, Any]]           # [{id,label,type,options}]
+    fields: List[Dict[str, Any]]           # [{id,label,type,options,description}]
     title: Optional[str] = None
+    tables: Optional[str] = None           # extracted table text (numbers live here)
     model: Optional[str] = None
 
 
 @app.post("/api/extract/fields")
 def extract_fields(req: ExtractFieldsRequest):
-    """Pre-fill a structured extraction template from a paper's full text in a
-    single model call. Returns {values: {field_id: value}}. Values are a first
-    draft only; the reviewer confirms or corrects every one. Missing or
-    not-reported fields come back as an empty string."""
-    from langchain_core.messages import HumanMessage
+    """AI-assisted data extraction into a user-defined form. For each field the
+    model quotes the exact supporting snippet (locate-then-extract), so a reviewer
+    can verify at a glance. Numbers are validated and always flagged for review
+    (autonomous numeric exact-match is low; accuracy comes from human verification).
+
+    Returns:
+      values: {field_id: value}                      -- back-compat draft values
+      fields: [{id,label,type,value,source_quote,confidence,needs_review}]
+    Every value is a first draft; the reviewer confirms or corrects it."""
+    import extraction_forms
 
     text = (req.text or "").strip()
     fields = [f for f in (req.fields or []) if f.get("id")]
     if not text or not fields:
-        return {"values": {}}
+        return {"values": {}, "fields": []}
 
-    text_for_llm = text[:30000]
-    field_lines = []
+    # Map the form fields to the extractor's schema (name = field id so the
+    # returned values key by id, as the existing frontend expects).
+    ef_fields = []
     for f in fields:
-        fid = f.get("id")
-        label = f.get("label") or fid
-        ftype = f.get("type") or "text"
-        opts = f.get("options") or []
-        desc = (f.get("description") or "").strip()
-        bits = []
-        if ftype == "category" and opts:
-            bits.append("one of: " + ", ".join(opts))
-        elif ftype == "number":
-            bits.append("a number only")
-        if desc:
-            bits.append("look for: " + desc)
-        hint = f" ({'; '.join(bits)})" if bits else ""
-        field_lines.append(f'  "{fid}": <{label}{hint}>')
-    fields_block = ",\n".join(field_lines)
-
-    prompt = f"""You are extracting structured data from a scientific paper for a systematic
-review. Use ONLY the paper text below; do not use outside knowledge. If a field
-is not reported in the paper, return an empty string "" for it. Do not guess.
-
-{('PAPER TITLE: ' + req.title) if req.title else ''}
-
-PAPER TEXT:
-{text_for_llm}
-
-Return ONLY a JSON object with exactly these keys and nothing else:
-{{
-{fields_block}
-}}"""
+        ftype = (f.get("type") or "text").lower()
+        ftype = "number" if ftype in ("number", "numeric") else ("categorical" if ftype == "category" else ftype)
+        ef_fields.append({
+            "name": f["id"],
+            "type": ftype,
+            "description": (f.get("label") or f["id"]) + (
+                ". " + f["description"] if f.get("description") else ""),
+            "options": f.get("options") or None,
+        })
 
     model_name = resolve_for_thinking(req.model)
-    model = AIService.get_model(model_name)
-    values: Dict[str, Any] = {}
-    if model:
-        try:
-            r = model.invoke([HumanMessage(content=prompt)])
-            data = AIService._extract_json(r.content) or {}
-            if isinstance(data, dict):
-                allowed = {f["id"] for f in fields}
-                values = {k: ("" if v is None else v) for k, v in data.items() if k in allowed}
-        except Exception as e:
-            print(f"[extract_fields] LLM call failed: {e}")
-    return {"values": values}
+    result = extraction_forms.extract_form(
+        text=text[:30000], tables=(req.tables or ""), fields=ef_fields,
+        model_name=model_name, ai_service=AIService)
+
+    label_by_id = {f["id"]: (f.get("label") or f["id"]) for f in fields}
+    out_fields, values = [], {}
+    for ef in result.get("fields", []):
+        fid = ef["name"]
+        val = ef["value"]
+        values[fid] = "" if val is None else val
+        out_fields.append({
+            "id": fid, "label": label_by_id.get(fid, fid), "type": ef["type"],
+            "value": values[fid], "source_quote": ef["source_quote"],
+            "confidence": ef["confidence"], "needs_review": ef["needs_review"],
+        })
+    return {"values": values, "fields": out_fields, "model": model_name}
 
 
 @app.post("/api/extract/text")
@@ -3091,6 +3229,41 @@ def _classify_table(rows: List[List[str]], hint: str) -> str:
     return hint or "General"
 
 
+def _table_sig(rows: List[List[str]]) -> str:
+    """Content signature of a table (its first ~3 rows), for cross-source dedup."""
+    flat = " ".join(str(c).strip().lower() for r in (rows or [])[:3] for c in r if str(c).strip())
+    return re.sub(r"[^a-z0-9 ]+", "", flat).strip()[:180]
+
+
+def _rows_similar(a: List[List[str]], b: List[List[str]]) -> bool:
+    """True if two row-grids are the same underlying table (so the HTML, PDF, and
+    image passes don't each add a copy of the same table)."""
+    sa, sb = _table_sig(a), _table_sig(b)
+    if not sa or not sb:
+        return False
+    if sa == sb:
+        return True
+    short, long = (sa, sb) if len(sa) <= len(sb) else (sb, sa)
+    return len(short) > 24 and short in long
+
+
+def _dedup_tables(tables: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Union of tables from every source, keeping the first (highest-fidelity)
+    version of any duplicate. Callers pass sources in fidelity order:
+    HTML/JATS XML, then image-based recognition, then pdfplumber text."""
+    out: List[Dict[str, Any]] = []
+    for t in tables:
+        rows = t.get("data") or []
+        if not any(_rows_similar(rows, o.get("data") or []) for o in out):
+            out.append(t)
+    # renumber titles that were auto-generated ("Table N") so they stay sequential
+    n = 0
+    for t in out:
+        if re.fullmatch(r"Table \d+", str(t.get("title", ""))):
+            n += 1; t["title"] = f"Table {n}"
+    return out
+
+
 def _lookup_pmc_metadata(pmid: str) -> Dict[str, Optional[str]]:
     """Resolve a PubMed PMID to PMC ID + DOI via the EuPMC search endpoint.
 
@@ -3239,6 +3412,16 @@ def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str
         import pdfplumber
         out: List[Dict[str, Any]] = []
         idx = 0
+        # Optional higher-fidelity fallback: UniTable image-based recognition for
+        # pages where pdfplumber's text-layer heuristics find nothing (scanned
+        # pages, complex spanning tables). Guarded + OFF by default, so this line
+        # is a no-op unless EE_USE_UNITABLE=1 and the weights are present.
+        try:
+            import table_recognition as _tabrec
+            _uni_on = _tabrec.available()
+        except Exception:
+            _tabrec, _uni_on = None, False
+
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
                 found = page.extract_tables() or []
@@ -3247,19 +3430,35 @@ def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str
                         found = page.extract_tables(text_settings) or []
                     except Exception:
                         found = []
+                # pdfplumber (text-layer) tables on this page
+                page_tables: List[List[List[str]]] = []
                 for t in found:
                     rows = [
                         [(c or "").strip() for c in row]
                         for row in t if any((c or "").strip() for c in row)
                     ]
                     if _table_is_real(rows):
-                        idx += 1
-                        out.append({
-                            "title": f"Table {idx}",
-                            "type": _classify_table(rows, extraction_type or ""),
-                            "data": rows,
-                            "caption": "",
-                        })
+                        page_tables.append(rows)
+                # Image-based recognition runs on EVERY page (when enabled), and its
+                # result is added only if it isn't already one of pdfplumber's tables
+                # for this page. This catches image-only / scanned / complex-spanning
+                # tables that the text layer misses, without dropping the text ones.
+                if _uni_on:
+                    try:
+                        page_img = page.to_image(resolution=150).original
+                        irows = _tabrec.recognize_table_image(page_img)
+                        if irows and _table_is_real(irows) and not any(_rows_similar(irows, r) for r in page_tables):
+                            page_tables.append(irows)
+                    except Exception as _e:
+                        print(f"[extract_pdf_tables] unitable pass: {_e}")
+                for rows in page_tables:
+                    idx += 1
+                    out.append({
+                        "title": f"Table {idx}",
+                        "type": _classify_table(rows, extraction_type or ""),
+                        "data": rows,
+                        "caption": "",
+                    })
         return out
     except Exception as e:
         print(f"[extract_pdf_tables] {e}")
@@ -3450,25 +3649,32 @@ def extract_tables(req: ExtractTablesRequest):
 
     tables: List[Dict[str, Any]] = []
 
-    # Tier 1: Europe PMC JATS fullTextXML. Works for PMC and PubMed papers
-    # that have a PMC mirror — _extract_epmc_tables handles the PMID -> PMCID
-    # lookup transparently.
-    if pid and req.Source in {"PubMed", "Europe PMC"}:
-        tier1 = _extract_epmc_tables(pid, req.extraction_type or "")
-        if tier1:
-            tables.extend(tier1)
-            print(f"[extract_tables] {pid} tier1 (EuPMC XML) -> {len(tier1)} tables")
+    # Run BOTH the HTML/XML source AND the PDF (text + image) source and take the
+    # UNION, so a table that appears only in one is never missed. Sources are
+    # ordered by fidelity (HTML/JATS first, then image-based, then pdfplumber text
+    # inside _extract_pdf_tables); _dedup_tables keeps the first copy of any table.
 
-    # Tier 2: deterministic table parse from the acquired open-access PDF. The
-    # full-text acquisition step caches the PDF; pdfplumber reads its tables with
-    # no LLM, so results are reproducible.
-    if not tables:
-        pdf_bytes = _read_cached_pdf(req.paper_id, req.URL)
-        if pdf_bytes:
-            tier2 = _extract_pdf_tables(pdf_bytes, req.extraction_type or "")
-            if tier2:
-                tables.extend(tier2)
-                print(f"[extract_tables] {pid or 'no-id'} tier2 (OA PDF, deterministic) -> {len(tier2)} tables")
+    # Source A: Europe PMC JATS fullTextXML (structured HTML tables). Handles the
+    # PMID -> PMCID lookup transparently.
+    tier1: List[Dict[str, Any]] = []
+    if pid and req.Source in {"PubMed", "Europe PMC"}:
+        tier1 = _extract_epmc_tables(pid, req.extraction_type or "") or []
+        if tier1:
+            print(f"[extract_tables] {pid} HTML/XML -> {len(tier1)} tables")
+
+    # Source B: the acquired open-access PDF — pdfplumber text tables plus, when
+    # enabled, UniTable image-based recognition on every page (scanned / image-only
+    # / complex-spanning tables the text layer misses). Deterministic; run always.
+    tier2: List[Dict[str, Any]] = []
+    pdf_bytes = _read_cached_pdf(req.paper_id, req.URL)
+    if pdf_bytes:
+        tier2 = _extract_pdf_tables(pdf_bytes, req.extraction_type or "") or []
+        if tier2:
+            print(f"[extract_tables] {pid or 'no-id'} PDF (text+image) -> {len(tier2)} tables")
+
+    tables = _dedup_tables(tier1 + tier2)
+    if tier1 and tier2:
+        print(f"[extract_tables] {pid or 'no-id'} union HTML+PDF -> {len(tables)} unique tables")
 
     # Tier 3: LLM fallback over title + abstract + caller-supplied full text.
     # Non-deterministic; used only when neither the JATS XML nor a cached OA PDF
@@ -4644,20 +4850,33 @@ def _openalex_retracted(doi: str, title: Optional[str]) -> Optional[dict]:
 
 
 def _crossref_update(doi: str) -> Optional[dict]:
-    """Return a retraction/concern flag from Crossref update-to relations."""
+    """Return a retraction/concern flag from Crossref update-to relations, with
+    the linking notice's DOI and date so the reviewer can read the actual notice."""
     if not doi:
         return None
     try:
         r = requests.get(f"https://api.crossref.org/works/{doi}", params={"mailto": Config.ENTREZ_EMAIL}, timeout=8)
         if r.status_code != 200:
             return None
-        types = [(u.get("type") or "").lower() for u in (r.json().get("message", {}).get("update-to") or [])]
-        if any("retract" in t for t in types):
-            return {"status": "retracted", "detail": "Crossref lists a retraction", "source": "Crossref"}
-        if any("concern" in t for t in types):
-            return {"status": "concern", "detail": "Crossref lists an expression of concern", "source": "Crossref"}
-        if any(("correct" in t or "erratum" in t) for t in types):
-            return {"status": "correction", "detail": "Crossref lists a correction or erratum", "source": "Crossref"}
+        updates = r.json().get("message", {}).get("update-to") or []
+
+        def _match(pred, status, label):
+            for u in updates:
+                t = (u.get("type") or "").lower()
+                if pred(t):
+                    parts = ((u.get("updated") or {}).get("date-parts") or [[]])[0]
+                    date = "-".join(f"{x:02d}" if i else str(x) for i, x in enumerate(parts)) if parts else ""
+                    notice_label = (u.get("label") or "").strip()
+                    detail = label + (f" on {date}" if date else "")
+                    if notice_label and notice_label.lower() not in label.lower():
+                        detail += f" — {notice_label}"
+                    return {"status": status, "detail": detail, "source": "Crossref",
+                            "notice_doi": (u.get("DOI") or "").strip(), "notice_date": date}
+            return None
+
+        return (_match(lambda t: "retract" in t, "retracted", "Retraction notice issued")
+                or _match(lambda t: "concern" in t, "concern", "Expression of concern issued")
+                or _match(lambda t: ("correct" in t or "erratum" in t), "correction", "Correction/erratum issued"))
     except Exception as e:
         print(f"[integrity/crossref] {e}")
     return None
@@ -4665,7 +4884,8 @@ def _crossref_update(doi: str) -> Optional[dict]:
 
 def _check_integrity_one(p: IntegrityPaper) -> dict:
     doi = _norm_doi(p.doi)
-    out = {"paper_id": p.paper_id, "status": "unknown", "detail": "No DOI to check", "source": "", "doi": doi}
+    out = {"paper_id": p.paper_id, "status": "unknown", "detail": "No DOI to check",
+           "source": "", "doi": doi, "notice_doi": "", "notice_date": ""}
     oa = _openalex_retracted(doi, p.title)
     if oa:
         out.update(oa)

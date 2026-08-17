@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { motion } from "motion/react";
 import { useStore } from "../lib/store";
 import {
   QualityService, Paper,
@@ -19,6 +20,7 @@ import { Label } from "../components/ui/label";
 import {
   Copy, ShieldCheck, ShieldAlert, AlertTriangle, ArrowRight, CheckCircle2, Search,
   Pencil, History, RotateCcw, FileDown, Plus, Trash2, Loader2, HelpCircle, ChevronRight, ChevronDown, Quote,
+  Image as ImageIcon, ExternalLink,
 } from "lucide-react";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import {
@@ -436,8 +438,9 @@ export function QualityPage() {
       <div className="inline-flex items-center gap-1 rounded-lg border bg-muted/50 p-0.5 w-fit">
         {([["appraisal", "Risk of bias", ShieldCheck], ["integrity", "Research integrity", ShieldAlert]] as const).map(([id, label, Icon]) => (
           <button key={id} onClick={() => setQualityTab(id)}
-            className={`inline-flex items-center gap-1.5 rounded-md px-3 h-8 text-sm font-medium transition-colors ${qualityTab === id ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
-            <Icon className="size-3.5" />{label}
+            className={`relative inline-flex items-center gap-1.5 rounded-md px-3 h-8 text-sm font-medium transition-colors ${qualityTab === id ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+            {qualityTab === id && <motion.span layoutId="quality-tab-indicator" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded-md bg-card shadow-sm" />}
+            <span className="relative z-10 inline-flex items-center gap-1.5"><Icon className="size-3.5" />{label}</span>
           </button>
         ))}
       </div>
@@ -470,7 +473,8 @@ export function QualityPage() {
               onCancel={() => s.cancelTask("quality-assess")}
             />
           )}
-          <Button onClick={() => runAssess()} disabled={running || includedPapers().papers.length === 0} size="lg" className="w-full">
+          <Button onClick={() => runAssess()} disabled={running || includedPapers().papers.length === 0} size="lg" className="w-full"
+                  title="Run an AI risk-of-bias appraisal on every included article">
             <ShieldCheck className="size-4 mr-2" />{running ? "Appraising…" : "Appraise Risk of Bias on Included Articles"}
           </Button>
         </>
@@ -482,17 +486,18 @@ export function QualityPage() {
             stats={<>
               <InlineStat icon={ShieldCheck} value={reports.length} label="Appraised" />
               <PaneDivider />
-              <InlineStat icon={CheckCircle2} value={summaryCounts.low} label="Low RoB" tone="success" />
-              <InlineStat icon={AlertTriangle} value={summaryCounts.some} label="Some concerns" tone="amber" />
-              <InlineStat icon={ShieldAlert} value={summaryCounts.high} label="High RoB" tone="danger" />
+              <InlineStat icon={CheckCircle2} value={summaryCounts.low} label="Low" tone="success" />
+              <InlineStat icon={AlertTriangle} value={summaryCounts.some} label="Some" tone="amber" />
+              <InlineStat icon={ShieldAlert} value={summaryCounts.high} label="High" tone="danger" />
+              {summaryCounts.no_info > 0 && <InlineStat icon={HelpCircle} value={summaryCounts.no_info} label="Unclear" tone="neutral" />}
             </>}
             actions={<>
               <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
-                <SelectTrigger className="h-8 w-[190px] text-xs" title="Framework: re-run all articles with one instrument, or auto-match each to its study design.">
-                  <SelectValue placeholder="Auto: match by design" />
+                <SelectTrigger className="h-8 w-[140px] text-xs" title="Framework: re-run all articles with one instrument, or auto-match each to its study design.">
+                  <SelectValue placeholder="Auto-match" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__auto">Auto: match each article's design</SelectItem>
+                  <SelectItem value="__auto">Auto-match</SelectItem>
                   {["internal_validity", "reporting", "certainty"]
                     .filter(ax => instruments.some(i => i.axis === ax))
                     .map(ax => (
@@ -507,22 +512,24 @@ export function QualityPage() {
                     ))}
                 </SelectContent>
               </Select>
-              <Button size="sm" className="h-8 shadow-sm" onClick={() => runAssess(bulkInstrument !== "__auto" ? bulkInstrument : undefined)} disabled={running}>
+              <Button size="sm" className="h-8 shadow-sm" title="Re-appraise every article with the selected framework" onClick={() => runAssess(bulkInstrument !== "__auto" ? bulkInstrument : undefined)} disabled={running}>
                 <RotateCcw className="size-3.5 mr-1.5" />{running ? "Re-running…" : "Re-run"}
               </Button>
               <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
               <div className="inline-flex rounded-md border p-0.5" title="Exclusion policy by risk of bias. Uses your edited judgments where set.">
                 {([
-                  ["none", "Keep all"],
-                  ["any_high", "Any High"],
-                  ["two_or_more_high", "≥ 2 High"],
-                ] as const).map(([id, label]) => (
+                  ["none", "Keep all", "Carry every article forward regardless of risk of bias"],
+                  ["any_high", "Any High", "Exclude articles with any domain judged High risk of bias"],
+                  ["two_or_more_high", "≥ 2 High", "Exclude articles with 2 or more domains judged High"],
+                ] as const).map(([id, label, tip]) => (
                   <button
                     key={id}
                     onClick={() => applyExcludeRule(id)}
-                    className={`h-7 rounded px-2.5 text-xs font-medium transition-colors ${excludeRule === id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+                    title={tip}
+                    className={`relative h-7 rounded px-2.5 text-xs font-medium transition-colors ${excludeRule === id ? "text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
                   >
-                    {label}
+                    {excludeRule === id && <motion.span layoutId="rob-exclude-indicator" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded bg-primary" />}
+                    <span className="relative z-10">{label}</span>
                   </button>
                 ))}
               </div>
@@ -562,6 +569,15 @@ export function QualityPage() {
               ) : (
                 <h3 className="font-medium">Risk-of-bias appraisal</h3>
               )}
+              {/* Output icons, top-right (same placement as Table Extraction). */}
+              <div className="flex items-center gap-1 ml-auto">
+                <Button variant="ghost" size="sm" className="size-8 px-0 text-muted-foreground" title="Export appraisals (CSV + JSON)" onClick={() => exportAssessments(reports, overrides)}>
+                  <FileDown className="size-4" />
+                </Button>
+                <Button variant="ghost" size="sm" className="size-8 px-0 text-muted-foreground" title="Export bias figure (SVG)" onClick={() => exportBiasFigure(reports, overrides)}>
+                  <ImageIcon className="size-4" />
+                </Button>
+              </div>
             </div>
             {/* ── Two-pane: paper list (left) + selected appraisal (right) ───── */}
             <div className="flex gap-4 h-[calc(100vh-22rem)] min-h-[32rem]">
@@ -657,17 +673,6 @@ export function QualityPage() {
 
             {/* Outputs are part of the appraisal box; the integrity check is a
                 tucked-away option toggled from here. */}
-            <div className="flex flex-wrap items-center justify-end gap-2 border-t pt-3 mt-3">
-              <Button variant="outline" size="sm" className="h-8" onClick={() => exportAssessments(reports, overrides)}>
-                <FileDown className="size-3.5 mr-1.5" />Export (CSV + JSON)
-              </Button>
-              <Button variant="outline" size="sm" className="h-8" onClick={() => exportBiasFigure(reports, overrides)}>
-                <FileDown className="size-3.5 mr-1.5" />Figure (SVG)
-              </Button>
-              <Button size="sm" className="h-8 shadow-sm" onClick={() => s.setPage("prisma")}>
-                <ArrowRight className="size-3.5 mr-1.5" />Continue to Diagramming
-              </Button>
-            </div>
           </Card>
         </>
       )}
@@ -726,7 +731,15 @@ function PaperDetail({
             <span className="text-muted-foreground">Keep</span>
           </label>
           <div className="flex-1 min-w-0">
-            <div className="font-medium leading-snug">{report.title}</div>
+            {report.url ? (
+              <a href={report.url} target="_blank" rel="noreferrer" title="Open the source article"
+                 className="group font-medium leading-snug hover:text-primary transition-colors">
+                {report.title}
+                <ExternalLink className="inline size-3 ml-1 align-[-1px] opacity-40 group-hover:opacity-90 transition-opacity" />
+              </a>
+            ) : (
+              <div className="font-medium leading-snug">{report.title}</div>
+            )}
             <div className="flex flex-wrap items-center gap-2 text-xs mt-2">
               <OverallBadge judgment={overall.judgment} />
               <Badge variant="outline">{report.study_design || "Other"}</Badge>
@@ -743,17 +756,8 @@ function PaperDetail({
                   Abstract only
                 </Badge>
               )}
-              {report.url && (
-                <a href={report.url} target="_blank" rel="noreferrer" className="text-primary hover:underline">
-                  source
-                </a>
-              )}
             </div>
           </div>
-        </div>
-        <div className="text-xs text-muted-foreground italic">
-          Overall: <span className="not-italic font-medium">{overall.judgment}</span>
-          {". "}{overall.rationale}
         </div>
         {archived.length > 0 && (
           <SavedAppraisals
@@ -960,36 +964,37 @@ function DomainList({
               />
             </div>
 
-            {/* Reasoning */}
-            {d.rationale && (
-              <p className="px-3 text-[13px] text-muted-foreground leading-relaxed">
-                {d.rationale}
-                {evidenceCitation(d) && (
-                  <span className="ml-1 font-medium text-foreground/70" title="Source section(s) this judgment draws on">{evidenceCitation(d)}</span>
+            {/* Body: reasoning + evidence, consistently inset and spaced so the
+                nested quote box aligns with the text and the card breathes. */}
+            {(d.rationale || d.supporting_quote || override) && (
+              <div className="px-3 pb-3 space-y-2.5">
+                {d.rationale && (
+                  <p className="text-[13px] text-muted-foreground leading-relaxed">
+                    {d.rationale}
+                    {evidenceCitation(d) && (
+                      <span className="ml-1 font-medium text-foreground/70" title="Source section(s) this judgment draws on">{evidenceCitation(d)}</span>
+                    )}
+                  </p>
                 )}
-              </p>
-            )}
-
-            {/* Primary citation from the text */}
-            {d.supporting_quote && (
-              <figure className="mx-3 mt-2 rounded-md bg-muted/40 border-l-2 border-primary/50 px-3 py-2">
-                <blockquote className="text-xs italic text-foreground/85 break-words">
-                  <Quote className="inline size-3 -mt-0.5 mr-1 text-primary/60" />
-                  {d.supporting_quote}
-                </blockquote>
-                {d.section && (
-                  <figcaption className="mt-1 text-[11px] not-italic text-muted-foreground">{d.section}</figcaption>
+                {d.supporting_quote && (
+                  <figure className="rounded-lg bg-muted/50 ring-1 ring-border/60 border-l-2 border-l-primary/60 px-3 py-2.5">
+                    <blockquote className="text-xs italic text-foreground/85 break-words leading-relaxed">
+                      <Quote className="inline size-3 -mt-0.5 mr-1 text-primary/60" />
+                      {d.supporting_quote}
+                    </blockquote>
+                    {d.section && (
+                      <figcaption className="mt-1.5 text-[11px] not-italic text-muted-foreground">{d.section}</figcaption>
+                    )}
+                  </figure>
                 )}
-              </figure>
-            )}
-
-            {/* Reviewer edit audit line */}
-            {override && (
-              <div className="mx-3 mt-2 text-[11px] text-muted-foreground flex items-start gap-1.5">
-                <Pencil className="size-3 mt-0.5 shrink-0" />
-                <span>
-                  Reviewer-edited from <span className="font-medium">{displayJudgment(override.original_judgment)}</span>: <span className="italic">"{override.reason}"</span> · {new Date(override.timestamp).toLocaleString()}
-                </span>
+                {override && (
+                  <div className="text-[11px] text-muted-foreground flex items-start gap-1.5">
+                    <Pencil className="size-3 mt-0.5 shrink-0" />
+                    <span>
+                      Reviewer-edited from <span className="font-medium">{displayJudgment(override.original_judgment)}</span>: <span className="italic">"{override.reason}"</span> · {new Date(override.timestamp).toLocaleString()}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
 

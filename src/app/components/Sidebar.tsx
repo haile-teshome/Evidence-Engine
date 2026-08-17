@@ -1,13 +1,17 @@
 import { useEffect, useRef, useState } from "react";
+import { motion } from "motion/react";
 import { Card } from "./ui/card";
 import { Label } from "./ui/label";
 import { Checkbox } from "./ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
-import { Upload, FileText, X, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, PenLine } from "lucide-react";
+import { Upload, FileText, X, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, PenLine, KeyRound } from "lucide-react";
 import { Logo } from "./Logo";
 import { ALL_SOURCES } from "../lib/mockServices";
+import { providerForModel } from "../lib/apiClient";
+import { providerReady, needsUnlock as ksNeedsUnlock, subscribe as ksSubscribe } from "../lib/keystore";
+import { ApiKeysDialog } from "./ApiKeysDialog";
 import { useStore, PageId } from "../lib/store";
 import { SessionsPanel } from "./SessionsPanel";
 
@@ -71,6 +75,15 @@ export function Sidebar() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [localModels, setLocalModels] = useState<string[]>([]);
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
+  const [keysOpen, setKeysOpen] = useState(false);
+  const [, forceKeys] = useState(0);
+  // Re-render when the keystore changes (mode switch, unlock/lock, save).
+  useEffect(() => ksSubscribe(() => forceKeys(v => v + 1)), []);
+
+  // Cloud model selected: does it need a key, or an unlock of encrypted keys?
+  const modelProvider = providerForModel(s.model);
+  const needUnlock = !!modelProvider && ksNeedsUnlock();
+  const missingKey = !!modelProvider && !needUnlock && !providerReady(modelProvider);
 
   useEffect(() => {
     fetch("/api/models/local")
@@ -105,13 +118,15 @@ export function Sidebar() {
   };
 
   // Only open-access sources are offered, so every listed database works without
-  // any institutional login or subscription.
-  const visibleSources = ALL_SOURCES;
+  // any institutional login or subscription. "Local PDFs" is not a searchable
+  // database (attaching your own PDFs is done from the chat's + button, which
+  // records them automatically), so it isn't shown as a togglable source here.
+  const visibleSources = ALL_SOURCES.filter(src => src !== "Local PDFs");
 
   return (
-    <aside className="w-72 shrink-0 border-r bg-muted/30 h-screen sticky top-0 flex flex-col">
+    <aside className="w-72 shrink-0 h-screen sticky top-0 flex flex-col border-r border-black/[0.08] dark:border-white/[0.1] bg-background/55 backdrop-blur-2xl backdrop-saturate-150 shadow-[inset_-1px_0_0_0_rgba(255,255,255,0.12)]">
       {/* Brand header: fixed bar, distinct from the navigation below. */}
-      <div className="shrink-0 px-4 py-3.5 border-b bg-background/80 backdrop-blur-sm">
+      <div className="shrink-0 px-4 py-3.5 border-b border-white/30 dark:border-white/[0.06] bg-background/40 backdrop-blur-xl backdrop-saturate-150">
         <Logo />
       </div>
 
@@ -145,11 +160,29 @@ export function Sidebar() {
             const active = s.page === n.id;
             return (
               <button key={n.id} onClick={() => s.setPage(n.id)}
-                className={`group w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${active ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}>
-                <span className="inline-flex shrink-0 transition-transform duration-200 ease-out group-hover:scale-125">
+                className={`group relative w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors duration-200 ${
+                  active
+                    ? "text-primary-foreground"
+                    : "text-foreground/80 hover:bg-white/50 dark:hover:bg-white/[0.06] hover:backdrop-blur-sm"
+                }`}>
+                {/* The premium glass pill is a SHARED-LAYOUT element: when the active
+                    page changes it animates (slides) from the old item to the new one. */}
+                {active && (
+                  <motion.span
+                    layoutId="activeNavGlass"
+                    transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.7 }}
+                    className="absolute inset-0 rounded-xl overflow-hidden bg-gradient-to-b from-primary/80 to-primary/60 backdrop-blur-xl backdrop-saturate-150 border border-white/40 dark:border-white/20 ring-1 ring-inset ring-white/25 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.28),0_1px_0_0_rgba(255,255,255,0.45)_inset,0_-10px_18px_-10px_rgba(0,0,0,0.2)_inset]"
+                  >
+                    {/* Specular glass sheen: bright top-lit highlight fading down */}
+                    <span className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/35 via-white/5 to-transparent" />
+                    {/* Crisp top edge line */}
+                    <span className="pointer-events-none absolute inset-x-1.5 top-0 h-px bg-white/60 rounded-full blur-[0.3px]" />
+                  </motion.span>
+                )}
+                <span className="relative z-10 inline-flex shrink-0 transition-transform duration-200 ease-out group-hover:scale-125">
                   <Icon className={`size-4 ${ANIM[n.anim]}`} />
                 </span>
-                {n.label}
+                <span className="relative z-10">{n.label}</span>
               </button>
             );
           })}
@@ -203,7 +236,26 @@ export function Sidebar() {
               screening will work once it finishes. You can use a cloud model in the meantime.
             </p>
           )}
+          {needUnlock || missingKey ? (
+            <div className="mt-2 flex items-center gap-2 rounded-md border border-amber-300/70 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/30 px-2.5 py-2">
+              <KeyRound className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
+              <span className="flex-1 text-xs text-amber-800 dark:text-amber-200 leading-snug">
+                {needUnlock ? "Unlock your keys to use this model." : "This model needs an API key to run."}
+              </span>
+              <button type="button" onClick={() => setKeysOpen(true)}
+                className="shrink-0 rounded-md bg-amber-600 px-2 py-1 text-xs font-medium leading-none text-white hover:bg-amber-700">
+                {needUnlock ? "Unlock" : "Add key"}
+              </button>
+            </div>
+          ) : (
+            <button type="button" onClick={() => setKeysOpen(true)}
+              className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+              <KeyRound className="size-3.5" />Manage API keys
+            </button>
+          )}
         </Card>
+
+        <ApiKeysDialog open={keysOpen} onOpenChange={setKeysOpen} highlight={modelProvider} />
 
         <Card className="p-3 mb-3">
           <Label className="mb-2 block">Active Databases</Label>

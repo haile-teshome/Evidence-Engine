@@ -7,7 +7,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { bucketAbstractExclusions, bucketFullTextExclusions } from "./lib/exclusionBucketing";
 import { Toaster } from "./components/ui/sonner";
 import { StoreProvider, useStore } from "./lib/store";
-import { AuthProvider } from "./lib/auth";
+import { AuthProvider, useAuth } from "./lib/auth";
+import { AuthScreen } from "./components/AuthScreen";
 import { BackendReadyProvider, useEngineStatus } from "./lib/backendReady";
 import { UserMenu } from "./components/UserMenu";
 // QualityPage stays static because RiskOfBiasSummary (used inline on the
@@ -305,14 +306,31 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
   }
 }
 
+// Gate the app behind login. The store (and everything below) only mounts once
+// a user is signed in, so all data loads under their account id.
+function AuthGate({ children }: { children: ReactNode }) {
+  const { status } = useAuth();
+  if (status === "loading") {
+    return (
+      <div className="min-h-screen grid place-items-center text-muted-foreground">
+        <Loader2 className="size-6 animate-spin" />
+      </div>
+    );
+  }
+  if (status === "anon") return <AuthScreen />;
+  return <>{children}</>;
+}
+
 export default function App() {
   return (
     <ErrorBoundary>
       <BackendReadyProvider>
         <AuthProvider>
-          <StoreProvider>
-            <Shell />
-          </StoreProvider>
+          <AuthGate>
+            <StoreProvider>
+              <Shell />
+            </StoreProvider>
+          </AuthGate>
         </AuthProvider>
       </BackendReadyProvider>
     </ErrorBoundary>

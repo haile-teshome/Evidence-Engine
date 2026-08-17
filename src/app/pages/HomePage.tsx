@@ -17,7 +17,7 @@ import { PicoCards } from "../components/PicoCards";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2, Hand, Files } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2, Hand, Files, Telescope } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
 import { ProtocolPanel } from "../components/ProtocolPanel";
@@ -153,6 +153,106 @@ function CriteriaList({
   );
 }
 
+// Deep-scan supplementary-search trace: shows the gap the agent targeted and the
+// query it ran, editable and re-runnable for the latest strategy.
+function DeepScanBlock({
+  trace, isLatest, busy, onRerun,
+}: {
+  trace: { query: string; rationale: string; tactic: string; retrieved: number; added: number };
+  isLatest: boolean;
+  busy: boolean;
+  onRerun: (query: string) => void;
+}) {
+  const [draft, setDraft] = useState(trace.query);
+  const dirty = draft.trim() !== trace.query.trim();
+  return (
+    <div className="rounded-lg border border-primary/25 bg-primary/[0.03] p-3 space-y-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <Telescope className="size-4 text-primary shrink-0" />
+          <span className="text-sm font-semibold text-foreground">Supplementary search (deep scan)</span>
+          {trace.tactic && (
+            <span className="text-[10px] uppercase tracking-wide font-medium text-primary/80 bg-primary/10 rounded px-1.5 py-0.5 whitespace-nowrap">{trace.tactic}</span>
+          )}
+        </div>
+        <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0" title="Articles this round added to the relevant set, and how many it retrieved">
+          +{trace.added} added · {trace.retrieved} retrieved
+        </span>
+      </div>
+      {trace.rationale && (
+        <p className="text-xs text-muted-foreground leading-snug">
+          <span className="font-medium text-foreground/80">Gap targeted: </span>{trace.rationale}
+        </p>
+      )}
+      <Textarea value={draft} onChange={e => setDraft(e.target.value)} rows={4}
+        className="font-mono text-xs" disabled={!isLatest || busy}
+        title={isLatest ? "Edit the supplementary query and re-run it" : "Only the latest strategy's supplementary search can be re-run"} />
+      {isLatest ? (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-muted-foreground">
+            {dirty ? "Edited — re-run to apply." : "Re-run to search again with this query."}
+          </span>
+          <Button size="sm" variant="outline" className="h-8" onClick={() => onRerun(draft)} disabled={busy || !draft.trim()}>
+            {busy ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <RotateCcw className="size-3.5 mr-1.5" />}
+            {busy ? "Searching…" : "Re-run supplementary search"}
+          </Button>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">This supplementary search was logged with the review. Re-running is available on the latest strategy only.</p>
+      )}
+    </div>
+  );
+}
+
+// Human-in-the-loop review of the deep-scan supplementary query, shown BEFORE
+// the round fetches anything so the reviewer can edit, run, or skip it.
+function SupplementaryReviewModal({
+  review, onRun, onSkip,
+}: {
+  review: { query: string; rationale: string; tactic: string };
+  onRun: (query: string) => void;
+  onSkip: () => void;
+}) {
+  const [draft, setDraft] = useState(review.query);
+  return (
+    <Dialog open onOpenChange={o => { if (!o) onSkip(); }}>
+      <DialogContent className="sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-base">
+            <Telescope className="size-4 text-primary" />Review the supplementary search
+          </DialogTitle>
+        </DialogHeader>
+        <div className="space-y-3">
+          <p className="text-sm text-muted-foreground leading-snug">
+            Deep scan proposes one extra search to catch studies the first query missed. Edit it, run it, or skip this round. Your primary documented search is unchanged either way.
+          </p>
+          {review.rationale && (
+            <div className="rounded-md border bg-muted/30 p-3 text-sm">
+              {review.tactic && (
+                <div className="mb-1">
+                  <span className="text-[10px] uppercase tracking-wide font-medium text-primary/80 bg-primary/10 rounded px-1.5 py-0.5">{review.tactic}</span>
+                </div>
+              )}
+              <span className="text-muted-foreground"><span className="font-medium text-foreground/80">Gap targeted: </span>{review.rationale}</span>
+            </div>
+          )}
+          <div>
+            <label className="text-sm font-medium">Supplementary query</label>
+            <Textarea value={draft} onChange={e => setDraft(e.target.value)} rows={5} className="font-mono text-xs mt-1.5" autoFocus />
+            <p className="text-xs text-muted-foreground mt-1.5">Runs against your selected sources and is logged as a supplementary search.</p>
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <Button variant="ghost" onClick={onSkip}>Skip this round</Button>
+          <Button onClick={() => onRun(draft)} disabled={!draft.trim()}>
+            <Send className="size-4 mr-1.5" />Run search
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function QueryBlock({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -271,14 +371,18 @@ function SummaryText({ text, onCite }: { text: string; onCite?: (n: number) => v
 }
 
 const INITIAL_STAGES: Stage[] = [
-  { id: "pico", label: "Infer PICO framework", status: "pending" },
-  { id: "query", label: "Generate MeSH search string", status: "pending" },
-  { id: "papers", label: "Fetch an initial sample of articles", status: "pending" },
-  { id: "rerank", label: "Score articles for relevance (LEADS)", status: "pending" },
+  // Four phases: frame the question (pico + formal question), build the search
+  // (MeSH string + adversarial variant), retrieve (fetch + score), then scope
+  // what's there (summary + refinements). PICO-derived steps are grouped with
+  // framing/search rather than scattered through retrieval.
+  { id: "pico", label: "Infer PICO elements", status: "pending" },
   { id: "question", label: "Draft formal research question", status: "pending" },
+  { id: "query", label: "Generate MeSH search string", status: "pending" },
+  { id: "adversarial", label: "Build adversarial search", status: "pending" },
+  { id: "papers", label: "Fetch an initial sample of articles", status: "pending" },
+  { id: "rerank", label: "Score articles for relevance", status: "pending" },
   { id: "summary", label: "Summarize the literature found", status: "pending" },
   { id: "suggestions", label: "Suggest refinements", status: "pending" },
-  { id: "adversarial", label: "Build adversarial search", status: "pending" },
 ];
 
 // Default LEADS aggregate score threshold for the pre-summary relevance filter.
@@ -772,6 +876,21 @@ export function HomePage() {
   const attachRef = useRef<HTMLInputElement>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [input, setInput] = useState("");
+  // Deep scan: run one extra logged, adaptive search round after the first pass.
+  // Off by default so the quick path is unchanged; persisted across reloads.
+  const [deepScan, setDeepScan] = useState(() => {
+    try { return localStorage.getItem("ee-home-deepscan") === "1"; } catch { return false; }
+  });
+  const toggleDeepScan = () => setDeepScan(v => {
+    const nv = !v;
+    try { localStorage.setItem("ee-home-deepscan", nv ? "1" : "0"); } catch { /* ignore */ }
+    return nv;
+  });
+  // Human-in-the-loop checkpoint for the deep-scan round: the pipeline sets this
+  // to the proposed supplementary query and awaits the reviewer via the resolver
+  // (run with a possibly-edited query, or skip) before any supplementary fetch.
+  const [suppReview, setSuppReview] = useState<null | { query: string; rationale: string; tactic: string }>(null);
+  const suppResolverRef = useRef<((r: { query: string } | null) => void) | null>(null);
   // Conversational Q&A over the documents in play (retrieved / uploaded / cited
   // in explanations). Answered by the same main chat, shown as conversation turns.
   // Persisted in the store so they survive a refresh, like the search history.
@@ -858,7 +977,7 @@ export function HomePage() {
     if (!qq) return;
     setInput("");
     const idx = qaTurns.length;
-    setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true }]);
+    setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true, ts: Date.now() }]);
     const history = qaTurns.flatMap(t => [
       { role: "user", content: t.question },
       { role: "assistant", content: t.answer },
@@ -878,7 +997,7 @@ export function HomePage() {
     if (!set.length) { toast.error("No documents to ask about yet. Run a search or attach studies."); return; }
     setInput("");
     const idx = qaTurns.length;
-    setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true }]);
+    setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true, ts: Date.now() }]);
     try {
       const r = await AIService.askDocuments(qq, set.map(d => ({ id: d.id, title: d.title, text: d.text.slice(0, 4000) })));
       setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: r.answer, sources: r.documents, busy: false } : x));
@@ -886,6 +1005,72 @@ export function HomePage() {
       setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: e?.message || "Sorry, that failed. Please try again.", busy: false } : x));
     }
   }
+
+  // Re-run the deep-scan supplementary search for the latest strategy with an
+  // (optionally edited) query: fetch, dedupe against everything already found,
+  // score the new papers, merge them into the relevance set, re-summarise, and
+  // log the search. Latest-only, because rerankResults holds just the last pass.
+  const [rerunningSupp, setRerunningSupp] = useState(false);
+  async function rerunSupplementary(editedQuery: string) {
+    const q = editedQuery.trim();
+    if (!q) { toast.error("Enter a supplementary query first."); return; }
+    const latestIdx = s.history.length - 1;
+    const entry = s.history[latestIdx];
+    if (!entry) return;
+    setRerunningSupp(true);
+    try {
+      const pico = { population: s.pico.population, intervention: s.pico.intervention, comparator: s.pico.comparator, outcome: s.pico.outcome };
+      const seen = new Set((s.rawPapers || []).map(p => p.id));
+      const fetched = await DataAggregator.fetchAll(q, s.sources, pico, undefined);
+      const fresh = (fetched?.papers || []).filter(p => !seen.has(p.id));
+
+      // Log this (re-run) supplementary search.
+      const counts: Record<string, number> = {};
+      for (const p of fresh) counts[p.source] = (counts[p.source] || 0) + 1;
+      const rows = Object.keys(counts).length
+        ? Object.entries(counts).map(([source, count]) => ({ source, query: q, count }))
+        : [{ source: s.sources.join(", ") || "databases", query: q, count: 0 }];
+      s.setSearchLog(prev => [...prev, { id: Date.now().toString(36), ranAt: new Date().toISOString(), rows }]);
+
+      let added = 0;
+      if (fresh.length > 0) {
+        s.setRawPapers([...(s.rawPapers || []), ...fresh]);
+        const reranked = await DataAggregator.rerankByRelevance(fresh, pico, entry.inclusion, entry.exclusion, -1.0, undefined);
+        const newKept = reranked.kept.map(r => r.paper);
+        added = newKept.length;
+        const priorKept = s.rerankResults ? s.rerankResults.kept.map(r => r.paper) : [];
+        if (s.rerankResults) {
+          s.setRerankResults({
+            ...s.rerankResults,
+            ranked: [...s.rerankResults.ranked, ...reranked.ranked],
+            kept: [...s.rerankResults.kept, ...reranked.kept],
+            total_scored: (s.rerankResults.total_scored || 0) + reranked.total_scored,
+            total_kept: (s.rerankResults.total_kept || 0) + reranked.total_kept,
+          });
+        }
+        // Re-summarise from the merged kept set so the summary reflects the additions.
+        const keptPapers = [...priorKept, ...newKept];
+        const summ = await AIService.generateComprehensiveSummaryWithRefs(entry.goal, keptPapers);
+        s.setHistory(h => h.map((e, i) => i === latestIdx ? {
+          ...e,
+          summary: summ?.summary || e.summary,
+          references: summ?.references || e.references,
+          deep_scan: { query: q, rationale: e.deep_scan?.rationale || "", tactic: e.deep_scan?.tactic || "manual edit", retrieved: fetched?.papers.length ?? 0, added },
+        } : e));
+      } else {
+        s.setHistory(h => h.map((e, i) => i === latestIdx ? {
+          ...e,
+          deep_scan: { query: q, rationale: e.deep_scan?.rationale || "", tactic: e.deep_scan?.tactic || "manual edit", retrieved: fetched?.papers.length ?? 0, added: 0 },
+        } : e));
+      }
+      toast.success(added ? `Added ${added} new article${added === 1 ? "" : "s"} from the supplementary search` : "No new articles from that query");
+    } catch (e: any) {
+      toast.error(e?.message || "Supplementary re-run failed");
+    } finally {
+      setRerunningSupp(false);
+    }
+  }
+
   const [refining, setRefining] = useState(false);
   const [refinement, setRefinement] = useState<null | {
     field: "population" | "intervention" | "comparator" | "outcome";
@@ -1004,7 +1189,18 @@ export function HomePage() {
       .join("; ");
     const effectiveText = clarifyExtras ? `${t}\n\nFurther context. ${clarifyExtras}` : t;
 
-    const { abort } = s.startTask("home-analysis", INITIAL_STAGES.map(st => ({ ...st, status: "pending" as const })));
+    const submittedAt = Date.now();   // stamp the eventual history entry with submit time so it interleaves with chat turns in order
+    // Deep scan inserts one adaptive round (expand → fetch → score) right after
+    // the first relevance pass, before the literature is summarised.
+    const stageList: Stage[] = INITIAL_STAGES.flatMap(st =>
+      st.id === "rerank" && deepScan
+        ? [st,
+           { id: "expand", label: "Expand the search to fill gaps", status: "pending" as const },
+           { id: "papers2", label: "Fetch supplementary articles", status: "pending" as const },
+           { id: "rerank2", label: "Score supplementary articles", status: "pending" as const }]
+        : [st],
+    ).map(st => ({ ...st, status: "pending" as const }));
+    const { abort } = s.startTask("home-analysis", stageList);
     const signal = abort.signal;
 
     try {
@@ -1025,7 +1221,15 @@ export function HomePage() {
       s.setExclusion(analysis.exclusion);
       s.setQuery(analysis.query);
       s.setUnifiedSearchQuery(analysis.query);
+
+      // Frame the question: formalise it from PICO before the search is shown.
+      const formalQ = await runStage("question", signal, sig => AIService.generateFormalQuestion(newPico, sig));
+
+      // Build the search: the MeSH string came back with the PICO call, so it's
+      // ready to mark done; then derive the adversarial (counter-evidence) variant
+      //  as a companion to the main search rather than a post-hoc afterthought.
       markStage("query", { status: "done", detail: analysis.query ? analysis.query.slice(0, 60) + "…" : undefined });
+      const adv = await runStage("adversarial", signal, sig => AIService.generateAdversarialQuery(newPico, sig));
 
       // 2. If the user uploaded their own studies, analyse THOSE (no database
       //    fetch). Otherwise fetch a wide sample so the relevance filter has room.
@@ -1059,17 +1263,28 @@ export function HomePage() {
       // junk-heavy or clean.
       let relevantPapers = papers;
       if (papers.length > 0) {
-        const reranked = await runStage("rerank", signal, sig =>
-          DataAggregator.rerankByRelevance(
-            papers,
-            newPico,
-            analysis.inclusion,
-            analysis.exclusion,
-            -1.0,        // disabled, auto mode supersedes
-            undefined,
-            sig,
-          )
-        );
+        const reranked = await runStage("rerank", signal, async sig => {
+          try {
+            // Streamed so the stage shows which article is being scored.
+            return await DataAggregator.rerankByRelevanceStream(
+              papers,
+              newPico,
+              analysis.inclusion,
+              analysis.exclusion,
+              -1.0,        // disabled, auto mode supersedes
+              undefined,   // topK
+              sig,
+              undefined,   // quantileKeep
+              (done, total) => markStage("rerank", { status: "running", detail: `Scoring article ${done} of ${total}` }),
+            );
+          } catch (e: any) {
+            if (sig.aborted || e?.name === "AbortError") throw e;   // genuine cancel
+            // Stream unavailable (old backend / buffering proxy) → blocking call.
+            return await DataAggregator.rerankByRelevance(
+              papers, newPico, analysis.inclusion, analysis.exclusion, -1.0, undefined, sig,
+            );
+          }
+        });
         if (reranked) {
           relevantPapers = reranked.kept.map(r => r.paper);
           s.setRerankResults(reranked);
@@ -1086,10 +1301,95 @@ export function HomePage() {
         markStage("rerank", { status: "done", detail: "no articles to score" });
       }
 
-      const formalQ = await runStage("question", signal, sig => AIService.generateFormalQuestion(newPico, sig));
+      // Deep scan: one adaptive round. Propose a supplementary query from the
+      // studies kept so far, fetch a second batch, dedupe against what's already
+      // retrieved, score the new papers, and merge them into the relevant set.
+      // The primary documented search is untouched; the supplementary search is
+      // logged separately so the whole scan stays reproducible.
+      let deepScanTrace: HistoryEntry["deep_scan"] = undefined;
+      if (deepScan && !signal.aborted && analysis.query && uploaded.length === 0) {
+        const keptTitles = relevantPapers.slice(0, 15).map(p => p.title).filter(Boolean);
+        const supp = await runStage("expand", signal, sig =>
+          AIService.proposeSupplementaryQuery(newPico, analysis.query, analysis.inclusion, analysis.exclusion, keptTitles, sig),
+        );
+        if (supp?.query) {
+          markStage("expand", { status: "done", detail: supp.tactic || supp.rationale?.slice(0, 60) || "supplementary query" });
+
+          // Human-in-the-loop checkpoint: surface the proposed query and wait for
+          // the reviewer to run it (optionally edited) or skip, before any fetch.
+          const approved = await new Promise<{ query: string } | null>(resolve => {
+            suppResolverRef.current = resolve;
+            setSuppReview({ query: supp.query, rationale: supp.rationale || "", tactic: supp.tactic || "" });
+            signal.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          suppResolverRef.current = null;
+          setSuppReview(null);
+
+          if (!approved || signal.aborted) {
+            markStage("papers2", { status: "done", detail: signal.aborted ? "canceled" : "skipped by reviewer" });
+            markStage("rerank2", { status: "done", detail: "skipped" });
+          } else {
+            const suppQuery = approved.query.trim() || supp.query;
+            const seen = new Set(papers.map(p => p.id));
+            const fetched2 = await runStage("papers2", signal, sig =>
+              DataAggregator.fetchAll(suppQuery, s.sources, newPico, undefined, sig),
+            );
+            const fresh = (fetched2?.papers || []).filter(p => !seen.has(p.id));
+            markStage("papers2", { status: "done", detail: `${fresh.length} new (of ${fetched2?.papers.length ?? 0} retrieved)` });
+
+            if (fetched2) {
+              // Log the supplementary search so it appears in the search log / PRISMA.
+              const suppCounts: Record<string, number> = {};
+              for (const p of fresh) suppCounts[p.source] = (suppCounts[p.source] || 0) + 1;
+              const rows = Object.keys(suppCounts).length
+                ? Object.entries(suppCounts).map(([source, count]) => ({ source, query: suppQuery, count }))
+                : [{ source: s.sources.join(", ") || "databases", query: suppQuery, count: 0 }];
+              s.setSearchLog(prev => [...prev, { id: Date.now().toString(36), ranAt: new Date().toISOString(), rows }]);
+              s.setRawPapers([...papers, ...fresh]);
+            }
+
+            let added = 0;
+            if (fresh.length > 0) {
+              const reranked2 = await runStage("rerank2", signal, async sig => {
+                try {
+                  return await DataAggregator.rerankByRelevanceStream(
+                    fresh, newPico, analysis.inclusion, analysis.exclusion, -1.0, undefined, sig, undefined,
+                    (done, total) => markStage("rerank2", { status: "running", detail: `Scoring article ${done} of ${total}` }),
+                  );
+                } catch (e: any) {
+                  if (sig.aborted || e?.name === "AbortError") throw e;
+                  return await DataAggregator.rerankByRelevance(fresh, newPico, analysis.inclusion, analysis.exclusion, -1.0, undefined, sig);
+                }
+              });
+              if (reranked2) {
+                const newKept = reranked2.kept.map(r => r.paper);
+                added = newKept.length;
+                relevantPapers = [...relevantPapers, ...newKept];
+                markStage("rerank2", { status: "done", detail: `${added} added (of ${reranked2.total_scored} scored)` });
+              }
+            } else {
+              markStage("rerank2", { status: "done", detail: "no new articles" });
+            }
+            // Record the trace so it can be shown and re-run on the run's card.
+            deepScanTrace = {
+              query: suppQuery,
+              rationale: supp.rationale || "",
+              tactic: supp.tactic || "",
+              retrieved: fetched2?.papers.length ?? 0,
+              added,
+            };
+          }
+        } else {
+          // No gap found (or the model returned nothing): close out the round cleanly.
+          markStage("expand", { status: "done", detail: "no coverage gap found" });
+          markStage("papers2", { status: "done", detail: "skipped" });
+          markStage("rerank2", { status: "done", detail: "skipped" });
+        }
+      }
+
+      // Scope what's there: summarise the retrieved literature, then suggest refinements.
       const summaryWithRefs = await runStage("summary", signal, sig => AIService.generateComprehensiveSummaryWithRefs(t, relevantPapers, sig));
       const suggs = await runStage("suggestions", signal, sig => AIService.getRefinementSuggestions(t, relevantPapers, sig));
-      const adv = await runStage("adversarial", signal, sig => AIService.generateAdversarialQuery(newPico, sig));
 
       if (signal.aborted) {
         s.updateTask("home-analysis", { status: "canceled" });
@@ -1107,6 +1407,8 @@ export function HomePage() {
         inclusion: analysis.inclusion,
         exclusion: analysis.exclusion,
         adversarial_query: adv || "",
+        ts: submittedAt,
+        deep_scan: deepScanTrace,
       }]);
       s.updateTask("home-analysis", { status: "done" });
     } catch (e: any) {
@@ -1153,8 +1455,12 @@ export function HomePage() {
         <Alert className="flex items-center gap-2"><Hand className="size-4 shrink-0 text-primary" /><AlertDescription>Welcome! Describe your research goal below to generate a strategy and see initial findings.</AlertDescription></Alert>
       )}
 
-      {s.history.map((entry, idx) => (
-        <div key={idx} className="space-y-3">
+      {/* One chronological thread: search (history) entries and chat (Q&A) turns
+          are interleaved by their creation time so a new search stays where it
+          was asked instead of jumping above earlier chat turns. */}
+      {[
+        ...s.history.map((entry, idx) => ({ ts: entry.ts ?? 0, node: (
+        <div key={`h-${idx}`} className="space-y-3">
           <div className="flex justify-end">
             <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2 max-w-2xl">
               <span className="opacity-80 text-xs">Research Goal</span>
@@ -1172,11 +1478,7 @@ export function HomePage() {
                     ["search", "Search"],
                     ...(idx === s.history.length - 1 && s.rerankResults ? [["relevance", "Relevance"]] : []),
                   ].map(([value, label]) => (
-                    <TabsTrigger
-                      key={value}
-                      value={value}
-                      className="data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-sm"
-                    >
+                    <TabsTrigger key={value} value={value}>
                       {label}
                     </TabsTrigger>
                   ))}
@@ -1257,6 +1559,14 @@ export function HomePage() {
                   {entry.adversarial_query && (
                     <QueryBlock label="Adversarial query (sensitivity check)" value={entry.adversarial_query} />
                   )}
+                  {entry.deep_scan && (
+                    <DeepScanBlock
+                      trace={entry.deep_scan}
+                      isLatest={idx === s.history.length - 1}
+                      busy={rerunningSupp}
+                      onRerun={rerunSupplementary}
+                    />
+                  )}
                 </TabsContent>
 
                 {/* Relevance-rerank explorer, only for the most recent run,
@@ -1270,10 +1580,9 @@ export function HomePage() {
             </Tabs>
           </Card>
         </div>
-      ))}
-
-      {/* Document Q&A turns, answered by the main chat and shown inline. */}
-      {qaTurns.map((turn, i) => (
+        ) })),
+        // Document Q&A turns, answered by the main chat and shown inline.
+        ...qaTurns.map((turn, i) => ({ ts: turn.ts ?? 0, node: (
         <div key={`qa-${i}`} className="space-y-3">
           <div className="flex justify-end">
             <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2 max-w-2xl">{turn.question}</div>
@@ -1306,7 +1615,8 @@ export function HomePage() {
             )}
           </Card>
         </div>
-      ))}
+        ) })),
+      ].sort((a, b) => a.ts - b.ts).map(x => x.node)}
 
 
       {analyzing && task && (
@@ -1332,6 +1642,16 @@ export function HomePage() {
         onDone={(answers) => clarifyResolverRef.current?.(answers)}
         onSkipAll={() => clarifyResolverRef.current?.({})}
       />
+
+      {/* Deep-scan checkpoint: review/edit the supplementary query before it runs. */}
+      {suppReview && (
+        <SupplementaryReviewModal
+          key={suppReview.query}
+          review={suppReview}
+          onRun={q => suppResolverRef.current?.({ query: q })}
+          onSkip={() => suppResolverRef.current?.(null)}
+        />
+      )}
 
       {/* Refinement popup, floats above the chat input, Claude-clarifying-question style */}
       {(refining || refinement) && s.history.length > 0 && (
@@ -1489,16 +1809,15 @@ export function HomePage() {
           {pendingDocs.length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-2 px-1">
               {pendingDocs.map(d => (
-                <span key={d.id} className="inline-flex items-center gap-1 max-w-[16rem] bg-primary/10 text-primary border border-primary/20 rounded-full pl-2 pr-1 py-0.5 text-xs">
-                  <Paperclip className="size-3 shrink-0" />
-                  <span className="truncate">{d.title}</span>
+                <span key={d.id} className="inline-flex items-center gap-1.5 max-w-[16rem] bg-card border border-border shadow-sm rounded-full pl-2.5 pr-1 py-1 text-xs" title={`${d.title} — included in your next message`}>
+                  <Paperclip className="size-3 shrink-0 text-primary" />
+                  <span className="truncate text-foreground/90">{d.title}</span>
                   <button type="button" onClick={() => setPendingDocIds(prev => prev.filter(x => x !== d.id))}
-                    className="shrink-0 rounded-full hover:bg-primary/20 p-0.5" title="Don't include this in the next message">
+                    className="shrink-0 rounded-full hover:bg-muted p-0.5 text-muted-foreground hover:text-foreground" title="Don't include this in the next message">
                     <X className="size-3" />
                   </button>
                 </span>
               ))}
-              <span className="inline-flex items-center text-xs text-muted-foreground px-1">will be included in your next message</span>
             </div>
           )}
           <form onSubmit={(e) => { e.preventDefault(); handleSubmit(input); }}
@@ -1517,6 +1836,14 @@ export function HomePage() {
             <Input value={input} onChange={e => setInput(e.target.value)}
               placeholder="Ask a question or refine your research goal..."
               className="flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0 px-0" />
+          <Button type="button" size="sm" variant={deepScan ? "default" : "ghost"}
+            onClick={toggleDeepScan} aria-pressed={deepScan}
+            className="rounded-full shrink-0 gap-1.5 px-3"
+            title={deepScan
+              ? "Deep scan on: after the first pass, run one extra adaptive search round to fill coverage gaps. Slower and more thorough; the supplementary search is logged for reproducibility."
+              : "Deep scan off: a single fast pass. Turn on to add one adaptive search round that hunts for studies the first query missed."}>
+            <Telescope className="size-4" />Deep
+          </Button>
           <Button type="submit" disabled={analyzing || !input.trim()} className="rounded-full"><Send className="size-4 mr-2" />Send</Button>
           </form>
         </div>

@@ -26,18 +26,21 @@ export function LogoMark({ className = "size-9" }: { className?: string }) {
   );
 }
 
-export function Logo({ markClassName = "size-9" }: { markClassName?: string }) {
+// Text-only wordmark (no icon): the name is sized up to fill the brand header,
+// and the uppercase subtitle trails into a hairline rule so the row reads as a
+// deliberate lockup rather than an empty strip.
+export function Logo() {
   return (
-    <div className="flex items-center gap-2.5">
-      <LogoMark className={markClassName} />
-      <div className="leading-none">
-        <div className="text-[16px] tracking-tight" style={{ fontFamily: SERIF }}>
-          <span className="font-bold text-foreground">Evidence</span>{" "}
-          <span className="italic font-normal text-foreground/45">Engine</span>
-        </div>
-        <div className="mt-1.5 text-[9.5px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+    <div className="leading-none">
+      <div className="text-[22px] tracking-tight" style={{ fontFamily: SERIF }}>
+        <span className="font-bold text-foreground">Evidence</span>{" "}
+        <span className="italic font-normal text-primary">Engine</span>
+      </div>
+      <div className="mt-2.5 flex items-center gap-2.5">
+        <span className="text-[9.5px] font-semibold uppercase tracking-[0.22em] text-primary/70 whitespace-nowrap">
           Systematic Reviews
-        </div>
+        </span>
+        <span className="h-px flex-1 bg-gradient-to-r from-primary/45 to-transparent" aria-hidden="true" />
       </div>
     </div>
   );
