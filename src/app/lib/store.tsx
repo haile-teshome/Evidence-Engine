@@ -79,7 +79,8 @@ export type HistoryEntry = {
 
 // A document Q&A exchange on Home: a question answered from the documents in
 // play, with the sources cited. Persisted so it survives a refresh like history.
-export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean; ts?: number };
+export type SummaryRow = { id: string; title: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string };
+export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean; ts?: number; table?: SummaryRow[] };
 
 export type ExtractedTable = { title: string; type: string; data: string[][]; caption?: string };
 export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[] };
@@ -234,6 +235,9 @@ type Ctx = {
   // Snowball
   snowballResults: any[] | null; setSnowballResults: (v: any[] | null) => void;
   snowballScreened: ScreenResult[] | null; setSnowballScreened: (v: ScreenResult[] | null) => void;
+  // Seed titles the last citation-snowball ran over (session-only), so a later
+  // change to the included set can flag stale results and prompt a re-run.
+  snowballSeeds: string[] | null; setSnowballSeeds: (v: string[] | null) => void;
   // Citation ids the reviewer has selected to carry forward. Persisted (and null
   // until first seeded) so the selection survives tab switches and isn't re-seeded
   // from the AI verdicts on every remount.
@@ -428,6 +432,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [snowballResults, setSnowballResults] = useState<any[] | null>(null);
   const [snowballScreened, setSnowballScreened] = useState<ScreenResult[] | null>(null);
   const [snowballChosen, setSnowballChosen] = useState<string[] | null>(null);
+  const [snowballSeeds, setSnowballSeeds] = useState<string[] | null>(null);
 
   const [extractedPapers, setExtractedPapers] = useState<ExtractedPaper[] | null>(null);
   const [fullTexts, setFullTexts] = useState<Record<string, FullTextRecord>>({});
@@ -708,7 +713,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setMetaUseKnappHartung(false);
     setMetaExtractions(null); setMetaRun(null);
     setResults(null); setScreeningArchive([]); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
-    setSnowballResults(null); setSnowballScreened(null); setSnowballChosen(null); setExtractedPapers(null);
+    setSnowballResults(null); setSnowballScreened(null); setSnowballChosen(null); setSnowballSeeds(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
     setWritingEnriched({}); setWritingSummary(""); setWritingMethodsMain("");
     setPrisma({ identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0, excluded_total: 0, exclusion_breakdown: {}, included_final: 0 });
@@ -736,7 +741,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     metaTau2Method, setMetaTau2Method, metaUseKnappHartung, setMetaUseKnappHartung,
     metaExtractions, setMetaExtractions, metaRun, setMetaRun,
     results, setResults, screeningArchive, setScreeningArchive, screeningDuration, setScreeningDuration, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
-    snowballResults, setSnowballResults, snowballScreened, setSnowballScreened, snowballChosen, setSnowballChosen,
+    snowballResults, setSnowballResults, snowballScreened, setSnowballScreened, snowballChosen, setSnowballChosen, snowballSeeds, setSnowballSeeds,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,
     writingMethodsMain, setWritingMethodsMain,

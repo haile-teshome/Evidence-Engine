@@ -22,6 +22,10 @@ class Config:
     PDF_MAX_PAGES = 3
     PDF_MAX_CHARS = 3000
     DEFAULT_MODEL = "llama3"
+    # Local embedding model for the semantic-similarity layer (find-similar, seed
+    # anchoring, deep-scan). Runs on the same Ollama by default (nothing leaves the
+    # machine); set EMBED_MODEL=text-embedding-3-small to use OpenAI instead.
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
     MIN_KEYWORD_LENGTH = 2
     
     # API Keys (can be set via environment variables or UI)

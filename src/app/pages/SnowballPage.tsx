@@ -10,7 +10,7 @@ import { Badge } from "../components/ui/badge";
 import { Checkbox } from "../components/ui/checkbox";
 import { Input } from "../components/ui/input";
 import {
-  Network, Plus, Minus, Trash2, Search, FileText, ArrowDownLeft, ArrowUpRight,
+  Network, Plus, Minus, Trash2, Search, Sparkles, FileText, ArrowDownLeft, ArrowUpRight,
   CheckCircle2, XCircle, ExternalLink, Layers, ChevronDown, ChevronsDownUp, ChevronsUpDown, FlaskConical,
 } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
@@ -25,6 +25,10 @@ const DIRECTIONS: { value: SnowballType; label: string }[] = [
   { value: "Backward (References)", label: "Backward" },
   { value: "Forward (Cited by)", label: "Forward" },
 ];
+
+// Seeds normalise to this shape whether they come from the full-text includes or
+// (as a fallback when none passed) the whole uploaded/searched corpus.
+type SnowballSeed = { paper_id: string; Title: string; Abstract: string; URL: string };
 
 export function SnowballPage() {
   const s = useStore();
@@ -84,17 +88,23 @@ export function SnowballPage() {
     });
   }
 
-  if (!s.fullTextResults) {
-    return <EmptyState icon={FlaskConical} title="No full-text results yet" description="Run full-text evaluation first; snowballing expands from the included studies." action={{ label: "Go to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
+  // Seeds are the studies KEPT at full-text evidence: AI-included plus any the
+  // reviewer kept by overriding the decision. The kept studies are the only
+  // seeds (no fallback to the wider uploaded corpus).
+  const seeds: SnowballSeed[] = (s.fullTextResults ?? [])
+    .filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include")
+    .map(r => ({ paper_id: r.paper_id, Title: r.Title, Abstract: r.Abstract, URL: r.URL }));
+
+  if (seeds.length === 0) {
+    return <EmptyState icon={FlaskConical} title="No kept full-text studies yet" description="Keep at least one study at Full-Text Evidence (include it, or check its Keep box). Snowballing expands from the kept studies." action={{ label: "Go to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
   }
-  // Honour reviewer overrides: papers the user kept by checking the
-  // full-text Keep box should seed snowballing even if the AI excluded them.
-  const seeds = s.fullTextResults.filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include");
-  if (seeds.length === 0) return <EmptyState icon={FlaskConical} title="No articles passed full-text screening" description="Snowballing needs at least one included study. Adjust criteria and re-run full-text evaluation." action={{ label: "Back to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
 
   async function start() {
     const { abort } = s.startTask("snowball", [{ id: "snow", label: "Fetching citations", status: "running" }]);
     s.updateTask("snowball", { progress: { done: 0, total: seeds.length } });
+    // Record the seed set this fetch runs over, so a later change to the included
+    // set (e.g. re-running full-text) can flag the cached results as stale.
+    s.setSnowballSeeds(seeds.map(x => x.Title));
     const signal = abort.signal;
     try {
       const all: any[] = [];
@@ -117,15 +127,21 @@ export function SnowballPage() {
       }
       const seenT = new Set<string>();
       const unique = all.filter(p => seenT.has((p.title || "").toLowerCase()) ? false : (seenT.add((p.title || "").toLowerCase()), true));
+      if (signal.aborted) {
+        // Save partial progress: merge the citations gathered this run into the
+        // existing set (dedup by title) and keep the current selection.
+        const seen = new Set<string>();
+        const merged = [...(s.snowballResults ?? []), ...unique].filter(p =>
+          seen.has((p.title || "").toLowerCase()) ? false : (seen.add((p.title || "").toLowerCase()), true));
+        s.setSnowballResults(merged);
+        s.updateTask("snowball", { status: "canceled" });
+        toast.info(`Canceled: ${unique.length} gathered this run, ${merged.length} kept in total.`);
+        return;
+      }
       s.setSnowballResults(unique);
       s.setSnowballChosen(null);   // fresh citations → re-seed selection from the next screening pass
-      if (signal.aborted) {
-        s.updateTask("snowball", { status: "canceled" });
-        toast.info(`Canceled: ${unique.length} unique citations gathered`);
-      } else {
-        s.updateTask("snowball", { status: "done" });
-        toast.success(`Found ${unique.length} unique articles via snowballing`);
-      }
+      s.updateTask("snowball", { status: "done" });
+      toast.success(`Found ${unique.length} unique articles via snowballing`);
     } catch (e: any) {
       s.updateTask("snowball", { status: "error", detail: e?.message });
     }
@@ -157,16 +173,68 @@ export function SnowballPage() {
         }
         s.updateTask("snowball-screen", { progress: { done: i + 1, total: s.snowballResults.length } });
       }
-      s.setSnowballScreened(out);
       if (signal.aborted) {
+        // Save partial progress: merge whatever finished this run into the
+        // existing screening (by paper) so a cancel keeps both.
+        const keyOf = (r: ScreenResult) => r.paper_id || (r.Title || "").toLowerCase().trim();
+        const byId = new Map((s.snowballScreened ?? []).map(r => [keyOf(r), r]));
+        out.forEach(r => byId.set(keyOf(r), r));
+        const merged = [...byId.values()];
+        s.setSnowballScreened(merged);
         s.updateTask("snowball-screen", { status: "canceled" });
-        toast.info(`Canceled: ${out.length} of ${s.snowballResults.length} screened`);
-      } else {
-        s.updateTask("snowball-screen", { status: "done" });
-        toast.success(`Screened ${out.length} snowballed articles`);
+        toast.info(`Canceled: ${out.length} screened this run, ${merged.length} kept in total.`);
+        return;
       }
+      s.setSnowballScreened(out);
+      s.updateTask("snowball-screen", { status: "done" });
+      toast.success(`Screened ${out.length} snowballed articles`);
     } catch (e: any) {
       s.updateTask("snowball-screen", { status: "error", detail: e?.message });
+    }
+  }
+
+  // "Find similar": acts on the study selected in the left pane and pulls its
+  // topical neighbours — OpenAlex related_works ranked by the local embedder.
+  // Separate from the bulk citation snowball; it explores a single paper and
+  // reuses the same results list + selection + add-to-queue below.
+  async function startSimilar() {
+    // The selected left-pane seed is a paper we snowballed from. Match it by
+    // normalised title across all full-text results, then the whole corpus, so a
+    // changed include set or a minor title difference doesn't break find-similar.
+    const norm = (t: string) => (t || "").toLowerCase().trim();
+    const target = norm(selectedSeed || "");
+    const ft = target ? (s.fullTextResults ?? []).find(r => norm(r.Title) === target) : undefined;
+    const raw = target && !ft ? (s.rawPapers ?? []).find(p => norm(p.title) === target) : undefined;
+    const seed = ft ? { Title: ft.Title, Abstract: ft.Abstract || "" }
+      : raw ? { Title: raw.title, Abstract: raw.abstract || "" }
+      : null;
+    if (!seed) { toast.error("Select a study in the left panel to find similar articles for."); return; }
+    const { abort } = s.startTask("snowball", [{ id: "sim", label: "Finding similar articles", status: "running" }]);
+    s.setSnowballSeeds(seeds.map(x => x.Title));
+    const signal = abort.signal;
+    try {
+      const sims = await AIService.fetchSimilar(
+        [{ title: seed.Title, abstract: seed.Abstract, doi: "" }],
+        maxCit, signal);
+      sims.forEach(c => { c.seed_paper_title = seed.Title; });
+      // Add the similar papers to the existing snowball results (dedup by title)
+      // rather than replacing them, so citation-snowball documents are never lost.
+      // Existing screening/selection is preserved for the same reason.
+      const existing = s.snowballResults ?? [];
+      const seen = new Set(existing.map((p: any) => (p.title || "").toLowerCase()));
+      const added = sims.filter(p => { const k = (p.title || "").toLowerCase(); return seen.has(k) ? false : (seen.add(k), true); });
+      s.setSnowballResults([...existing, ...added]);
+      if (signal.aborted) {
+        s.updateTask("snowball", { status: "canceled" });
+        toast.info(`Canceled. Added ${added.length} similar paper${added.length === 1 ? "" : "s"}.`);
+      } else {
+        s.updateTask("snowball", { status: "done" });
+        toast.success(added.length
+          ? `Added ${added.length} paper${added.length === 1 ? "" : "s"} similar to “${seed.Title.slice(0, 44)}…”`
+          : "No new similar papers found for that study.");
+      }
+    } catch (e: any) {
+      if (!signal.aborted) { s.updateTask("snowball", { status: "error", detail: e?.message }); toast.error("Find similar failed."); }
     }
   }
 
@@ -232,6 +300,15 @@ export function SnowballPage() {
     .filter(p => selectedSeed === null || p.seed_paper_title === selectedSeed)
     .filter(p => !q.trim() || (p.title || "").toLowerCase().includes(q.toLowerCase()));
 
+  // Flag when the current seed set differs from the one the visible citations
+  // were fetched from (after re-running full-text, or switching source), so the
+  // stale results prompt a re-run instead of silently showing old seeds.
+  const seedsChanged = Boolean(results) && Array.isArray(s.snowballSeeds) && (() => {
+    const now = new Set(seeds.map(x => x.Title));
+    if (now.size !== s.snowballSeeds!.length) return true;
+    return s.snowballSeeds!.some(t => !now.has(t));
+  })();
+
   return (
     <div className="space-y-3">
       {/* ── Compact header: stats + controls + run ─────────────────────────── */}
@@ -239,7 +316,7 @@ export function SnowballPage() {
         singleLine
         stats={<>
           <InlineStat icon={FileText} value={seeds.length} label="Seeds" />
-          {results && <>
+          {results && results.length > 0 && <>
             <PaneDivider />
             <InlineStat icon={Network} value={results.length} label="Found" />
             <InlineStat icon={ArrowDownLeft} value={backCount} label="Backward" />
@@ -250,7 +327,7 @@ export function SnowballPage() {
             <InlineStat icon={CheckCircle2} tone="success" value={includedCount} label="AI included" />
             <InlineStat icon={XCircle} tone="amber" value={excludedCount} label="AI excluded" />
           </>}
-          {results && chosen.size > 0 && <InlineStat icon={CheckCircle2} tone="success" value={chosen.size} label="Selected" />}
+          {results && results.length > 0 && chosen.size > 0 && <InlineStat icon={CheckCircle2} tone="success" value={chosen.size} label="Selected" />}
         </>}
         actions={<>
           <div className="flex items-center gap-2.5 h-9 rounded-lg border bg-muted/30 px-2.5">
@@ -305,7 +382,7 @@ export function SnowballPage() {
             </Button>
           ) : (
             <Button size="sm" className="h-9 shadow-sm" onClick={start}>
-              <Network className="size-3.5 mr-1.5" />{results ? "Re-run" : "Start snowballing"}
+              <Network className="size-3.5 mr-1.5" />{results && results.length > 0 ? "Re-run" : "Start snowballing"}
             </Button>
           )}
         </>}
@@ -318,8 +395,28 @@ export function SnowballPage() {
         <TaskProgressCard task={screenTask} title="Screening snowballed articles" onCancel={() => s.cancelTask("snowball-screen")} />
       )}
 
-      {results && (
+      {!running && !(results && results.length > 0) && (
+        <Card className="p-10 text-center">
+          <Network className="size-8 mx-auto mb-3 text-muted-foreground/40" />
+          <p className="text-sm text-muted-foreground max-w-md mx-auto">
+            No citations yet. Click <span className="font-medium text-foreground">Start snowballing</span> above to expand your {seeds.length} kept full-text stud{seeds.length === 1 ? "y" : "ies"} by their references and citations.
+          </p>
+        </Card>
+      )}
+      {results && results.length > 0 && (
         <>
+          {seedsChanged && (
+            <Alert>
+              <AlertDescription className="flex items-center justify-between gap-3">
+                <span className="text-sm">
+                  Your kept full-text studies changed since these citations were fetched (now {seeds.length} kept stud{seeds.length === 1 ? "y" : "ies"}). Re-run to refresh.
+                </span>
+                <Button size="sm" className="h-8 shrink-0" onClick={start} disabled={running}>
+                  <Network className="size-3.5 mr-1.5" />Re-run
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
           {/* ── Two-pane: seed papers (left) + citations they surfaced (right) ─ */}
           <div className="flex gap-4 h-[calc(100vh-16rem)] min-h-[28rem]">
             {/* LEFT: seed papers */}
@@ -399,6 +496,20 @@ export function SnowballPage() {
                     </Button>
                   );
                 })()}
+                {/* Find similar: acts on the study selected in the left pane —
+                    pulls its topical neighbours (OpenAlex related_works, ranked
+                    by the local embedder), separate from citation chaining.
+                    Always shown; greyed until a specific study is selected. */}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 text-xs shrink-0 gap-1"
+                  onClick={startSimilar}
+                  disabled={running || selectedSeed === null}
+                  title={selectedSeed === null ? "Select a study on the left, then find similar papers" : "Find papers semantically similar to the selected study"}
+                >
+                  <Sparkles className="size-3.5" />Find similar
+                </Button>
               </div>
               <div className="overflow-auto flex-1 divide-y">
                 {shown.map((p, i) => {

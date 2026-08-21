@@ -34,7 +34,7 @@ const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> 
   home: { title: "Research Strategy", subtitle: "PICO-driven question framing and search design", icon: Home },
   simulation: { title: "Search Planning", subtitle: "Per-database query tuning with agentic optimization", icon: BarChart3 },
   quality: { title: "Quality Assessment", subtitle: "Deduplicate and surface issues in acquired articles", icon: ShieldCheck },
-  abstract: { title: "Abstract Screening", subtitle: "Multi-agent title and abstract review", icon: FileSearch },
+  abstract: { title: "Abstract Screening", subtitle: "LLM-assisted title and abstract review", icon: FileSearch },
   acquisition: { title: "Full-Text Acquisition", subtitle: "Collect the full text for each included article", icon: FileDown },
   fulltext: { title: "Full-Text Evidence", subtitle: "Per-criterion full-text evaluation", icon: FlaskConical },
   snowball: { title: "Citation Snowballing", subtitle: "Backward and forward citation discovery", icon: Network },

@@ -636,7 +636,10 @@ export function PrismaFlow({
                   </span>
                   {" "}(<span className="font-bold text-[#166534]">n = <EditableNumber value={n("screened", screened)} onSave={v => setN("screened", v)} /></span>)
                 </div>
-                <RightArrow />
+                {/* Excluded box is multi-line/tall; pin the arrow to the top and
+                    align it with the single-line "Studies screened" box center
+                    instead of self-centering it in the whole (tall) row. */}
+                <div className="self-start w-full mt-[13px]"><RightArrow /></div>
                 <div className={EXCLUDED_BOX_STYLE}>
                   <div className="font-semibold mb-0.5">
                     <EditableText value={lbl("absExcTitle", "Studies excluded")} onSave={v => setL("absExcTitle", v)} />

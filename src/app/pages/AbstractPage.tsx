@@ -91,7 +91,12 @@ export function AbstractPage() {
     //      the QA step.
     let queue: Paper[] = [];
     try {
-      if (s.uniquePapers) {
+      // Reuse the existing deduplicated set only if it still has something to
+      // screen. If it's empty or every paper was excluded by the Quality step,
+      // fall through and re-fetch with the in-use planning run's query instead
+      // of dead-ending (an empty array is truthy, which caused the misleading
+      // "all excluded" error).
+      if (s.uniquePapers && s.uniquePapers.some(p => !s.excludedByQuality.has(p.id))) {
         queue = s.uniquePapers.filter(p => !s.excludedByQuality.has(p.id));
         s.updateTask("abstract-screen", {
           stages: [
@@ -173,6 +178,13 @@ export function AbstractPage() {
       const CONCURRENCY = /^(claude|gpt|gemini)/i.test(s.model) ? 8 : 3;
       const slots: (ScreenResult | undefined)[] = new Array(queue.length);
       let done = 0, next = 0;
+      // Ground each screening decision in the in-use planning run's search
+      // strategy (the query the reviewer optimised and marked "In use"), so
+      // screening stays consistent with what the review is scoped to find.
+      const planQuery = s.unifiedSearchQuery || Object.values(s.perDbQueries || {}).filter(Boolean).join(" | ") || "";
+      const planContext = planQuery
+        ? `Search strategy for this review (the in-use planning run) — keep screening consistent with its scope:\n${planQuery}`.slice(0, 4000)
+        : "";
       const worker = async () => {
         while (!signal.aborted) {
           const i = next++;
@@ -182,7 +194,7 @@ export function AbstractPage() {
             detail: queue[i].title.slice(0, 80),
           });
           try {
-            const r = await AIService.screenPaperMultiAgent(queue[i], s.pico, s.inclusion, s.exclusion, signal);
+            const r = await AIService.screenPaperMultiAgent(queue[i], s.pico, s.inclusion, s.exclusion, signal, planContext);
             slots[i] = r;
             if (r.Decision === "EXCLUDE") {
               const bucket = categoriseAbstractExclusion(r, s.inclusion, s.exclusion);
@@ -661,7 +673,6 @@ export function AbstractPage() {
                         onDragOver={e => e.preventDefault()}
                         onDrop={e => { e.preventDefault(); if (dragCol) moveCol(dragCol, col.id); setDragCol(null); setOverCol(null); }}
                         onDragEnd={() => { setDragCol(null); setOverCol(null); }}
-                        title="Drag to reorder column"
                         className={`group/th px-3 border-b cursor-grab active:cursor-grabbing select-none transition-colors ${col.align === "center" ? "text-center" : "whitespace-nowrap"} ${col.id === "reasoning" ? "min-w-[380px]" : ""} ${dragCol === col.id ? "opacity-40" : ""} ${overCol === col.id && dragCol && dragCol !== col.id ? "bg-primary/10" : ""}`}
                       >
                         <span className={`inline-flex items-center gap-1 ${col.align === "center" ? "justify-center" : ""}`}>

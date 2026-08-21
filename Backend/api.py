@@ -40,7 +40,7 @@ from pydantic import BaseModel, Field
 from config import Config
 from models import Paper as BackendPaper, PICOCriteria, clean_markup
 from utils import AIService, Deduplicator, AITableExtractor
-from data_services import DataAggregator
+from data_services import DataAggregator, OpenAlexService
 from leads_screening import (
     LEADS_MODEL_NAME,
     LEADS_SCORE_THRESHOLD,
@@ -1252,6 +1252,7 @@ class ScreenAbstractRequest(BaseModel):
     pico: PicoIn
     inclusion: List[str] = Field(default_factory=list)
     exclusion: List[str] = Field(default_factory=list)
+    protocol: Optional[str] = None
     model: Optional[str] = None
 
 
@@ -1554,11 +1555,11 @@ def _normalize_abstract_decision(
 
 
 def _screen_one(paper: BackendPaper, pico: PICOCriteria, model_name: str,
-                inclusion: List[str], exclusion: List[str]) -> Dict[str, Any]:
+                inclusion: List[str], exclusion: List[str], protocol: str = "") -> Dict[str, Any]:
     """Route a single paper to LEADS or to the generic screener depending on model."""
     if is_leads_model(model_name):
         return screen_paper_leads(paper, pico)
-    return AIService.screen_paper(paper, pico, model_name, inclusion, exclusion)
+    return AIService.screen_paper(paper, pico, model_name, inclusion, exclusion, protocol)
 
 
 @app.post("/api/screen/abstract")
@@ -1569,7 +1570,7 @@ def screen_abstract(req: ScreenAbstractRequest):
     _ss["inclusion_list"] = list(req.inclusion or [])
     _ss["exclusion_list"] = list(req.exclusion or [])
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
-    raw = _screen_one(paper, pico, model_name, req.inclusion, req.exclusion)
+    raw = _screen_one(paper, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
     # Per-PICO assessment uses the reasoning-tier model regardless of screening
     # model, because structured JSON output is its strength.
     pico_model = resolve_for_thinking(req.model)
@@ -1583,6 +1584,7 @@ class ScreenAbstractBatchRequest(BaseModel):
     pico: PicoIn
     inclusion: List[str] = Field(default_factory=list)
     exclusion: List[str] = Field(default_factory=list)
+    protocol: Optional[str] = None
     model: Optional[str] = None
 
 
@@ -1597,7 +1599,7 @@ def screen_abstract_batch(req: ScreenAbstractBatchRequest):
 
     def _one(p_in: PaperIn) -> Dict[str, Any]:
         bp = _to_backend_paper(p_in)
-        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion)
+        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
         return _normalize_abstract_decision(
             raw, req.inclusion, req.exclusion, p_in, pico=req.pico, model_name=pico_model,
         )
@@ -1783,6 +1785,68 @@ def papers_rerank(req: RerankRequest):
                 print(f"[papers_rerank] worker error: {e}")
 
     return _rerank_finalize(req, scored, model_name)
+
+
+class SimilarRequest(BaseModel):
+    seeds: List[Dict[str, Any]] = Field(default_factory=list)   # [{title, doi?, abstract?}]
+    corpus: List[Dict[str, Any]] = Field(default_factory=list)  # optional extra pool to rank
+    top_k: int = 40
+    max_per_seed: int = 40
+    model: Optional[str] = None                                  # embedding model override
+
+
+@app.post("/api/papers/similar")
+def papers_similar(req: SimilarRequest):
+    """Semantic 'find similar' — the topical-similarity sibling of citation
+    snowballing. For each seed paper we pull OpenAlex related_works (algorithmic
+    topical similarity, NOT citations, so it reaches same-topic papers with no
+    citation link), pool them, then rank by embedding cosine to the seed centroid
+    using the local Ollama embedder by default (nothing leaves the machine).
+    Returns new papers with a similarity score, ready to add to the screening
+    queue exactly like snowball citations."""
+    seeds = [s for s in (req.seeds or []) if (s.get("title") or s.get("doi"))]
+    if not seeds:
+        return {"papers": [], "note": "no seeds provided"}
+
+    # 1. External discovery: OpenAlex related_works per seed (deduped pool).
+    pool: Dict[str, Dict[str, Any]] = {}
+    for s in seeds:
+        for p in OpenAlexService.related(s.get("title", ""), s.get("doi", ""), req.max_per_seed):
+            key = (p.id or p.title or "").lower().strip()
+            if key and key not in pool:
+                pool[key] = {"id": p.id, "title": p.title, "abstract": p.abstract,
+                             "url": p.url, "source": p.source}
+    # Allow the caller to also fold in a candidate corpus to rank (e.g. a
+    # supplementary search) — dedupe against the discovered pool.
+    for p in (req.corpus or []):
+        key = str(p.get("id") or p.get("title") or "").lower().strip()
+        if key and key not in pool:
+            pool[key] = {**p, "source": p.get("source", "corpus")}
+    candidates = list(pool.values())
+    if not candidates:
+        return {"papers": [], "note": "no related works found"}
+
+    # 2. Semantic rank by embedding cosine to the seed centroid (local, no key).
+    #    If the embedder is unavailable (e.g. Ollama down), keep source order.
+    try:
+        emb = AIService.get_embedder(req.model)
+        if emb is not None:
+            import numpy as np
+            seed_text = [f"{s.get('title','')}\n{s.get('abstract','')}".strip() for s in seeds]
+            cand_text = [f"{c.get('title','')}\n{c.get('abstract','')}".strip() for c in candidates]
+            sv = np.asarray(emb.embed_documents(seed_text), dtype=float)
+            cv = np.asarray(emb.embed_documents(cand_text), dtype=float)
+            centroid = sv.mean(axis=0)
+            sims = (cv @ centroid) / (np.linalg.norm(cv, axis=1) * np.linalg.norm(centroid) + 1e-9)
+            order = list(np.argsort(-sims))
+            ranked = [{**candidates[i], "similarity": round(float(sims[i]), 4)} for i in order]
+        else:
+            ranked = candidates
+    except Exception as e:
+        print(f"[papers_similar] embed-rank skipped, using source order: {e}")
+        ranked = candidates
+
+    return {"papers": ranked[:req.top_k]}
 
 
 @app.post("/api/papers/rerank/stream")
@@ -4670,13 +4734,14 @@ def writing_characteristics(req: CharacteristicsRequest):
 
     def _one(p: CharItem) -> Dict[str, Any]:
         text = (p.full_text or p.abstract or "")[:6000]
-        base = {"id": p.id, "design": "", "population": "", "intervention": "", "comparator": "", "outcomes": ""}
+        base = {"id": p.id, "design": "", "population": "", "intervention": "", "comparator": "", "outcomes": "", "key_finding": ""}
         if not text.strip():
             return base
         prompt = (
-            "From this study report, fill a 'Characteristics of included studies' row. "
+            "From this study report, fill a structured evidence-table row. "
             "Be concise (a short phrase per field), use the study's own terms, and return ONLY JSON with keys "
-            '{"design","population","intervention","comparator","outcomes"}. '
+            '{"design","population","intervention","comparator","outcomes","key_finding"}. '
+            '"key_finding" is the single most important result or conclusion, in one sentence. '
             "Use an empty string for anything not reported. No commentary, no code fences.\n\n"
             f"TITLE: {p.title}\n\nREPORT:\n{text}"
         )
@@ -4686,7 +4751,7 @@ def writing_characteristics(req: CharacteristicsRequest):
         except Exception as e:
             print(f"[characteristics] {e}")
             data = {}
-        for k in ("design", "population", "intervention", "comparator", "outcomes"):
+        for k in ("design", "population", "intervention", "comparator", "outcomes", "key_finding"):
             base[k] = str(data.get(k) or "").strip()
         return base
 

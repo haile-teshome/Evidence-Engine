@@ -120,19 +120,28 @@ export function FullTextPage() {
       const byId = new Map(prior.map(r => [r.paper_id, r]));
       out.forEach(r => byId.set(r.paper_id, r));
       const combined = Array.from(byId.values());
-      s.setFullTextResults(combined);
+      // On cancel, merge this run's partial results into the ACTUAL existing set
+      // (by paper) so a full re-screen never loses prior rows; on success use
+      // `combined` (append or full replace, per mode).
+      let finalSet = combined;
+      if (signal.aborted) {
+        const keep = new Map((s.fullTextResults ?? []).map(r => [r.paper_id, r]));
+        out.forEach(r => keep.set(r.paper_id, r));
+        finalSet = Array.from(keep.values());
+      }
+      s.setFullTextResults(finalSet);
       s.setFtDuration((Date.now() - start) / 1000);
       const ftReasons: Record<string, number> = {};
-      for (const r of combined) {
+      for (const r of finalSet) {
         if (r.Decision === "Exclude") {
           const bucket = categoriseFullTextExclusion(r, s.inclusion, s.exclusion);
           ftReasons[bucket] = (ftReasons[bucket] || 0) + 1;
         }
       }
-      s.setPrisma(p => ({ ...p, ft_exclusion_breakdown: ftReasons, included_final: combined.filter(x => x.Decision === "Include").length }));
+      s.setPrisma(p => ({ ...p, ft_exclusion_breakdown: ftReasons, included_final: finalSet.filter(x => x.Decision === "Include").length }));
       if (signal.aborted) {
         s.updateTask("full-text-screen", { status: "canceled" });
-        toast.info(`Canceled: ${out.length} of ${list.length} screened`);
+        toast.info(`Canceled: ${out.length} screened this run, ${finalSet.length} kept in total.`);
       } else {
         s.updateTask("full-text-screen", { status: "done" });
         toast.success(`Full-text screening complete in ${formatDuration((Date.now() - start) / 1000)}`);
@@ -151,7 +160,7 @@ export function FullTextPage() {
   const CAP = (x: string) => x.charAt(0).toUpperCase() + x.slice(1);
   const movableCols = colOrder.map(id => {
     if (id === "reason") return { id, label: "Reason", title: "" };
-    if (id.startsWith("c:")) { const c = id.slice(2); return { id, label: c.length > 22 ? c.slice(0, 22) + "…" : c, title: c }; }
+    if (id.startsWith("c:")) { const c = id.slice(2); return { id, label: c, title: c }; }
     return { id, label: CAP(id), title: "" };
   });
 
@@ -381,11 +390,12 @@ export function FullTextPage() {
                       onDragOver={e => e.preventDefault()}
                       onDrop={e => { e.preventDefault(); if (dragCol) moveCol(dragCol, col.id); setDragCol(null); setOverCol(null); }}
                       onDragEnd={() => { setDragCol(null); setOverCol(null); }}
-                      title={col.title ? `${col.title} — drag to reorder` : "Drag to reorder column"}
-                      className={`group/th px-3 border-b whitespace-nowrap max-w-[160px] cursor-grab active:cursor-grabbing select-none transition-colors ${col.id === "reason" ? "min-w-[320px]" : ""} ${dragCol === col.id ? "opacity-40" : ""} ${overCol === col.id && dragCol && dragCol !== col.id ? "bg-primary/10" : ""}`}
+                      title={col.title || undefined}
+                      className={`group/th px-3 border-b cursor-grab active:cursor-grabbing select-none transition-colors ${col.id === "reason" ? "min-w-[320px]" : "w-[190px] min-w-[190px] max-w-[190px]"} ${dragCol === col.id ? "opacity-40" : ""} ${overCol === col.id && dragCol && dragCol !== col.id ? "bg-primary/10" : ""}`}
                     >
-                      <span className="inline-flex items-center gap-1 truncate">
-                        <GripVertical className="size-3 shrink-0 opacity-0 group-hover/th:opacity-40 transition-opacity" />{col.label}
+                      <span className="flex items-center gap-1 min-w-0">
+                        <GripVertical className="size-3 shrink-0 opacity-0 group-hover/th:opacity-40 transition-opacity" />
+                        <span className="truncate">{col.label}</span>
                       </span>
                     </th>
                   ))}

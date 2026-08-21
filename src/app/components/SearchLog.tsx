@@ -103,9 +103,6 @@ export function SearchLog({ bare = false }: { bare?: boolean }) {
   return (
     <Wrap className={bare ? "space-y-3" : "p-3 space-y-3"}>
       {!bare && <div className="flex items-center gap-1.5 text-sm font-medium"><ClipboardList className="size-4 text-primary" />Search log</div>}
-      <p className="text-xs text-muted-foreground">
-        A reproducible record of each search: the database, the exact query, the date, and how many records it returned. Keep separate logs as tabs.
-      </p>
 
       {/* Log tabs */}
       <div className="flex items-center gap-2 flex-wrap">
