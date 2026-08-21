@@ -9,13 +9,14 @@ import { Badge } from "../components/ui/badge";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
-import { ClipboardList, RefreshCw } from "lucide-react";
+import { ClipboardList, RefreshCw, FileText } from "lucide-react";
 import { ChevronDown, ChevronLeft, ChevronRight, Bot, Play, X, History, GitCompare, Trash2, FlaskConical, Wand2, Loader2, RotateCcw, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { QueryDiff } from "../components/QueryDiff";
 import { AnalysisProgress, Stage as ProgStage } from "../components/AnalysisProgress";
 import { SearchLog } from "../components/SearchLog";
 import { LivingUpdates } from "../components/LivingUpdates";
+import { ProtocolPanel } from "../components/ProtocolPanel";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -798,15 +799,17 @@ export function SimulationPage() {
 
       {/* Reproducibility + currency tools grouped into one tabbed panel. */}
       <Card className="p-0 overflow-hidden">
-        <Tabs defaultValue="log">
+        <Tabs defaultValue="protocol">
           <div className="border-b px-4 py-2.5 bg-gradient-to-b from-muted/40 to-transparent">
             <TabsList>
-              <TabsTrigger value="log" className="gap-1.5"><ClipboardList className="size-3.5" />Search log</TabsTrigger>
               <TabsTrigger value="updates" className="gap-1.5"><RefreshCw className="size-3.5" />Living updates</TabsTrigger>
+              <TabsTrigger value="protocol" className="gap-1.5"><FileText className="size-3.5" />Protocol</TabsTrigger>
+              <TabsTrigger value="log" className="gap-1.5"><ClipboardList className="size-3.5" />Search log</TabsTrigger>
             </TabsList>
           </div>
-          <TabsContent value="log" className="p-4 mt-0"><SearchLog bare /></TabsContent>
           <TabsContent value="updates" className="p-4 mt-0"><LivingUpdates bare /></TabsContent>
+          <TabsContent value="protocol" className="p-4 mt-0"><ProtocolPanel /></TabsContent>
+          <TabsContent value="log" className="p-4 mt-0"><SearchLog bare /></TabsContent>
         </Tabs>
       </Card>
     </div>

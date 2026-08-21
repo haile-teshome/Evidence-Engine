@@ -327,6 +327,13 @@ export const AIService = {
     return { summary: r.summary || "", references: r.references || [] };
   },
 
+  // Per-source structured evidence table (design / population / intervention /
+  // comparator / outcomes / key_finding) over selected articles + uploaded docs.
+  async structuredSummary(sources: { id: string; title: string; abstract?: string; full_text?: string }[], signal?: AbortSignal): Promise<{ id: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string }[]> {
+    const r = await postJSON<{ characteristics: { id: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string }[] }>("/writing/characteristics", { papers: sources, model: apiConfig.model }, signal);
+    return r.characteristics || [];
+  },
+
   async getRefinementSuggestions(goal = "", papers: Paper[] = [], signal?: AbortSignal): Promise<string[]> {
     const r = await postJSON<{ suggestions: string[] }>("/pico/suggestions", {
       goal, papers, model: apiConfig.model,
@@ -435,15 +442,15 @@ export const AIService = {
     return { values: r.values || {}, fields: r.fields || [] };
   },
 
-  async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal): Promise<ScreenResult> {
+  async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = ""): Promise<ScreenResult> {
     return postJSON<ScreenResult>("/screen/abstract", {
-      paper, pico, inclusion, exclusion, model: apiConfig.model,
+      paper, pico, inclusion, exclusion, protocol, model: apiConfig.model,
     }, signal);
   },
 
-  async screenPaperMultiAgentBatch(papers: Paper[], pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal): Promise<ScreenResult[]> {
+  async screenPaperMultiAgentBatch(papers: Paper[], pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = ""): Promise<ScreenResult[]> {
     const r = await postJSON<{ results: ScreenResult[] }>("/screen/abstract-batch", {
-      papers, pico, inclusion, exclusion, model: apiConfig.model,
+      papers, pico, inclusion, exclusion, protocol, model: apiConfig.model,
     }, signal);
     return r.results || [];
   },
@@ -565,6 +572,25 @@ export const AIService = {
       abstract: c.abstract,
       url: c.url,
       citation_type: c.citation_type,
+    }));
+  },
+
+  // Semantic 'find similar' — the topical-similarity sibling of fetchCitations.
+  // Given one or more seed papers, returns NEW related papers (OpenAlex
+  // related_works, ranked by local embedding cosine) shaped exactly like the
+  // citation rows so the Snowball UI can treat them the same way.
+  async fetchSimilar(seeds: { title: string; doi?: string; abstract?: string }[], maxPer: number, signal?: AbortSignal): Promise<any[]> {
+    const r = await postJSON<{ papers: any[] }>("/papers/similar", {
+      seeds, top_k: Math.max(maxPer, 20), max_per_seed: maxPer,
+    }, signal);
+    return (r.papers || []).map((c: any) => ({
+      id: c.id || `${(c.title || "").slice(0, 12)}-${Math.random().toString(36).slice(2, 6)}`,
+      title: c.title,
+      source: c.source || "OpenAlex (similar)",
+      abstract: c.abstract,
+      url: c.url,
+      citation_type: "similar",
+      similarity: c.similarity,
     }));
   },
 

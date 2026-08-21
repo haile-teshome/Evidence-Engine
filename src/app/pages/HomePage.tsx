@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useStore, HistoryEntry } from "../lib/store";
+import { useStore, HistoryEntry, SummaryRow } from "../lib/store";
+import { Checkbox } from "../components/ui/checkbox";
 import { AIService, DataAggregator } from "../lib/mockServices";
 import type { ClarifyingQuestion, Paper } from "../lib/mockServices";
 import { useStudyImport } from "../lib/useStudyImport";
@@ -17,10 +18,9 @@ import { PicoCards } from "../components/PicoCards";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, RotateCcw, Paperclip, Loader2, Hand, Files, Telescope } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, Download, RotateCcw, Paperclip, Loader2, Hand, Files, Telescope, Search } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
-import { ProtocolPanel } from "../components/ProtocolPanel";
 
 // File-picker filter, derived from the importer's accepted extensions so the two
 // never drift apart.
@@ -913,6 +913,38 @@ export function HomePage() {
     return out;
   }, [s.rawPapers, s.fullTexts]);
   const uploadedDocs = docCorpus.filter(d => d.source === "Local PDFs");
+  // For the Relevance tab, list uploads straight from rawPapers so they appear the
+  // instant they're attached, before full-text extraction finishes (docCorpus drops
+  // text-less docs, which hid freshly uploaded PDFs).
+  const uploadedRaw = (s.rawPapers || []).filter(p => p.source === "Local PDFs");
+
+  // Structured-summary source selection: relevant pulled articles + uploaded docs.
+  // Relevance-kept articles seed once; uploaded documents auto-select in real time
+  // as they are attached, so the Relevance tab reflects new uploads immediately.
+  const [summarySel, setSummarySel] = useState<Set<string>>(new Set());
+  const [summarizing, setSummarizing] = useState(false);
+  const [relSearch, setRelSearch] = useState("");
+  const seededRerank = useRef(false);
+  const knownSummaryDocIds = useRef<Set<string> | null>(null);
+  useEffect(() => {
+    const toAdd = new Set<string>();
+    if (!seededRerank.current && (s.rerankResults?.kept?.length ?? 0) > 0) {
+      seededRerank.current = true;
+      for (const r of s.rerankResults!.kept) toAdd.add(r.paper.id);
+    }
+    const ids = uploadedRaw.map(p => p.id);
+    if (knownSummaryDocIds.current === null) {
+      for (const id of ids) toAdd.add(id);                               // existing uploads on first run
+    } else {
+      for (const id of ids) if (!knownSummaryDocIds.current.has(id)) toAdd.add(id);  // newly attached
+    }
+    knownSummaryDocIds.current = new Set(ids);
+    if (toAdd.size) setSummarySel(prev => new Set([...prev, ...toAdd]));
+  }, [s.rerankResults, uploadedRaw]);
+  const selectedSources = summarySel;
+  function toggleSource(id: string) {
+    setSummarySel(prev => { const n = new Set(prev); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  }
 
   // Freshly attached documents become the focus of the NEXT message, so "summarize
   // this" acts on what the user just attached rather than the whole corpus. We
@@ -990,6 +1022,31 @@ export function HomePage() {
     }
   }
 
+  // Build a per-source structured evidence table over the selected pulled
+  // articles + uploaded documents, appended to the chat thread like a search.
+  async function runStructuredSummary() {
+    const rankedById = new Map((s.rerankResults?.ranked || []).map(r => [r.paper.id, r.paper]));
+    const raw = [
+      ...[...selectedSources].map(id => rankedById.get(id)).filter(Boolean).map((p: any) => ({ id: p.id, title: p.title, abstract: p.abstract || "", full_text: s.fullTexts[p.id]?.text || "" })),
+      ...uploadedRaw.filter(p => selectedSources.has(p.id)).map(p => ({ id: p.id, title: p.title, abstract: p.abstract || "", full_text: s.fullTexts[p.id]?.text || "" })),
+    ];
+    const seen = new Set<string>();
+    const uniq = raw.filter(x => seen.has(x.id) ? false : (seen.add(x.id), true));
+    if (!uniq.length) { toast.error("Select at least one relevant article or uploaded document."); return; }
+    setSummarizing(true);
+    setReviewOpen(false);
+    const idx = qaTurns.length;
+    setQaTurns(prev => [...prev, { question: `Structured summary of ${uniq.length} source${uniq.length === 1 ? "" : "s"}`, answer: "", sources: [], busy: true, ts: Date.now() }]);
+    try {
+      const rows = await AIService.structuredSummary(uniq);
+      const titleById = new Map(uniq.map(x => [x.id, x.title]));
+      const table: SummaryRow[] = rows.map(r => ({ id: r.id, title: titleById.get(r.id) || r.id, design: r.design, population: r.population, intervention: r.intervention, comparator: r.comparator, outcomes: r.outcomes, key_finding: r.key_finding }));
+      setQaTurns(prev => prev.map((x, j) => j === idx ? { ...x, table, busy: false } : x));
+    } catch (e: any) {
+      setQaTurns(prev => prev.map((x, j) => j === idx ? { ...x, answer: e?.message || "Structured summary failed.", busy: false } : x));
+    } finally { setSummarizing(false); }
+  }
+
   // Answer a question from a set of documents and append it as a chat turn.
   async function runDocQA(question: string, set: typeof docCorpus) {
     const qq = question.trim();
@@ -1022,7 +1079,28 @@ export function HomePage() {
       const pico = { population: s.pico.population, intervention: s.pico.intervention, comparator: s.pico.comparator, outcome: s.pico.outcome };
       const seen = new Set((s.rawPapers || []).map(p => p.id));
       const fetched = await DataAggregator.fetchAll(q, s.sources, pico, undefined);
-      const fresh = (fetched?.papers || []).filter(p => !seen.has(p.id));
+      let fresh = (fetched?.papers || []).filter(p => !seen.has(p.id));
+
+      // Semantic supplementary: alongside the Boolean query, pull OpenAlex
+      // related_works seeded from the studies kept so far, ranked by the local
+      // embedder. Catches same-topic papers the keyword query missed (different
+      // vocabulary, recent, cross-field). Additive + best-effort: a failure here
+      // never blocks the documented Boolean supplementary.
+      try {
+        const keptSeeds = (s.rerankResults?.kept || []).slice(0, 8).map((k: any) => ({
+          title: k.paper?.title || k.paper?.Title || "",
+          abstract: k.paper?.abstract || k.paper?.Abstract || "",
+          doi: k.paper?.doi || k.paper?.DOI || "",
+        })).filter(x => x.title);
+        if (keptSeeds.length) {
+          const similar = await AIService.fetchSimilar(keptSeeds, 30);
+          const seenTitles = new Set([...(s.rawPapers || []), ...fresh].map((p: any) => ((p.title || p.Title || "") as string).toLowerCase()));
+          const simFresh = similar
+            .filter((p: any) => p.id && !seen.has(p.id) && !seenTitles.has(((p.title || "") as string).toLowerCase()))
+            .map((p: any) => ({ id: p.id, title: p.title, abstract: p.abstract, url: p.url, source: p.source || "OpenAlex (similar)" }));
+          if (simFresh.length) fresh = [...fresh, ...(simFresh as any)];
+        }
+      } catch { /* semantic pull is best-effort */ }
 
       // Log this (re-run) supplementary search.
       const counts: Record<string, number> = {};
@@ -1589,7 +1667,49 @@ export function HomePage() {
           </div>
           <Card className="p-4">
             {turn.busy ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />Reading your documents…</div>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{turn.question.startsWith("Structured summary") ? "Summarizing your selected sources…" : "Reading your documents…"}</div>
+            ) : turn.table ? (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-medium">Structured summary · {turn.table.length} source{turn.table.length === 1 ? "" : "s"}</span>
+                  <div className="flex items-center gap-1">
+                    <Button size="sm" variant="ghost" className="size-7 px-0 text-muted-foreground" title="Download as CSV" onClick={() => {
+                      const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+                      const cols: (keyof SummaryRow)[] = ["design", "population", "intervention", "comparator", "outcomes", "key_finding"];
+                      const lines = [["Source", "Design", "Population", "Intervention", "Comparator", "Outcomes", "Key finding"], ...turn.table!.map(r => [r.title, ...cols.map(c => String(r[c] ?? ""))])];
+                      const blob = new Blob([lines.map(l => l.map(esc).join(",")).join("\n")], { type: "text/csv" });
+                      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "structured_summary.csv"; a.click(); URL.revokeObjectURL(a.href);
+                    }}><Download className="size-3.5" /></Button>
+                    <Button size="sm" variant="ghost" className="size-7 px-0 text-muted-foreground" title="Copy table" onClick={() => {
+                      const cols: (keyof SummaryRow)[] = ["design", "population", "intervention", "comparator", "outcomes", "key_finding"];
+                      const lines = [["Source", "Design", "Population", "Intervention", "Comparator", "Outcomes", "Key finding"], ...turn.table!.map(r => [r.title, ...cols.map(c => String(r[c] ?? "").replace(/[\t\n]+/g, " "))])];
+                      navigator.clipboard.writeText(lines.map(l => l.join("\t")).join("\n"));
+                      toast.success("Copied");
+                    }}><Copy className="size-3.5" /></Button>
+                  </div>
+                </div>
+                <div className="overflow-x-auto rounded-md border">
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-muted/50 text-left">
+                        {["Source", "Design", "Population", "Intervention", "Comparator", "Outcomes", "Key finding"].map(h => (
+                          <th key={h} className="px-2 py-1.5 font-medium whitespace-nowrap">{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {turn.table.map(r => (
+                        <tr key={r.id} className="border-t align-top">
+                          <td className="px-2 py-1.5 font-medium max-w-[12rem]">{r.title}</td>
+                          {(["design", "population", "intervention", "comparator", "outcomes", "key_finding"] as (keyof SummaryRow)[]).map(c => (
+                            <td key={c} className="px-2 py-1.5 min-w-[9rem] whitespace-pre-wrap">{r[c] || <span className="text-muted-foreground">—</span>}</td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
             ) : (
               <div className="space-y-2">
                 <div className="text-sm leading-relaxed space-y-1.5 text-foreground/90">
@@ -1763,7 +1883,7 @@ export function HomePage() {
                   <TabsTrigger value="pico">PICO</TabsTrigger>
                   <TabsTrigger value="criteria">Criteria</TabsTrigger>
                   <TabsTrigger value="search">Search</TabsTrigger>
-                  <TabsTrigger value="protocol">Protocol</TabsTrigger>
+                  <TabsTrigger value="relevance">Relevance</TabsTrigger>
                 </TabsList>
               </div>
               <div className="flex-1 overflow-auto p-4">
@@ -1788,10 +1908,60 @@ export function HomePage() {
                 <TabsContent value="search" className="mt-0 space-y-2">
                   <label className="text-muted-foreground text-sm">Final Search String</label>
                   <Textarea value={s.query} onChange={e => { s.setQuery(e.target.value); s.setUnifiedSearchQuery(e.target.value); }} rows={8} className="font-mono text-xs" />
-                  <p className="text-xs text-muted-foreground">Edits here also update the per-database queries on the Planning page.</p>
                 </TabsContent>
-                <TabsContent value="protocol" className="mt-0">
-                  <ProtocolPanel />
+                <TabsContent value="relevance" className="mt-0 space-y-3">
+                  <p className="text-xs text-muted-foreground">
+                    Pick relevant articles then generate a per-source structured summary.
+                  </p>
+                  <div>
+                    <div className="text-xs font-semibold text-muted-foreground mb-1.5">Pulled articles ({(s.rerankResults?.ranked || []).length})</div>
+                    {(s.rerankResults?.ranked || []).length === 0 ? (
+                      <p className="text-xs text-muted-foreground">Run a search first to score articles for relevance.</p>
+                    ) : (
+                      <div className="rounded-md border overflow-hidden">
+                        <div className="flex items-center gap-1.5 px-2 border-b bg-muted/30">
+                          <Search className="size-3.5 text-muted-foreground shrink-0" />
+                          <input value={relSearch} onChange={e => setRelSearch(e.target.value)} placeholder="Search articles…"
+                            className="flex-1 bg-transparent py-2 text-xs outline-none placeholder:text-muted-foreground min-w-0" />
+                          {relSearch && (
+                            <button type="button" onClick={() => setRelSearch("")} className="text-muted-foreground hover:text-foreground shrink-0" title="Clear search"><X className="size-3.5" /></button>
+                          )}
+                        </div>
+                        <div className="max-h-[45vh] overflow-auto divide-y">
+                          {(() => {
+                            const shown = (s.rerankResults?.ranked || []).filter(r => !relSearch.trim() || (r.paper.title || "").toLowerCase().includes(relSearch.trim().toLowerCase()));
+                            return shown.length === 0 ? (
+                              <p className="text-xs text-muted-foreground p-3">No articles match “{relSearch}”.</p>
+                            ) : shown.map(r => (
+                              <label key={r.paper.id} className="flex items-start gap-2 px-2 py-1.5 hover:bg-muted/40 cursor-pointer">
+                                <Checkbox checked={selectedSources.has(r.paper.id)} onCheckedChange={() => toggleSource(r.paper.id)} className="mt-0.5" />
+                                <span className="flex-1 min-w-0">
+                                  <span className="block text-xs line-clamp-2 leading-snug">{r.paper.title}</span>
+                                  <span className="block text-[10px] text-muted-foreground">relevance {r.leads_score.toFixed(2)}</span>
+                                </span>
+                              </label>
+                            ));
+                          })()}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {uploadedRaw.length > 0 && (
+                    <div className="border-t pt-3">
+                      <div className="text-xs font-semibold text-muted-foreground mb-1.5">Uploaded documents ({uploadedRaw.length})</div>
+                      <div className="max-h-[45vh] overflow-auto rounded-md border divide-y">
+                        {uploadedRaw.map(p => (
+                          <label key={p.id} className="flex items-start gap-2 px-2 py-1.5 hover:bg-muted/40 cursor-pointer">
+                            <Checkbox checked={selectedSources.has(p.id)} onCheckedChange={() => toggleSource(p.id)} className="mt-0.5" />
+                            <span className="flex-1 min-w-0 text-xs line-clamp-2 leading-snug">{p.title}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <Button className="w-full" onClick={runStructuredSummary} disabled={summarizing || selectedSources.size === 0}>
+                    {summarizing ? <><Loader2 className="size-4 mr-2 animate-spin" />Summarizing…</> : <><Sparkles className="size-4 mr-2" />Structured summary ({selectedSources.size})</>}
+                  </Button>
                 </TabsContent>
               </div>
             </Tabs>

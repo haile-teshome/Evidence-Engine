@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { Card } from "./ui/card";
 import { Label } from "./ui/label";
@@ -73,6 +73,15 @@ const NAV: { id: PageId; label: string; icon: any; anim: keyof typeof ANIM }[] =
 export function Sidebar() {
   const s = useStore();
   const fileRef = useRef<HTMLInputElement>(null);
+  // Active-nav pill: one glass element positioned over the active tab. We measure
+  // each nav button and spring the pill's y/height whenever the active page
+  // changes, so it always animates from its current spot to the clicked tab.
+  const navBtns = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [pill, setPill] = useState<{ top: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = navBtns.current[s.page];
+    if (el) setPill({ top: el.offsetTop, height: el.offsetHeight });
+  }, [s.page]);
   const [localModels, setLocalModels] = useState<string[]>([]);
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
@@ -132,9 +141,46 @@ export function Sidebar() {
 
       {/* Fixed: active tasks + nav tabs stay put while the panels below scroll. */}
       <div className="shrink-0 px-4 pt-4 pb-2">
-        {/* Active tasks (persists across page navigation) */}
+        {/* Navigation. A single glass pill sits over the active tab and springs its
+            y/height whenever the active page changes, so it always animates from its
+            current spot to the clicked tab regardless of unrelated re-renders. */}
+        <nav className="relative space-y-1 mb-4">
+          {pill && (
+            <motion.span
+              className="pointer-events-none absolute left-0 right-0 top-0 rounded-xl overflow-hidden bg-gradient-to-b from-primary/80 to-primary/60 backdrop-blur-xl backdrop-saturate-150 border border-white/40 dark:border-white/20 ring-1 ring-inset ring-white/25 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.28),0_1px_0_0_rgba(255,255,255,0.45)_inset,0_-10px_18px_-10px_rgba(0,0,0,0.2)_inset]"
+              initial={false}
+              animate={{ y: pill.top, height: pill.height }}
+              transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.7 }}
+            >
+              {/* Specular glass sheen: bright top-lit highlight fading down */}
+              <span className="absolute inset-0 bg-gradient-to-b from-white/35 via-white/5 to-transparent" />
+              {/* Crisp top edge line */}
+              <span className="absolute inset-x-1.5 top-0 h-px bg-white/60 rounded-full blur-[0.3px]" />
+            </motion.span>
+          )}
+          {NAV.map(n => {
+            const Icon = n.icon;
+            const active = s.page === n.id;
+            return (
+              <button key={n.id} ref={el => { navBtns.current[n.id] = el; }} onClick={() => s.setPage(n.id)}
+                className={`group relative z-10 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors duration-200 ${
+                  active
+                    ? "text-primary-foreground"
+                    : "text-foreground/80 hover:bg-white/50 dark:hover:bg-white/[0.06] hover:backdrop-blur-sm"
+                }`}>
+                <span className="relative z-10 inline-flex shrink-0 transition-transform duration-200 ease-out group-hover:scale-125">
+                  <Icon className={`size-4 ${ANIM[n.anim]}`} />
+                </span>
+                <span className="relative z-10">{n.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Active tasks (persists across navigation). Placed BELOW the nav so that
+            it mounting/unmounting never shifts the nav and drags the sliding pill. */}
         {Object.values(s.tasks).filter(t => t.status === "running").length > 0 && (
-          <Card className="p-2 mb-3 bg-primary/5 border-primary/30 space-y-1">
+          <Card className="p-2 bg-primary/5 border-primary/30 space-y-1">
             {Object.values(s.tasks)
               .filter(t => t.status === "running")
               .map(t => (
@@ -152,41 +198,6 @@ export function Sidebar() {
               ))}
           </Card>
         )}
-
-        {/* Navigation */}
-        <nav className="space-y-1 mb-4">
-          {NAV.map(n => {
-            const Icon = n.icon;
-            const active = s.page === n.id;
-            return (
-              <button key={n.id} onClick={() => s.setPage(n.id)}
-                className={`group relative w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors duration-200 ${
-                  active
-                    ? "text-primary-foreground"
-                    : "text-foreground/80 hover:bg-white/50 dark:hover:bg-white/[0.06] hover:backdrop-blur-sm"
-                }`}>
-                {/* The premium glass pill is a SHARED-LAYOUT element: when the active
-                    page changes it animates (slides) from the old item to the new one. */}
-                {active && (
-                  <motion.span
-                    layoutId="activeNavGlass"
-                    transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.7 }}
-                    className="absolute inset-0 rounded-xl overflow-hidden bg-gradient-to-b from-primary/80 to-primary/60 backdrop-blur-xl backdrop-saturate-150 border border-white/40 dark:border-white/20 ring-1 ring-inset ring-white/25 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.28),0_1px_0_0_rgba(255,255,255,0.45)_inset,0_-10px_18px_-10px_rgba(0,0,0,0.2)_inset]"
-                  >
-                    {/* Specular glass sheen: bright top-lit highlight fading down */}
-                    <span className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/35 via-white/5 to-transparent" />
-                    {/* Crisp top edge line */}
-                    <span className="pointer-events-none absolute inset-x-1.5 top-0 h-px bg-white/60 rounded-full blur-[0.3px]" />
-                  </motion.span>
-                )}
-                <span className="relative z-10 inline-flex shrink-0 transition-transform duration-200 ease-out group-hover:scale-125">
-                  <Icon className={`size-4 ${ANIM[n.anim]}`} />
-                </span>
-                <span className="relative z-10">{n.label}</span>
-              </button>
-            );
-          })}
-        </nav>
       </div>
 
       {/* Scrollable region: sessions, model, databases, local PDFs. */}

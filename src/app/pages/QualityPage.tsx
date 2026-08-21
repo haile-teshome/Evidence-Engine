@@ -321,6 +321,17 @@ export function QualityPage() {
         }
         s.updateTask("quality-assess", { progress: { done: i + 1, total: papers.length } });
       }
+      // On cancel, save partial progress: merge whatever finished this run into
+      // the existing appraisal (by paper) and keep prior reports + overrides.
+      if (signal.aborted) {
+        const byId = new Map((s.qualityReports ?? []).map(r => [r.paper_id, r]));
+        reports.forEach(r => byId.set(r.paper_id, r));
+        const merged = [...byId.values()];
+        s.setQualityReports(merged);
+        s.updateTask("quality-assess", { status: "canceled" });
+        toast.info(`Canceled: ${reports.length} appraised this run, ${merged.length} kept in total.`);
+        return;
+      }
       // Save each outgoing appraisal that a different instrument is replacing.
       if (priorById.size > 0) {
         s.setQualityArchive(prev => {
@@ -339,14 +350,9 @@ export function QualityPage() {
       s.setExcludedByQuality(new Set());
       // Fresh assessment invalidates previous overrides.
       s.setQualityOverrides([]);
-      if (signal.aborted) {
-        s.updateTask("quality-assess", { status: "canceled" });
-        toast.info(`Canceled: ${reports.length} of ${papers.length} assessed`);
-      } else {
-        s.updateTask("quality-assess", { status: "done" });
-        const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
-        toast.success(`Appraised ${reports.length} included articles${forcedName ? ` with ${forcedName}` : ` (${stage})`}${withFT ? `, ${withFT} using full text` : ""}.`);
-      }
+      s.updateTask("quality-assess", { status: "done" });
+      const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
+      toast.success(`Appraised ${reports.length} included articles${forcedName ? ` with ${forcedName}` : ` (${stage})`}${withFT ? `, ${withFT} using full text` : ""}.`);
     } catch (e: any) {
       s.updateTask("quality-assess", { status: "error", detail: e?.message });
     }
@@ -450,9 +456,11 @@ export function QualityPage() {
         <>
           <Alert>
             <AlertDescription>
-              Risk-of-bias appraisal of your <strong>included</strong> articles, with a rubric matched to each study
-              design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Uses the acquired full text where available for better
-              judgments. Reviewer overrides are audit-logged.
+              <p>
+                Risk-of-bias appraisal of your <strong className="font-semibold text-foreground">included</strong> articles,
+                with a rubric matched to each study design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Uses the acquired
+                full text where available for better judgments. Reviewer overrides are audit-logged.
+              </p>
             </AlertDescription>
           </Alert>
           {(() => {
@@ -546,6 +554,10 @@ export function QualityPage() {
               )}
             </>}
           />
+
+          {task && task.status === "running" && (
+            <TaskProgressCard task={task} title="Quality assessment" onCancel={() => s.cancelTask("quality-assess")} />
+          )}
 
           <Card className="p-4">
             {/* Instrument tabs live in the panel header; the paper list + figure

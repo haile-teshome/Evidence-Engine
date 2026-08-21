@@ -430,6 +430,49 @@ class OpenAlexService:
             print(f"OpenAlex fetch error: {e}")
             return []
 
+    @staticmethod
+    def related(seed_title: str, seed_doi: str = "", max_results: int = 50) -> List[Paper]:
+        """OpenAlex 'related_works' for a seed paper — algorithmic topical
+        similarity (shared concepts), NOT citations. Complements citation
+        snowballing by surfacing same-topic papers that have no citation link."""
+        try:
+            mail = {"mailto": Config.ENTREZ_EMAIL}
+            # 1. resolve the seed to an OpenAlex work and read its related_works
+            if seed_doi:
+                doi = seed_doi.replace("https://doi.org/", "")
+                w = throttled_request(f"https://api.openalex.org/works/doi:{doi}",
+                                      params={**mail, "select": "id,related_works"}).json()
+            else:
+                r = throttled_request("https://api.openalex.org/works",
+                                      params={**mail, "search": seed_title, "per_page": 1,
+                                              "select": "id,related_works"}).json()
+                w = (r.get("results") or [None])[0]
+            rel_ids = [rid.split("/")[-1] for rid in ((w or {}).get("related_works") or [])][:max_results]
+            if not rel_ids:
+                return []
+            # 2. batch-fetch the related works
+            resp = throttled_request("https://api.openalex.org/works",
+                                     params={**mail, "filter": "ids.openalex:" + "|".join(rel_ids),
+                                             "per_page": min(len(rel_ids), 200),
+                                             "select": "id,title,abstract_inverted_index,doi,open_access"}).json()
+            papers: List[Paper] = []
+            for work in resp.get("results", []):
+                abs_idx = work.get("abstract_inverted_index") or {}
+                doi = (work.get("doi") or "").replace("https://doi.org/", "")
+                oa = work.get("open_access", {}) or {}
+                pid = (work.get("id") or "").split("/")[-1] or doi
+                papers.append(Paper(
+                    source="OpenAlex (similar)",
+                    id=str(pid),
+                    title=work.get("title", "") or "",
+                    abstract=_reconstruct_inverted(abs_idx) if abs_idx else "",
+                    url=oa.get("oa_url") or (f"https://doi.org/{doi}" if doi else (work.get("id") or "")),
+                ))
+            return papers
+        except Exception as e:
+            print(f"OpenAlex related error: {e}")
+            return []
+
 
 class CrossRefService:
     """CrossRef — 150M+ DOI records across all disciplines."""

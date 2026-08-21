@@ -11,7 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
-import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, Layers, CheckCircle2 } from "lucide-react";
+import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { ScreenResult, FullTextResult } from "../lib/apiClient";
 
@@ -416,14 +416,6 @@ export function WritingPage() {
   const [coverage, setCoverage] = useState(
     "Each database was searched from inception to the search date, with no language or date restrictions.",
   );
-  // Characteristics of included studies (per paper) + Ask-your-evidence Q&A.
-  type CharRow = { design: string; population: string; intervention: string; comparator: string; outcomes: string };
-  const emptyChar: CharRow = { design: "", population: "", intervention: "", comparator: "", outcomes: "" };
-  const [characteristics, setCharacteristics] = useState<Record<string, CharRow>>({});
-  const [genChar, setGenChar] = useState(false);
-  const [askQ, setAskQ] = useState("");
-  const [askAnswer, setAskAnswer] = useState("");
-  const [asking, setAsking] = useState(false);
 
   const merged = useMemo<PaperMeta[]>(
     () => includedPapers.map(p => ({ ...p, ...(enriched[p.paper_id] ?? {}) })),
@@ -642,80 +634,6 @@ export function WritingPage() {
     }
   }
 
-  // ── Characteristics of included studies ─────────────────────────────────────
-  const robOf = (paperId: string): string =>
-    (s.qualityReports || []).find(r => r.paper_id === paperId)?.overall_judgment || "";
-  const studyLabel = (p: PaperMeta): string =>
-    `${p.authors ? p.authors.split(/[;,]/)[0].trim() + " et al." : p.source}${p.year ? ` ${p.year}` : ""}`.trim();
-
-  function setCharCell(id: string, field: keyof CharRow, val: string) {
-    setCharacteristics(prev => ({ ...prev, [id]: { ...(prev[id] || emptyChar), [field]: val } }));
-  }
-
-  async function generateCharacteristics() {
-    if (!merged.length) { toast.error("No included studies yet. Finish screening first."); return; }
-    setGenChar(true);
-    try {
-      const papers = merged.map(p => ({ id: p.paper_id, title: p.title, abstract: p.abstract || "", full_text: s.fullTexts[p.paper_id]?.text || "" }));
-      const r = await fetch("/api/writing/characteristics", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ papers, model: s.model }) });
-      if (!r.ok) throw new Error(await r.text());
-      const { characteristics: list } = await r.json();
-      const map: Record<string, CharRow> = {};
-      for (const c of list) map[c.id] = { design: c.design, population: c.population, intervention: c.intervention, comparator: c.comparator, outcomes: c.outcomes };
-      setCharacteristics(prev => ({ ...prev, ...map }));
-      toast.success(`Extracted characteristics for ${list.length} stud${list.length === 1 ? "y" : "ies"}`);
-    } catch (e: any) { toast.error(`Extraction failed: ${e.message}`); }
-    finally { setGenChar(false); }
-  }
-
-  function characteristicsCsv(): string {
-    const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-    const rows = [["Study", "Design", "Population", "Intervention", "Comparator", "Outcomes", "Risk of bias"]];
-    merged.forEach(p => {
-      const c = characteristics[p.paper_id] || emptyChar;
-      rows.push([studyLabel(p), c.design, c.population, c.intervention, c.comparator, c.outcomes, robOf(p.paper_id)]);
-    });
-    return rows.map(r => r.map(esc).join(",")).join("\n");
-  }
-
-  async function exportCharacteristicsDocx() {
-    try {
-      const docx = await import("docx");
-      const { Document, Packer, Paragraph, TextRun, Table: DTable, TableRow: DRow, TableCell: DCell, WidthType, HeadingLevel, AlignmentType, BorderStyle } = docx as any;
-      const b = { style: BorderStyle.SINGLE, size: 4, color: "999999" };
-      const borders = { top: b, bottom: b, left: b, right: b };
-      const hdr = (t: string) => new DCell({ borders, shading: { fill: "EEF6F5" }, children: [new Paragraph({ children: [new TextRun({ text: t, bold: true, size: 16 })] })] });
-      const cell = (t: string) => new DCell({ borders, children: [new Paragraph({ children: [new TextRun({ text: t || "", size: 16 })] })] });
-      const rows = [
-        new DRow({ tableHeader: true, children: ["Study", "Design", "Population", "Intervention", "Comparator", "Outcomes", "Risk of bias"].map(hdr) }),
-        ...merged.map(p => { const c = characteristics[p.paper_id] || emptyChar; return new DRow({ children: [studyLabel(p), c.design, c.population, c.intervention, c.comparator, c.outcomes, robOf(p.paper_id)].map(cell) }); }),
-      ];
-      const doc = new Document({ styles: { default: { document: { run: { font: "Calibri", size: 20 } } } }, sections: [{ children: [
-        new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun("Characteristics of included studies")] }),
-        new Paragraph({ spacing: { after: 120 }, children: [new TextRun({ text: `Table. Characteristics of the ${merged.length} included studies.`, italics: true })] }),
-        new DTable({ width: { size: 100, type: WidthType.PERCENTAGE }, rows }),
-      ] }] });
-      const blob = await Packer.toBlob(doc);
-      const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "included_studies.docx"; a.click(); URL.revokeObjectURL(a.href);
-      toast.success("Downloaded included_studies.docx");
-    } catch (e: any) { toast.error(`Word export failed: ${e?.message || e}`); }
-  }
-
-  // ── Ask your evidence (grounded, cited synthesis over included studies) ──────
-  async function askEvidence() {
-    const q = askQ.trim();
-    if (!q) return;
-    if (!merged.length) { toast.error("No included studies to search."); return; }
-    setAsking(true); setAskAnswer("");
-    try {
-      const papers = merged.map((p, i) => ({ n: i + 1, title: p.title, abstract: p.abstract || "", full_text: s.fullTexts[p.paper_id]?.text || "" }));
-      const r = await fetch("/api/writing/ask", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ question: q, papers, model: s.model }) });
-      if (!r.ok) throw new Error(await r.text());
-      const { answer } = await r.json();
-      setAskAnswer(answer || "No answer returned.");
-    } catch (e: any) { toast.error(`Ask failed: ${e.message}`); }
-    finally { setAsking(false); }
-  }
 
   // ── RAISE AI use disclosure (grounded in stages that actually ran) ───────────
   // RAISE requires transparent reporting of any AI use that makes or suggests
@@ -795,8 +713,6 @@ export function WritingPage() {
           <TabsTrigger value="citations">Citations</TabsTrigger>
           <TabsTrigger value="methods">Search strategy</TabsTrigger>
           <TabsTrigger value="writeup">Methods</TabsTrigger>
-          <TabsTrigger value="studies">Included studies</TabsTrigger>
-          <TabsTrigger value="ask">Ask evidence</TabsTrigger>
         </TabsList>
 
         {/* ── Citations: searchable paper list (left) + citation detail (right) ── */}
@@ -1012,111 +928,6 @@ export function WritingPage() {
           </Card>
         </TabsContent>
 
-        {/* ── INCLUDED STUDIES (characteristics table) ─────────────────────── */}
-        <TabsContent value="studies" className="mt-3 space-y-3">
-          <Card className="p-4 space-y-3">
-            <div className="flex items-start justify-between gap-3 flex-wrap">
-              <div>
-                <h3 className="font-medium">Characteristics of included studies</h3>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Design, population, intervention, comparator, and outcomes per study, extracted from each study's text
-                  (risk of bias pulled from Quality Assessment). Cells are editable; export to Word/CSV.
-                </p>
-              </div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <Button size="sm" variant="outline" onClick={() => downloadFile(characteristicsCsv(), "included_studies.csv", "text/csv")} disabled={!merged.length}>
-                  <Download className="size-3.5 mr-1.5" />.csv
-                </Button>
-                <Button size="sm" variant="outline" onClick={exportCharacteristicsDocx} disabled={!merged.length}>
-                  <Download className="size-3.5 mr-1.5" />Word
-                </Button>
-                <Button size="sm" onClick={generateCharacteristics} disabled={genChar || !merged.length}>
-                  {genChar ? <><Loader2 className="size-4 mr-2 animate-spin" />Extracting…</> : <><Layers className="size-4 mr-2" />Generate with AI</>}
-                </Button>
-              </div>
-            </div>
-            <div className="rounded-md border overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-36">Study</TableHead>
-                    <TableHead className="w-28">Design</TableHead>
-                    <TableHead>Population</TableHead>
-                    <TableHead>Intervention</TableHead>
-                    <TableHead>Comparator</TableHead>
-                    <TableHead>Outcomes</TableHead>
-                    <TableHead className="w-28">Risk of bias</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {merged.map(p => {
-                    const c = characteristics[p.paper_id] || emptyChar;
-                    return (
-                      <TableRow key={p.paper_id} className="align-top">
-                        <TableCell className="font-medium text-xs">{studyLabel(p)}</TableCell>
-                        {(["design", "population", "intervention", "comparator", "outcomes"] as const).map(f => (
-                          <TableCell key={f}>
-                            <Textarea value={c[f] || ""} onChange={e => setCharCell(p.paper_id, f, e.target.value)} rows={2} className="text-xs min-w-[8rem] resize-y" />
-                          </TableCell>
-                        ))}
-                        <TableCell className="text-xs">{robOf(p.paper_id) || <span className="text-muted-foreground">n/a</span>}</TableCell>
-                      </TableRow>
-                    );
-                  })}
-                  {merged.length === 0 && (
-                    <TableRow>
-                      <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-6">
-                        No included studies yet. Complete screening first.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </Card>
-        </TabsContent>
-
-        {/* ── ASK YOUR EVIDENCE (grounded cited Q&A) ───────────────────────── */}
-        <TabsContent value="ask" className="mt-3 space-y-3">
-          <Card className="p-4 space-y-3">
-            <div>
-              <h3 className="font-medium">Ask your evidence</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Ask a question and get a synthesis grounded <strong>only</strong> in your {merged.length} included stud{merged.length === 1 ? "y" : "ies"}, with <span className="font-mono">[n]</span> citations to the references below. No outside knowledge.
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <Input
-                value={askQ}
-                onChange={e => setAskQ(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter") askEvidence(); }}
-                placeholder="e.g., What adverse events were reported across the studies?"
-                className="flex-1"
-              />
-              <Button onClick={askEvidence} disabled={asking || !askQ.trim() || !merged.length}>
-                {asking ? <Loader2 className="size-4 animate-spin" /> : <><Search className="size-4 mr-2" />Ask</>}
-              </Button>
-            </div>
-            {askAnswer && (
-              <>
-                <Separator />
-                <div className="text-sm leading-relaxed whitespace-pre-wrap">{askAnswer}</div>
-                <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(askAnswer); toast.success("Copied"); }}>
-                  <Copy className="size-3.5 mr-1.5" />Copy
-                </Button>
-                <Separator />
-                <div className="text-xs font-semibold text-muted-foreground">References</div>
-                <ol className="text-xs space-y-1 list-decimal ml-5 text-muted-foreground">
-                  {merged.map(p => (
-                    <li key={p.paper_id}>
-                      {p.authors ? p.authors.split(/[;,]/)[0].trim() + " et al." : p.source}{p.year ? ` (${p.year})` : ""}. {p.title}
-                    </li>
-                  ))}
-                </ol>
-              </>
-            )}
-          </Card>
-        </TabsContent>
       </Tabs>
     </div>
   );

@@ -156,15 +156,22 @@ export function TextExtractionPage() {
         done += batch.length;
         s.updateTask("text-extract", { progress: { done, total: acquired.length } });
       }
-      s.setTextExtractions(out);
       if (signal.aborted) {
+        // Save partial progress: merge whatever finished this run into the
+        // existing answers for THIS question (by paper). Answers to a previous,
+        // different question are not mixed in.
+        const byId = new Map((s.textExtractions ?? []).filter(r => r.query === query).map(r => [r.paper_id, r]));
+        out.forEach(r => byId.set(r.paper_id, r));
+        const merged = [...byId.values()];
+        s.setTextExtractions(merged);
         s.updateTask("text-extract", { status: "canceled" });
-        toast.info(`Canceled: ${out.length} of ${acquired.length} processed`);
-      } else {
-        s.updateTask("text-extract", { status: "done" });
-        toast.success(`Extracted from ${out.length} articles`);
-        setAskOpen(false);   // collapse the question panel to free up the screen
+        toast.info(`Canceled: ${out.length} extracted this run, ${merged.length} kept in total.`);
+        return;
       }
+      s.setTextExtractions(out);
+      s.updateTask("text-extract", { status: "done" });
+      toast.success(`Extracted from ${out.length} articles`);
+      setAskOpen(false);   // collapse the question panel to free up the screen
     } catch (e: any) {
       s.updateTask("text-extract", { status: "error", detail: e?.message });
     }

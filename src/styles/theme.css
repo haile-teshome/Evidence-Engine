@@ -135,6 +135,12 @@
 
   html {
     font-size: var(--font-size);
+    /* Reserve the vertical scrollbar's space at all times. Otherwise pages/tabs
+       whose content crosses the viewport-height threshold (e.g. the Writing
+       Assistant "Search strategy" tab) toggle the scrollbar on/off, and because
+       the content column is centered (max-w-6xl mx-auto) those ~15px re-center
+       the whole app sideways — the "shake" on tab switch. */
+    scrollbar-gutter: stable;
   }
 
   h1 {

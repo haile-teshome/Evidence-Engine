@@ -5,9 +5,9 @@ import streamlit as st
 from typing import List, Dict, Any, Tuple, Optional, Callable
 from dataclasses import dataclass
 
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_anthropic import ChatAnthropic
-from langchain_ollama import ChatOllama
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage 
 
@@ -108,6 +108,42 @@ class AIService:
         except Exception as e:
             print(f"[get_model] AI connection error for {model_name}: {e}")
             return None
+
+    @staticmethod
+    def _build_embedder(model_name: str | None = None, keys: dict | None = None):
+        """Construct an embeddings model for the semantic-similarity layer.
+
+        Mirrors _build_model: defaults to a LOCAL Ollama embedder
+        (nomic-embed-text) so semantic search needs no key and nothing leaves the
+        machine; an OpenAI embedding model (text-embedding-*) is used instead when
+        named and a key is available. Returns None on failure so callers can fall
+        back gracefully."""
+        keys = keys or {}
+        name = model_name or os.getenv("EMBED_MODEL", "nomic-embed-text")
+        name_lower = name.lower()
+        ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        try:
+            if name_lower.startswith("text-embedding") or name_lower.startswith("openai:"):
+                key = AIService._cloud_key("openai", keys.get("openai", ""))
+                if not key:
+                    print("[get_embedder] OpenAI key not provided for", name)
+                    return None
+                return OpenAIEmbeddings(model=name.split(":", 1)[-1], api_key=key)
+            # DEFAULT / LOCAL: Ollama embeddings (nomic-embed-text, mxbai-embed-large, …)
+            return OllamaEmbeddings(model=name, base_url=ollama_base)
+        except Exception as e:
+            print(f"[get_embedder] embedder error for {name}: {e}")
+            return None
+
+    @staticmethod
+    def get_embedder(model_name: str | None = None):
+        """Public embedder accessor (mirrors get_model)."""
+        return AIService._build_embedder(model_name, None)
+
+    @staticmethod
+    def get_embedder_with_keys(model_name: str | None, keys: dict):
+        """Thread-safe embedder initializer preferring an explicit keys dict."""
+        return AIService._build_embedder(model_name, keys)
 
     @staticmethod
     def get_model_with_keys(model_name: str, keys: dict):
@@ -1974,8 +2010,8 @@ OUTPUT FORMAT:
     #     return {"decision": "Exclude", "reason": "AI Processing Timeout", "citation": "Check manually"}
 
     @staticmethod
-    def screen_paper(paper: Paper, pico: PICOCriteria, model_name: str, inclusion: List[str] = None, exclusion: List[str] = None) -> Dict[str, Any]:
-        """Strictly screen this paper based on PICO and Inclusion/Exclusion Criteria."""
+    def screen_paper(paper: Paper, pico: PICOCriteria, model_name: str, inclusion: List[str] = None, exclusion: List[str] = None, protocol: str = "") -> Dict[str, Any]:
+        """Strictly screen this paper based on the review plan, PICO, and Inclusion/Exclusion Criteria."""
         model = AIService.get_model(model_name)
         if not model:
             # Use keyword matching as primary fallback when model fails
@@ -2003,17 +2039,24 @@ OUTPUT FORMAT:
         # Ensure we have criteria text to send to the AI
         inc_text = inclusion if inclusion else getattr(pico, 'inclusion_criteria', "None specified")
         excl_text = exclusion if exclusion else getattr(pico, 'exclusion_criteria', "None specified")
-        
+        # The review plan/protocol from the planning stage, when present, grounds the
+        # decision beyond the bulleted criteria. Bounded so a long plan never dominates.
+        proto_text = (protocol or "").strip()
+        proto_block = (
+            f"\n        REVIEW PLAN / PROTOCOL (screen consistently with this plan):\n        {proto_text[:4000]}\n"
+            if proto_text else ""
+        )
+
         prompt = f"""
-        STRICTLY screen this paper based on PICO and Inclusion/Exclusion Criteria.
-        
+        STRICTLY screen this paper based on the review plan, PICO, and Inclusion/Exclusion Criteria.
+
         PICO:
         - Pop: {pico.population} | Int: {pico.intervention} | Comp: {pico.comparator} | Out: {pico.outcome}
-        
+
         CRITERIA:
         Inclusion: {inc_text}
         Exclusion: {excl_text}
-
+        {proto_block}
         PAPER:
         Title: {paper.title}
         Abstract: {paper.abstract}
