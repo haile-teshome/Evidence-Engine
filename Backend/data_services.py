@@ -53,7 +53,12 @@ class PubMedService:
     def fetch(query: str, max_results: int) -> List[Paper]:
         """Fetch papers from PubMed."""
         Entrez.email = Config.ENTREZ_EMAIL
-        
+        # An optional free NCBI key raises the rate limit from 3 to 10 req/s.
+        from request_creds import get_cred
+        _ncbi_key = get_cred("ncbi") or getattr(Config, "NCBI_API_KEY", "")
+        if _ncbi_key:
+            Entrez.api_key = _ncbi_key
+
         # Add title/abstract search if not specified
         if "[tiab]" not in query.lower() and "[" not in query:
             query = f"({query})[tiab]"
@@ -592,6 +597,188 @@ class DOAJService:
             return []
 
 
+class ClinicalTrialsService:
+    """ClinicalTrials.gov registered trials via the keyless API v2. Surfaces
+    registered and often-unpublished studies (grey literature), the main defense
+    against publication bias that PRISMA/Cochrane expect a review to search."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            url = "https://clinicaltrials.gov/api/v2/studies"
+            params = {"query.term": clean, "pageSize": min(max(max_results, 1), 100)}
+            resp = throttled_request(url, params=params).json()
+            papers: List[Paper] = []
+            for study in resp.get("studies", []):
+                ps = study.get("protocolSection", {}) or {}
+                idm = ps.get("identificationModule", {}) or {}
+                nct = idm.get("nctId", "") or ""
+                if not nct:
+                    continue
+                title = idm.get("briefTitle") or idm.get("officialTitle") or nct
+                desc = ps.get("descriptionModule", {}) or {}
+                abstract = desc.get("briefSummary") or desc.get("detailedDescription") or ""
+                status = (ps.get("statusModule", {}) or {}).get("overallStatus", "") or ""
+                papers.append(Paper(
+                    source="ClinicalTrials.gov",
+                    id=nct,
+                    title=title,
+                    # Prefix the recruitment status so screening can see, e.g., an
+                    # unpublished completed trial vs one still recruiting.
+                    abstract=(f"[{status}] {abstract}".strip() if status else abstract),
+                    url=f"https://clinicaltrials.gov/study/{nct}",
+                ))
+                if len(papers) >= max_results:
+                    break
+            return papers
+        except Exception as e:
+            print(f"ClinicalTrials.gov fetch error: {e}")
+            return []
+
+
+class SpringerService:
+    """Springer Nature (Springer, Nature, BMC, Palgrave) via the free Meta API.
+    Requires a free API key from dev.springernature.com."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        from request_creds import get_cred
+        key = get_cred("springer") or getattr(Config, "SPRINGER_API_KEY", "")
+        if not key:
+            return []
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            url = "https://api.springernature.com/meta/v2/json"
+            params = {"q": clean, "api_key": key, "p": min(max(max_results, 1), 50)}
+            resp = throttled_request(url, params=params).json()
+            papers: List[Paper] = []
+            for rec in resp.get("records", []):
+                doi = rec.get("doi", "") or ""
+                urls = rec.get("url", []) or []
+                link = (urls[0].get("value", "") if urls else "") or (f"https://doi.org/{doi}" if doi else "")
+                papers.append(Paper(
+                    source="Springer Nature",
+                    id=doi or rec.get("identifier", "") or (rec.get("title", "") or "")[:80],
+                    title=rec.get("title", "") or "",
+                    abstract=rec.get("abstract", "") or "",
+                    url=link,
+                ))
+                if len(papers) >= max_results:
+                    break
+            return papers
+        except Exception as e:
+            print(f"Springer fetch error: {e}")
+            return []
+
+
+class IEEEService:
+    """IEEE Xplore metadata via the free API key from developer.ieee.org."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        from request_creds import get_cred
+        key = get_cred("ieee") or getattr(Config, "IEEE_API_KEY", "")
+        if not key:
+            return []
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            url = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
+            params = {"apikey": key, "querytext": clean, "max_records": min(max(max_results, 1), 50), "format": "json"}
+            resp = throttled_request(url, params=params).json()
+            papers: List[Paper] = []
+            for art in resp.get("articles", []):
+                doi = art.get("doi", "") or ""
+                papers.append(Paper(
+                    source="IEEE Xplore",
+                    id=doi or str(art.get("article_number", "") or ""),
+                    title=art.get("title", "") or "",
+                    abstract=art.get("abstract", "") or "",
+                    url=art.get("html_url", "") or (f"https://doi.org/{doi}" if doi else ""),
+                ))
+                if len(papers) >= max_results:
+                    break
+            return papers
+        except Exception as e:
+            print(f"IEEE fetch error: {e}")
+            return []
+
+
+class ScopusService:
+    """Scopus (Elsevier). Free API key to register at dev.elsevier.com; full
+    results need institutional entitlements (on-campus IP or an inst token)."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        from request_creds import get_cred
+        key = get_cred("scopus") or getattr(Config, "SCOPUS_API_KEY", "")
+        if not key:
+            return []
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            url = "https://api.elsevier.com/content/search/scopus"
+            headers = {"X-ELS-APIKey": key, "Accept": "application/json"}
+            params = {"query": clean, "count": min(max(max_results, 1), 25)}
+            resp = throttled_request(url, params=params, headers=headers).json()
+            entries = (resp.get("search-results", {}) or {}).get("entry", []) or []
+            papers: List[Paper] = []
+            for ent in entries:
+                if ent.get("error"):
+                    continue
+                doi = ent.get("prism:doi", "") or ""
+                sid = ent.get("dc:identifier", "") or ""
+                link = (f"https://doi.org/{doi}" if doi
+                        else next((l.get("@href", "") for l in ent.get("link", []) if l.get("@ref") == "scopus"), ""))
+                papers.append(Paper(
+                    source="Scopus",
+                    id=doi or sid,
+                    title=ent.get("dc:title", "") or "",
+                    abstract=ent.get("dc:description", "") or "",
+                    url=link,
+                ))
+                if len(papers) >= max_results:
+                    break
+            return papers
+        except Exception as e:
+            print(f"Scopus fetch error: {e}")
+            return []
+
+
+class WebOfScienceService:
+    """Web of Science via the Starter API (developer.clarivate.com). Free tier plus
+    an institutional subscription. Starter records omit abstracts."""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        from request_creds import get_cred
+        key = get_cred("wos") or getattr(Config, "WOS_API_KEY", "")
+        if not key:
+            return []
+        try:
+            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            url = "https://api.clarivate.com/apis/wos-starter/v1/documents"
+            headers = {"X-ApiKey": key, "Accept": "application/json"}
+            params = {"q": f"TS=({clean})", "limit": min(max(max_results, 1), 50), "db": "WOS", "page": 1}
+            resp = throttled_request(url, params=params, headers=headers).json()
+            papers: List[Paper] = []
+            for hit in resp.get("hits", []):
+                doi = ((hit.get("identifiers", {}) or {}).get("doi", "")) or ""
+                uid = hit.get("uid", "") or ""
+                papers.append(Paper(
+                    source="Web of Science",
+                    id=doi or uid,
+                    title=hit.get("title", "") or "",
+                    abstract="",  # Starter API does not return abstracts
+                    url=(f"https://doi.org/{doi}" if doi else f"https://www.webofscience.com/wos/woscc/full-record/{uid}"),
+                ))
+                if len(papers) >= max_results:
+                    break
+            return papers
+        except Exception as e:
+            print(f"Web of Science fetch error: {e}")
+            return []
+
+
 class DataAggregator:
     """Aggregates data from all active sources while respecting rate limits."""
 
@@ -606,6 +793,11 @@ class DataAggregator:
         "CrossRef": CrossRefService.fetch,
         "DOAJ": DOAJService.fetch,
         "CORE": COREService.fetch,
+        "ClinicalTrials.gov": ClinicalTrialsService.fetch,
+        "Springer Nature": SpringerService.fetch,
+        "IEEE Xplore": IEEEService.fetch,
+        "Scopus": ScopusService.fetch,
+        "Web of Science": WebOfScienceService.fetch,
     }
 
     @staticmethod

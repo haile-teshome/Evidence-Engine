@@ -2514,6 +2514,61 @@ def citations(req: CitationsRequest):
 
 
 # ---------------------------------------------------------------------------
+# Retraction / integrity check — Crossref carries the Retraction Watch data
+# (keyless), so a review can flag retracted or withdrawn studies rather than
+# silently including one.
+# ---------------------------------------------------------------------------
+
+_RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "expression_of_concern", "partial_retraction"}
+
+
+def _crossref_retraction(doi: str) -> Optional[Dict[str, Any]]:
+    """Return retraction-notice info for a DOI (via Crossref `updated-by`), or None."""
+    if not doi:
+        return None
+    try:
+        r = requests.get(
+            f"https://api.crossref.org/works/{doi}",
+            headers={"User-Agent": "EvidenceEngine/1.0 (mailto:research@evidence-engine.local)"},
+            timeout=15,
+        )
+        if not r.ok:
+            return None
+        msg = r.json().get("message", {}) or {}
+    except Exception:
+        return None
+    hits = [u for u in (msg.get("updated-by") or [])
+            if (u.get("type") or "").lower().replace("-", "_") in _RETRACTION_TYPES]
+    if not hits:
+        return None
+    return {
+        "types": sorted({(u.get("type") or "").lower().replace("-", "_") for u in hits}),
+        "notice_doi": hits[0].get("DOI", ""),
+    }
+
+
+class RetractionCheckRequest(BaseModel):
+    papers: List[Dict[str, Any]]   # [{id, doi?, url?, title?}]
+
+
+@app.post("/api/papers/retractions")
+def papers_retractions(req: RetractionCheckRequest):
+    """Flag retracted / withdrawn papers using Crossref's Retraction Watch data.
+    Returns the ids carrying a retraction notice so the UI can badge them."""
+    out: List[Dict[str, Any]] = []
+    checked = 0
+    for p in (req.papers or [])[:120]:
+        doi = (p.get("doi") or "").strip() or _extract_doi(p.get("url", "") or "", p.get("title", "") or "")
+        if not doi:
+            continue
+        checked += 1
+        info = _crossref_retraction(doi)
+        if info:
+            out.append({"id": p.get("id", ""), "doi": doi, "types": info["types"], "notice_doi": info.get("notice_doi", "")})
+    return {"retracted": out, "checked": checked}
+
+
+# ---------------------------------------------------------------------------
 # Full-text fetch (Europe PMC + Unpaywall)
 # ---------------------------------------------------------------------------
 
@@ -3531,7 +3586,9 @@ def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str
 
 class DocumentsAskRequest(BaseModel):
     question: str
-    documents: List[Dict[str, Any]]     # [{id, title, text}]
+    documents: List[Dict[str, Any]]     # [{id, title, text}] — the most-relevant slice of the library
+    history: Optional[List[Dict[str, str]]] = None   # [{role, content}] recent chat turns, for follow-ups
+    total_documents: Optional[int] = None            # size of the full library (documents may be a subset)
     model: Optional[str] = None
 
 
@@ -3559,24 +3616,38 @@ def documents_ask(req: DocumentsAskRequest):
     context = "\n\n".join(blocks)
 
     multi = len(docs) > 1
-    prompt = f"""You are a research assistant helping a systematic reviewer make sense of their documents.
-Answer the QUESTION using ONLY the DOCUMENTS below. Do not use outside knowledge. Cite claims with the
-document number in square brackets, like [1] or [2][3]. If the documents do not contain the answer, say so plainly.
+    total = req.total_documents if (req.total_documents and req.total_documents >= len(docs)) else len(docs)
+    convo = ""
+    for turn in (req.history or [])[-6:]:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        content = (turn.get("content") or "").strip()
+        if content:
+            convo += f"{role}: {content[:600]}\n"
+    subset_note = (
+        f" The {len(docs)} most relevant to this message are shown below."
+        if total > len(docs) else ""
+    )
+
+    prompt = f"""You are the assistant inside a systematic-review platform, talking with a reviewer about the body of sources THEY have already collected. Their library holds {total} collected source{"s" if total != 1 else ""} (retrieved studies and uploaded files).{subset_note} These sources ARE available to you as the DOCUMENTS below — never tell the user you have no access to their documents or library.
+
+Answer the user's latest MESSAGE:
+- If it is about the sources (their content, methods, findings, which ones meet some criterion, a summary or comparison), answer using the DOCUMENTS as your source of truth and cite claims with the document number in square brackets, like [1] or [2][3]. If the DOCUMENTS genuinely do not cover it, say what is and isn't covered rather than refusing.
+- If it is a general, how-to, or capability question, answer it directly and helpfully; you need not cite documents for that.
 
 Write a genuinely useful, substantive answer in clean Markdown. Favour flowing prose over lists:
-- Open with a short overview paragraph (2-4 sentences) that directly answers the question.
-- Organise the rest under a few **bold section labels** written on their own line (for example **Methods**, **Findings**, **Limitations**), each followed by a short paragraph. Do NOT make the section label itself a bullet.
-- Use bullet points ("- ") sparingly, and only for a genuine list of 3 or more parallel items. Never put a single sentence or a single fact on its own bullet, and never nest a bullet directly under a label that has only one point.
+- Open with a short overview paragraph (2-4 sentences) that directly answers the message.
+- Organise any detail under a few **bold section labels** written on their own line (for example **Methods**, **Findings**, **Limitations**), each followed by a short paragraph. Do NOT make the section label itself a bullet.
+- Use bullet points ("- ") sparingly, and only for a genuine list of 3 or more parallel items. Never put a single fact on its own bullet.
 - Prefer specifics over generalities: weave the actual figures, effect sizes, sample sizes, comparisons, and named methods into the sentences.
 - Keep it tight and skimmable, not padded. Do not add a "References" section (the interface lists sources separately).
 {"- When several documents are relevant, synthesise across them and note where they agree or differ, citing each." if multi else ""}
 
 DOCUMENTS:
 {context}
+{("RECENT CONVERSATION:" + chr(10) + convo if convo else "")}
+MESSAGE: {question}
 
-QUESTION: {question}
-
-Answer (Markdown, grounded in the documents, with [n] citations):"""
+Answer (Markdown, grounded in the documents where relevant, with [n] citations):"""
 
     model = AIService.get_model(resolve_for_thinking(req.model))
     answer = ""
@@ -3693,6 +3764,178 @@ Assistant:"""
     if not answer:
         answer = "I can help you build a literature search, screen studies, extract data, and write up your review. Describe a research goal, or attach your own PDFs, Word, or Excel files to work from."
     return {"answer": answer}
+
+
+# ---------------------------------------------------------------------------
+# Home-chat agent: a single tool-calling loop over the user's collected library.
+# The model decides when to search the library and when to read a source's full
+# text, then answers grounded with [n] citations. Chat-only: its tools never
+# reach into the other review stages. (Stage 2; the deep-research orchestrator
+# will reuse these same tools across parallel subagents.)
+# ---------------------------------------------------------------------------
+
+def _supports_tools(model_name: str) -> bool:
+    """Models we trust to call tools. Cloud chat models do; among local (Ollama)
+    tags the llama3.1 / qwen2.5 / mistral-nemo families do. The default LEADS
+    screening tag and small instruct-only tags do not."""
+    m = (model_name or "").lower()
+    if m.startswith(("claude", "gpt-4", "o1", "o3")) or "gemini" in m:
+        return True
+    return any(k in m for k in ("llama3.1", "llama-3.1", "qwen2.5", "qwen2", "mistral-nemo", "mistral-small", "command-r", "firefunction"))
+
+
+class AssistantAgentRequest(BaseModel):
+    message: str
+    history: Optional[List[Dict[str, str]]] = None          # [{role, content}] recent turns
+    library: List[Dict[str, Any]] = []                       # [{id, title, snippet, url, source, has_full_text}]
+    full_texts: Optional[Dict[str, str]] = None             # id -> text the client already holds (e.g. uploads)
+    model: Optional[str] = None
+
+
+def _rank_library_for_agent(query: str, library: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    terms = [w for w in re.split(r"[^a-z0-9]+", (query or "").lower()) if len(w) >= 3]
+    if not terms:
+        return library
+    scored = []
+    for i, p in enumerate(library):
+        title = (p.get("title") or "").lower()
+        snip = (p.get("snippet") or "").lower()
+        score = sum((3 if t in title else 0) + (1 if t in snip else 0) for t in terms)
+        scored.append((-score, i, p))
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return [p for _, _, p in scored]
+
+
+@app.post("/api/assistant/agent")
+def assistant_agent(req: AssistantAgentRequest):
+    """Answer a Home-chat message with a tool-calling loop over the user's library.
+    The model calls search_library / read_full_text as needed, then answers grounded
+    with [n] citations. Assumes a tool-capable model (the client picks one)."""
+    from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, ToolMessage
+
+    message = (req.message or "").strip()
+    if not message:
+        return {"answer": "", "documents": [], "trace": []}
+
+    library = req.library or []
+    full_texts = req.full_texts or {}
+    total = len(library)
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    if model is None:
+        return {"answer": "The model is unavailable. Please try again.", "documents": [], "trace": []}
+
+    tool_schemas = [
+        {"type": "function", "function": {
+            "name": "search_library",
+            "description": "Search the user's collected library of sources by topic/keywords. Returns the most relevant sources as id, title, a snippet, and whether full text is available. Call this first to find which sources bear on the question.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Topic or keywords to search the collected sources for."}}, "required": ["query"]},
+        }},
+        {"type": "function", "function": {
+            "name": "read_full_text",
+            "description": "Read the full text of one collected source, by the id from search_library. Use when a snippet is not enough. Returns the source text and the [n] number to cite it as.",
+            "parameters": {"type": "object", "properties": {"paper_id": {"type": "string", "description": "id of the source to read."}}, "required": ["paper_id"]},
+        }},
+    ]
+    try:
+        bound = model.bind_tools(tool_schemas)
+    except Exception as e:
+        print(f"[assistant_agent] bind_tools failed: {e}")
+        return {"answer": "", "documents": [], "trace": [], "unsupported": True}
+
+    numbered: Dict[str, Dict[str, Any]] = {}   # id -> {n, id, title}
+    order: List[str] = []                        # order[n-1] = id of the n-th source shown
+    trace: List[Dict[str, Any]] = []
+
+    def num_for(p: Dict[str, Any]) -> int:
+        """Assign each source a stable citation number the first time it's shown."""
+        pid = str(p.get("id"))
+        if pid not in numbered:
+            order.append(pid)
+            numbered[pid] = {"n": len(order), "id": pid, "title": p.get("title", "Untitled")}
+        return numbered[pid]["n"]
+
+    def run_tool(name: str, args: Dict[str, Any]) -> str:
+        if name == "search_library":
+            q = (args.get("query") or "").strip()
+            ranked = _rank_library_for_agent(q, library)[:8]
+            trace.append({"tool": "search_library", "query": q, "n": len(ranked)})
+            if not ranked:
+                return f"The library has {len(library)} source(s), but none match '{q}'."
+            out = [f"[{num_for(p)}] id={p.get('id')} | {p.get('title', 'Untitled')} | full_text={'yes' if p.get('has_full_text') else 'no'}\n  {(p.get('snippet') or '')[:400]}" for p in ranked]
+            return f"The library has {len(library)} source(s). Most relevant to '{q}' (cite by the bracketed number):\n" + "\n".join(out)
+        if name == "read_full_text":
+            pid = (args.get("paper_id") or "").strip()
+            p = next((x for x in library if str(x.get("id")) == pid), None)
+            if not p:
+                return f"No source with id {pid}."
+            text = (full_texts.get(pid) or "").strip()
+            if not text and (p.get("url") or "").strip():
+                try:
+                    fr = fulltext_fetch(FullTextRequest(Title=p.get("title", ""), URL=p.get("url", ""), Source=p.get("source", ""), paper_id=pid))
+                    if isinstance(fr, dict) and fr.get("status") == "found":
+                        text = (fr.get("text") or "").strip()
+                except Exception as e:
+                    print(f"[assistant_agent] read_full_text fetch failed: {e}")
+            if not text:
+                text = (p.get("snippet") or "").strip()
+            n = num_for(p)
+            trace.append({"tool": "read_full_text", "id": pid, "title": p.get("title", ""), "chars": len(text)})
+            if not text:
+                return f"No readable full text is available for source [{n}] (it may be paywalled or an unfetchable upload)."
+            return f"Source [{n}] — {p.get('title', '')}\n{text[:8000]}"
+        return f"Unknown tool: {name}"
+
+    system = f"""You are the assistant inside a systematic-review platform, working with a reviewer over the library of {total} source{'s' if total != 1 else ''} THEY have collected. You have TOOLS to search that library and read a source's full text, so you DO have access to their documents. Never tell the user you lack access.
+
+To answer a question about the sources: call search_library to find the relevant ones, then read_full_text on the ones you need, then answer grounded in what you read. Cite claims with the source's number in square brackets like [1] or [2][3] (search_library and read_full_text show each source's number in brackets). If, after searching and reading, the sources genuinely do not cover something, say what is and isn't covered rather than refusing.
+
+If you cannot find or read a specific source the user names, say so plainly, tell them what the library does contain, and offer to search for it or invite them to attach the PDF. NEVER invent an answer or describe what such a document "typically", "usually", or "generally" contains from your own knowledge — only report what you actually read in the sources. For a genuine general or how-to question about using the platform you may answer directly without tools.
+
+Write a substantive answer in clean Markdown: a short overview paragraph first, then a few **bold section labels** each followed by a short paragraph. Use bullets sparingly. Weave in specifics (figures, sample sizes, methods). Do not add a References section (sources are listed separately)."""
+
+    messages: List[Any] = [SystemMessage(content=system)]
+    for turn in (req.history or [])[-6:]:
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        messages.append(HumanMessage(content=content) if turn.get("role") == "user" else AIMessage(content=content))
+    messages.append(HumanMessage(content=message))
+
+    answer = ""
+    for _ in range(6):
+        try:
+            ai = bound.invoke(messages)
+        except Exception as e:
+            print(f"[assistant_agent] invoke failed: {e}")
+            answer = "Sorry, that failed while reasoning over your library. Please try again."
+            break
+        messages.append(ai)
+        tcs = getattr(ai, "tool_calls", None) or []
+        if not tcs:
+            answer = (getattr(ai, "content", "") or "").strip()
+            break
+        for tc in tcs:
+            try:
+                result = run_tool(tc.get("name", ""), tc.get("args", {}) or {})
+            except Exception as e:
+                result = f"Tool error: {e}"
+            messages.append(ToolMessage(content=result, tool_call_id=tc.get("id", "") or ""))
+    if not answer:
+        # Out of tool steps: force a final grounded answer with no further tools.
+        try:
+            messages.append(HumanMessage(content="Now give your best final answer using what you gathered, with [n] citations. Do not call any more tools."))
+            ai = bound.invoke(messages)
+            answer = (getattr(ai, "content", "") or "").strip()
+        except Exception as e:
+            print(f"[assistant_agent] final invoke failed: {e}")
+    if not answer:
+        answer = "I searched your library but couldn't compose an answer. Please try rephrasing."
+
+    # Sources list = exactly what the final answer cites with [n].
+    refs = sorted({int(x) for x in re.findall(r"\[(\d+)\]", answer) if 1 <= int(x) <= len(order)})
+    documents = [numbered[order[n - 1]] for n in refs]
+    return {"answer": answer, "documents": documents, "trace": trace}
 
 
 @app.post("/api/extract/tables")
