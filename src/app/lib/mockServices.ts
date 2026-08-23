@@ -6,6 +6,7 @@
 export {
   apiConfig,
   AIService,
+  supportsTools,
   QualityService,
   DataAggregator,
   MetaAnalysisService,

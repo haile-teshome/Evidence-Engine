@@ -38,4 +38,9 @@ HEADER_TO_CRED = {
     "x-llm-google-key": "google",
     "x-db-core-key": "core",
     "x-db-semantic-scholar-key": "semantic_scholar",
+    "x-db-scopus-key": "scopus",
+    "x-db-ncbi-key": "ncbi",
+    "x-db-springer-key": "springer",
+    "x-db-ieee-key": "ieee",
+    "x-db-wos-key": "wos",
 }

@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { KeyRound, Eye, EyeOff, ShieldCheck, Lock, Check, Trash2, Loader2 } from "lucide-react";
+import { KeyRound, Eye, EyeOff, ShieldCheck, Lock, Check, Trash2, Loader2, Database } from "lucide-react";
 import { toast } from "sonner";
 import {
   type LlmProvider, LLM_PROVIDERS,
@@ -11,6 +11,7 @@ import {
   keychainIsAvailable, keychainStatus, keychainSet, keychainDelete,
   hasEncrypted, isUnlocked, unlock, lock, saveEncrypted, clearEncrypted, unlockedKeys,
 } from "../lib/keystore";
+import { getDbKey, setDbKey, hasDbKey, type DbSource } from "../lib/dbKeys";
 
 const META: Record<LlmProvider, { label: string; placeholder: string }> = {
   anthropic: { label: "Anthropic (Claude)", placeholder: "sk-ant-..." },
@@ -18,6 +19,19 @@ const META: Record<LlmProvider, { label: string; placeholder: string }> = {
   google: { label: "Google (Gemini)", placeholder: "AIza..." },
 };
 const ORDER: LlmProvider[] = ["anthropic", "openai", "google"];
+
+// Data-source keys the UI offers. These correspond to sources whose backend
+// service reads get_cred(): CORE and Semantic Scholar today (Scopus once a Scopus
+// source is added, since the header + store already support it).
+const DB_ITEMS: { source: DbSource; label: string; placeholder: string; help: string }[] = [
+  { source: "core", label: "CORE", placeholder: "CORE API key", help: "Free: core.ac.uk/services/api" },
+  { source: "semantic_scholar", label: "Semantic Scholar", placeholder: "Semantic Scholar API key", help: "Free: semanticscholar.org/product/api" },
+  { source: "ncbi", label: "PubMed (NCBI)", placeholder: "NCBI API key", help: "Free, raises PubMed rate limit: ncbi.nlm.nih.gov/account" },
+  { source: "springer", label: "Springer Nature", placeholder: "Springer API key", help: "Free: dev.springernature.com" },
+  { source: "ieee", label: "IEEE Xplore", placeholder: "IEEE API key", help: "Free: developer.ieee.org" },
+  { source: "scopus", label: "Scopus (Elsevier)", placeholder: "Elsevier API key", help: "Institutional: dev.elsevier.com" },
+  { source: "wos", label: "Web of Science", placeholder: "Web of Science key", help: "Institutional: developer.clarivate.com" },
+];
 
 function useKeystore() {
   const [, force] = useReducer(x => x + 1, 0);
@@ -31,13 +45,15 @@ export function ApiKeysDialog({ open, onOpenChange, highlight }: {
   onSaved?: () => void;
   highlight?: LlmProvider | null;
 }) {
-  useKeystore();
+  const force = useKeystore();
   const mode = getMode();
   const kcAvailable = keychainIsAvailable();
   const kcStatus = keychainStatus();
 
   const [values, setValues] = useState<Record<LlmProvider, string>>({ openai: "", anthropic: "", google: "" });
   const [shown, setShown] = useState<Record<LlmProvider, boolean>>({ openai: false, anthropic: false, google: false });
+  const [dbValues, setDbValues] = useState<Record<string, string>>({ core: "", semantic_scholar: "" });
+  const [dbShown, setDbShown] = useState<Record<string, boolean>>({});
   const [pass, setPass] = useState("");
   const [pass2, setPass2] = useState("");
   const [unlockPass, setUnlockPass] = useState("");
@@ -111,8 +127,8 @@ export function ApiKeysDialog({ open, onOpenChange, highlight }: {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><KeyRound className="size-4" />Cloud model API keys</DialogTitle>
-          <DialogDescription>Add a key for any provider whose models you want to use. Local models (Ollama, LEADS) need no key.</DialogDescription>
+          <DialogTitle className="flex items-center gap-2"><KeyRound className="size-4" />API keys</DialogTitle>
+          <DialogDescription>Keys for cloud models, and for databases that need one. Local models (Ollama, LEADS) and most databases need no key.</DialogDescription>
         </DialogHeader>
 
         {/* Storage mode */}
@@ -183,6 +199,46 @@ export function ApiKeysDialog({ open, onOpenChange, highlight }: {
             </div>
           </div>
         )}
+
+        {/* Data-source (database) keys — independent of the LLM storage mode above;
+            they always ship as request headers so the source works in any mode. */}
+        <div className="space-y-2 border-t pt-3">
+          <div className="flex items-center gap-2">
+            <Database className="size-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Database keys (optional)</span>
+          </div>
+          <p className="text-[11px] text-muted-foreground -mt-0.5">
+            CORE needs a key; Semantic Scholar works without one but is rate-limited. Add a free key to make them reliable. Stored on this device, sent only to that database.
+          </p>
+          {DB_ITEMS.map(({ source, label, placeholder, help }) => {
+            const saved = hasDbKey(source);
+            return (
+              <div key={source} className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm">{label}</Label>
+                  {saved && <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400"><Check className="size-3" />Saved</span>}
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <div className="relative flex-1">
+                    <Input type={dbShown[source] ? "text" : "password"} autoComplete="off" spellCheck={false}
+                      placeholder={saved ? "•••••••• (replace)" : placeholder}
+                      value={dbValues[source] || ""} onChange={e => setDbValues(v => ({ ...v, [source]: e.target.value }))}
+                      className="pr-9 font-mono text-xs" />
+                    <button type="button" onClick={() => setDbShown(s => ({ ...s, [source]: !s[source] }))}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" title={dbShown[source] ? "Hide" : "Show"}>
+                      {dbShown[source] ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                    </button>
+                  </div>
+                  <Button size="sm" variant="outline" className="h-8 shrink-0" disabled={!dbValues[source]?.trim()}
+                    onClick={() => { setDbKey(source, dbValues[source]); setDbValues(v => ({ ...v, [source]: "" })); force(); toast.success(`${label} key saved`); }}>Save</Button>
+                  {saved && <Button size="sm" variant="ghost" className="h-8 px-2 shrink-0 text-muted-foreground"
+                    onClick={() => { setDbKey(source, ""); force(); toast.success(`${label} key removed`); }} title="Remove"><Trash2 className="size-4" /></Button>}
+                </div>
+                <p className="text-[10px] text-muted-foreground">{help}</p>
+              </div>
+            );
+          })}
+        </div>
 
         <div className="flex items-start gap-2 rounded-md bg-muted/50 border p-2.5 text-[11px] text-muted-foreground">
           <ShieldCheck className="size-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />

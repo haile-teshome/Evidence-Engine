@@ -80,7 +80,7 @@ export type HistoryEntry = {
 // A document Q&A exchange on Home: a question answered from the documents in
 // play, with the sources cited. Persisted so it survives a refresh like history.
 export type SummaryRow = { id: string; title: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string };
-export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean; ts?: number; table?: SummaryRow[] };
+export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean; status?: string; note?: string; ts?: number; table?: SummaryRow[] };
 
 export type ExtractedTable = { title: string; type: string; data: string[][]; caption?: string };
 export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[] };

@@ -36,10 +36,12 @@ export function useStudyImport() {
     }
 
     registerPdfBlobs(blobEntries);
-    const all = [...existing, ...freshPapers];
-    s.setRawPapers(all);
-    s.setUniquePapers(all);
-    s.setDuplicatesCount(0);
+    // Preserve papers pulled from database searches; only the UPLOAD_SOURCE slice is
+    // rebuilt here. Attaching a PDF must ADD to the corpus, never replace the searched
+    // papers (replacing silently dropped every pulled result from the library).
+    const nonUploads = (s.rawPapers || []).filter(p => p.source !== UPLOAD_SOURCE);
+    s.setRawPapers([...nonUploads, ...existing, ...freshPapers]);
+    s.setUniquePapers([...(s.uniquePapers || []), ...freshPapers]);
     s.setFullTexts(prev => ({ ...prev, ...ftMap }));
     if (!s.sources.includes("Local PDFs")) s.setSources([...s.sources, "Local PDFs"]);
   }

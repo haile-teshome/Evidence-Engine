@@ -2,6 +2,7 @@
 // Mirrors the contract of `mockServices.ts` so pages stay unchanged.
 
 import { requestHeaders, type LlmProvider } from "./keystore";
+import { dbKeyHeaders } from "./dbKeys";
 
 export type Pico = { population: string; intervention: string; comparator: string; outcome: string };
 export type Paper = { id: string; source: string; title: string; abstract: string; url: string; year?: number; authors?: string };
@@ -200,6 +201,15 @@ export const apiConfig: { model: string; baseUrl: string } = {
 // ---------------------------------------------------------------------------
 
 // Which provider key a given model needs, or null for local (no key) models.
+// Which models can drive the Home-chat tool-calling agent. Mirrors the backend
+// _supports_tools: cloud chat models, plus the tool-capable local (Ollama)
+// families. The default LEADS screening tag and small instruct-only tags cannot.
+export function supportsTools(model: string): boolean {
+  const m = (model || "").toLowerCase();
+  if (m.startsWith("claude") || m.startsWith("gpt-4") || m.startsWith("o1") || m.startsWith("o3") || m.includes("gemini")) return true;
+  return ["llama3.1", "llama-3.1", "qwen2.5", "qwen2", "mistral-nemo", "mistral-small", "command-r", "firefunction"].some(k => m.includes(k));
+}
+
 export function providerForModel(model: string): LlmProvider | null {
   const m = (model || "").toLowerCase();
   if (m.includes("gpt")) return "openai";
@@ -209,7 +219,7 @@ export function providerForModel(model: string): LlmProvider | null {
 }
 
 export function keyHeaders(): Record<string, string> {
-  return requestHeaders();
+  return { ...requestHeaders(), ...dbKeyHeaders() };
 }
 
 const AGENTS = ["Population Agent", "Intervention Agent", "Outcome Agent", "Study Design Agent"];
@@ -224,6 +234,11 @@ const SOURCES_POOL = [
   "medRxiv",
   "DOAJ",
   "CORE",
+  "ClinicalTrials.gov",
+  "Springer Nature",
+  "IEEE Xplore",
+  "Scopus",
+  "Web of Science",
   "Local PDFs",
 ];
 
@@ -620,10 +635,13 @@ export const AIService = {
   async askDocuments(
     question: string,
     documents: { id: string; title: string; text: string }[],
+    opts: { history?: { role: string; content: string }[]; totalDocuments?: number } = {},
     signal?: AbortSignal,
   ): Promise<{ answer: string; documents: { n: number; id: string; title: string }[] }> {
     const r = await postJSON<{ answer: string; documents: { n: number; id: string; title: string }[] }>(
-      "/documents/ask", { question, documents, model: apiConfig.model }, signal,
+      "/documents/ask",
+      { question, documents, history: opts.history || [], total_documents: opts.totalDocuments, model: apiConfig.model },
+      signal,
     );
     return { answer: r.answer || "", documents: r.documents || [] };
   },
@@ -655,6 +673,38 @@ export const AIService = {
     } catch {
       return "";
     }
+  },
+
+  // Home-chat tool-calling agent: the model searches the library and reads full
+  // text on demand, then answers grounded with [n] citations. `model` is passed
+  // explicitly (may differ from apiConfig.model when we fall back to a capable
+  // local model). Returns `unsupported` if the model couldn't bind tools.
+  async agentChat(
+    message: string,
+    history: { role: string; content: string }[],
+    library: { id: string; title: string; snippet: string; url?: string; source?: string; has_full_text?: boolean }[],
+    fullTexts: Record<string, string>,
+    model: string,
+    signal?: AbortSignal,
+  ): Promise<{ answer: string; documents: { n: number; id: string; title: string }[]; trace: any[]; unsupported?: boolean }> {
+    const r = await postJSON<{ answer: string; documents: { n: number; id: string; title: string }[]; trace?: any[]; unsupported?: boolean }>(
+      "/assistant/agent",
+      { message, history, library, full_texts: fullTexts, model },
+      signal,
+    );
+    return { answer: r.answer || "", documents: r.documents || [], trace: r.trace || [], unsupported: r.unsupported };
+  },
+
+  // Flag retracted / withdrawn papers via Crossref's Retraction Watch data (keyless),
+  // so a review never silently includes a retracted study. Returns the flagged ids.
+  async checkRetractions(
+    papers: { id: string; doi?: string; url?: string; title?: string }[],
+    signal?: AbortSignal,
+  ): Promise<{ retracted: { id: string; doi: string; types: string[]; notice_doi: string }[]; checked: number }> {
+    const r = await postJSON<{ retracted: { id: string; doi: string; types: string[]; notice_doi: string }[]; checked: number }>(
+      "/papers/retractions", { papers }, signal,
+    );
+    return { retracted: r.retracted || [], checked: r.checked || 0 };
   },
 
   async extractTables(

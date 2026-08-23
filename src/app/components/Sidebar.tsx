@@ -11,6 +11,7 @@ import { Logo } from "./Logo";
 import { ALL_SOURCES } from "../lib/mockServices";
 import { providerForModel } from "../lib/apiClient";
 import { providerReady, needsUnlock as ksNeedsUnlock, subscribe as ksSubscribe } from "../lib/keystore";
+import { subscribeDbKeys, hasDbKey, type DbSource } from "../lib/dbKeys";
 import { ApiKeysDialog } from "./ApiKeysDialog";
 import { useStore, PageId } from "../lib/store";
 import { SessionsPanel } from "./SessionsPanel";
@@ -70,6 +71,39 @@ const NAV: { id: PageId; label: string; icon: any; anim: keyof typeof ANIM }[] =
   { id: "writing", label: "Writing Assistant", icon: PenLine, anim: "wiggle" },
 ];
 
+// Grouping + per-source annotations for the Active Databases panel. Groups make the
+// growing source list scannable; notes flag the ones that need a key or behave
+// differently, so the panel is honest about what each source will actually return.
+type SourceMeta = { name: string; group: string; note?: string; key?: "required" | "optional" };
+const SOURCE_META: SourceMeta[] = [
+  { name: "PubMed", group: "Bibliographic", key: "optional" },
+  { name: "Europe PMC", group: "Bibliographic" },
+  { name: "OpenAlex", group: "Bibliographic" },
+  { name: "CrossRef", group: "Bibliographic" },
+  { name: "Semantic Scholar", group: "Bibliographic", key: "optional" },
+  { name: "DOAJ", group: "Bibliographic" },
+  { name: "CORE", group: "Bibliographic", key: "required" },
+  { name: "Springer Nature", group: "Bibliographic", key: "required" },
+  { name: "IEEE Xplore", group: "Bibliographic", key: "required" },
+  { name: "arXiv", group: "Preprints" },
+  { name: "bioRxiv", group: "Preprints" },
+  { name: "medRxiv", group: "Preprints" },
+  { name: "ClinicalTrials.gov", group: "Trials & grey literature" },
+  { name: "Scopus", group: "Subscription", key: "required" },
+  { name: "Web of Science", group: "Subscription", key: "required" },
+];
+const SOURCE_GROUPS = ["Bibliographic", "Preprints", "Trials & grey literature", "Subscription"];
+// The data-source key that backs each keyed source, for the 🔑 status indicator.
+const DB_KEY_FOR: Record<string, DbSource> = {
+  "PubMed": "ncbi",
+  "Semantic Scholar": "semantic_scholar",
+  "CORE": "core",
+  "Springer Nature": "springer",
+  "IEEE Xplore": "ieee",
+  "Scopus": "scopus",
+  "Web of Science": "wos",
+};
+
 export function Sidebar() {
   const s = useStore();
   const fileRef = useRef<HTMLInputElement>(null);
@@ -86,8 +120,13 @@ export function Sidebar() {
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
   const [, forceKeys] = useState(0);
-  // Re-render when the keystore changes (mode switch, unlock/lock, save).
-  useEffect(() => ksSubscribe(() => forceKeys(v => v + 1)), []);
+  // Re-render when the keystore or a database key changes (so the 🔑 status updates).
+  useEffect(() => {
+    const bump = () => forceKeys(v => v + 1);
+    const offKs = ksSubscribe(bump);
+    const offDb = subscribeDbKeys(bump);
+    return () => { offKs(); offDb(); };
+  }, []);
 
   // Cloud model selected: does it need a key, or an unlock of encrypted keys?
   const modelProvider = providerForModel(s.model);
@@ -269,20 +308,67 @@ export function Sidebar() {
         <ApiKeysDialog open={keysOpen} onOpenChange={setKeysOpen} highlight={modelProvider} />
 
         <Card className="p-3 mb-3">
-          <Label className="mb-2 block">Active Databases</Label>
-          <div className="space-y-2">
-            {visibleSources.map(src => (
-              <label key={src} className="flex items-center gap-2 cursor-pointer">
-                <Checkbox checked={s.sources.includes(src)} onCheckedChange={() => toggleSource(src)} />
-                <span className="text-sm">{src}</span>
-              </label>
-            ))}
+          <Label className="block mb-2.5">Active Databases</Label>
+          <div className="space-y-3">
+            {SOURCE_GROUPS.map(group => {
+              const items = SOURCE_META.filter(m => m.group === group && visibleSources.includes(m.name));
+              if (!items.length) return null;
+              return (
+                <div key={group}>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80 mb-1.5">{group}</div>
+                  <div className="space-y-1.5">
+                    {items.map(m => (
+                      <label key={m.name} className="flex items-center gap-2 cursor-pointer">
+                        <Checkbox checked={s.sources.includes(m.name)} onCheckedChange={() => toggleSource(m.name)} />
+                        <span className="text-sm flex-1">{m.name}</span>
+                        {m.note && <span className="text-[10px] shrink-0 text-muted-foreground">{m.note}</span>}
+                        {m.key && (
+                          <button type="button"
+                            onClick={e => { e.preventDefault(); e.stopPropagation(); setKeysOpen(true); }}
+                            title={hasDbKey(DB_KEY_FOR[m.name])
+                              ? "API key set — click to manage"
+                              : m.key === "required"
+                                ? "Needs a free API key — click to add"
+                                : "Optional API key: avoids rate limits — click to add"}
+                            className={`inline-flex shrink-0 text-muted-foreground hover:text-foreground ${hasDbKey(DB_KEY_FOR[m.name]) ? "opacity-30 hover:opacity-100" : ""}`}
+                          >
+                            <KeyRound className="size-3.5" />
+                          </button>
+                        )}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+            {/* Any source not yet categorised in SOURCE_META still shows up. */}
+            {(() => {
+              const known = new Set(SOURCE_META.map(m => m.name));
+              const others = visibleSources.filter(x => !known.has(x));
+              return others.length ? (
+                <div>
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80 mb-1.5">Other</div>
+                  <div className="space-y-1.5">
+                    {others.map(src => (
+                      <label key={src} className="flex items-center gap-2 cursor-pointer">
+                        <Checkbox checked={s.sources.includes(src)} onCheckedChange={() => toggleSource(src)} />
+                        <span className="text-sm flex-1">{src}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null;
+            })()}
           </div>
           {/* Papers-per-source and relevance-threshold sliders were removed in
               favour of automatic behaviour: the fetch budget is a fixed sane
               default, and the rerank endpoint auto-detects the natural
               relevance break from the score distribution itself. See
               `_auto_relevance_cutoff` in Backend/api.py. */}
+          <button type="button" onClick={() => setKeysOpen(true)}
+            className="mt-3 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+            <KeyRound className="size-3.5" />Manage API keys
+          </button>
         </Card>
 
       </div>

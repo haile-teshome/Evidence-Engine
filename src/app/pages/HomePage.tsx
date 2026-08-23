@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useStore, HistoryEntry, SummaryRow } from "../lib/store";
+import { useStore, HistoryEntry, SummaryRow, FullTextRecord } from "../lib/store";
 import { Checkbox } from "../components/ui/checkbox";
-import { AIService, DataAggregator } from "../lib/mockServices";
+import { AIService, DataAggregator, supportsTools } from "../lib/mockServices";
 import type { ClarifyingQuestion, Paper } from "../lib/mockServices";
 import { useStudyImport } from "../lib/useStudyImport";
 import { AttachedStudies } from "../components/AttachedStudies";
@@ -870,9 +870,37 @@ function renderAnswer(text: string, onCite: (n: number) => void): ReactNode[] {
   return blocks;
 }
 
+// Rank documents by lexical overlap with the question so the most relevant sources
+// lead the context we hand the doc-QA model, instead of smearing the whole library
+// thin. Cheap and deterministic; a stable sort keeps original order among equally-
+// (or zero-) scoring docs, so a low-signal message just falls back to corpus order.
+const RANK_STOP = new Set("the a an and or of to in on for with is are was were be been being this that these those it as by at from about into over under what which who whom whose how why when where does do did can could will would should you your yours i me my we our us they them their he she his her not no yes".split(" "));
+function rankByRelevance<T extends { title?: string; text?: string }>(question: string, docs: T[]): T[] {
+  const terms = Array.from(new Set(
+    (question || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length >= 3 && !RANK_STOP.has(w)),
+  ));
+  if (terms.length === 0) return docs;
+  return docs
+    .map((d, i) => {
+      const title = (d.title || "").toLowerCase();
+      const text = (d.text || "").toLowerCase();
+      let score = 0;
+      for (const t of terms) { if (title.includes(t)) score += 3; if (text.includes(t)) score += 1; }
+      return { d, score, i };
+    })
+    .sort((a, b) => b.score - a.score || a.i - b.i)
+    .map(x => x.d);
+}
+
 export function HomePage() {
   const s = useStore();
   const studyImport = useStudyImport();
+  // Installed local (Ollama) models, so we can fall back to a tool-capable one
+  // (qwen2.5) when the selected model can't drive the chat agent.
+  const [localModels, setLocalModels] = useState<string[]>([]);
+  useEffect(() => {
+    fetch("/api/models/local").then(r => r.json()).then(d => setLocalModels(Array.isArray(d.models) ? d.models : [])).catch(() => {});
+  }, []);
   const attachRef = useRef<HTMLInputElement>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -1047,19 +1075,115 @@ export function HomePage() {
     } finally { setSummarizing(false); }
   }
 
-  // Answer a question from a set of documents and append it as a chat turn.
-  async function runDocQA(question: string, set: typeof docCorpus) {
+  // Home-chat agent: send a light view of the library and let a tool-capable model
+  // search it and read full text on demand. `note` explains a model switch, if any.
+  async function answerWithAgent(question: string, model: string, note: string) {
     const qq = question.trim();
     if (!qq) return;
-    if (!set.length) { toast.error("No documents to ask about yet. Run a search or attach studies."); return; }
     setInput("");
+    const raw = s.rawPapers || [];
+    const library = raw.slice(0, 120).map(p => {
+      const ft = s.fullTexts[p.id]?.text || "";
+      return {
+        id: p.id,
+        title: p.title || "Untitled",
+        snippet: (ft || p.abstract || "").slice(0, 1200),
+        url: p.url || "",
+        source: p.source || "",
+        has_full_text: !!ft,
+      };
+    });
+    // Send text the server can't re-fetch itself (uploads / no URL), capped.
+    const fullTexts: Record<string, string> = {};
+    for (const p of raw) {
+      const ft = s.fullTexts[p.id]?.text;
+      if (ft && (p.source === "Local PDFs" || !p.url)) fullTexts[p.id] = ft.slice(0, 8000);
+    }
+    const idx = qaTurns.length;
+    setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true, status: "Searching your library…", ts: Date.now(), note: note || undefined }]);
+    try {
+      const history = qaTurns.filter(t => t.answer).flatMap(t => [
+        { role: "user", content: t.question },
+        { role: "assistant", content: t.answer },
+      ]);
+      const r = await AIService.agentChat(qq, history, library, fullTexts, model);
+      if (r.unsupported) {
+        setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: "That model can't use tools. Pick a tool-capable model (Claude, GPT-4o, or a local qwen2.5 / llama3.1) and try again.", busy: false, status: undefined } : x));
+        return;
+      }
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: r.answer, sources: r.documents, busy: false, status: undefined } : x));
+    } catch (e: any) {
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: e?.message || "Sorry, that failed. Please try again.", busy: false, status: undefined } : x));
+    }
+  }
+
+  // Answer a question from the user's collected library, appended as a chat turn.
+  // Ranks the WHOLE library (rawPapers) so a paper that only has a title/abstract
+  // on record is still eligible: the most relevant ones missing text get fetched on
+  // demand (reusing the acquisition engine) before we ground the answer.
+  async function answerFromLibrary(question: string) {
+    const qq = question.trim();
+    if (!qq) return;
+    setInput("");
+
+    type Cand = { id: string; title: string; url?: string; source?: string; text: string };
+    let candidates: Cand[];
+    if (pendingDocs.length) {
+      // Freshly attached documents stay the focus of the next message.
+      candidates = pendingDocs.map(d => ({ id: d.id, title: d.title, url: d.url, source: d.source, text: d.text }));
+      setPendingDocIds([]);
+    } else {
+      const all: Cand[] = (s.rawPapers || []).map(p => ({
+        id: p.id, title: p.title, url: p.url, source: p.source,
+        text: (s.fullTexts[p.id]?.text || p.abstract || ""),
+      }));
+      candidates = rankByRelevance(qq, all).slice(0, 12);
+    }
+    if (!candidates.length) { await runChat(qq); return; }
+
     const idx = qaTurns.length;
     setQaTurns(prev => [...prev, { question: qq, answer: "", sources: [], busy: true, ts: Date.now() }]);
     try {
-      const r = await AIService.askDocuments(qq, set.map(d => ({ id: d.id, title: d.title, text: d.text.slice(0, 4000) })));
-      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: r.answer, sources: r.documents, busy: false } : x));
+      // Read full text on demand for the top relevant papers that have little or no
+      // text yet and a URL to fetch from. Best-effort and capped so a slow or
+      // paywalled source can't hang the reply.
+      const needFetch = candidates.slice(0, 6).filter(c => (c.text || "").trim().length < 200 && (c.url || "").trim()).slice(0, 4);
+      if (needFetch.length) {
+        setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, status: needFetch.length === 1 ? "Reading the full text…" : `Reading the full text of ${needFetch.length} sources…` } : x));
+        const fetched = await Promise.allSettled(needFetch.map(c =>
+          AIService.fetchFullText({ Title: c.title, URL: c.url || "", Source: c.source || "", paper_id: c.id }).then(r => ({ c, r })),
+        ));
+        const updates: Record<string, FullTextRecord> = {};
+        for (const f of fetched) {
+          if (f.status !== "fulfilled") continue;
+          const { c, r } = f.value;
+          if (r.status === "found" && (r.text || "").trim()) {
+            c.text = r.text!;
+            updates[c.id] = { paper_id: c.id, title: c.title, url: c.url || "", source: r.source || c.source || "", status: "found", text: r.text };
+          }
+        }
+        if (Object.keys(updates).length) s.setFullTexts(prev => ({ ...prev, ...updates }));
+        setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, status: undefined } : x));
+      }
+
+      const set = candidates.filter(c => (c.text || "").trim()).slice(0, 10);
+      if (!set.length) {
+        setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: "I have those sources on record, but couldn't retrieve any readable text (the full text may be paywalled or unavailable). Attach the PDF and I can read it directly.", busy: false, status: undefined } : x));
+        return;
+      }
+      // Recent textual turns give follow-ups their context ("access it" -> what?).
+      const history = qaTurns.filter(t => t.answer).flatMap(t => [
+        { role: "user", content: t.question },
+        { role: "assistant", content: t.answer },
+      ]);
+      const r = await AIService.askDocuments(
+        qq,
+        set.map(c => ({ id: c.id, title: c.title, text: c.text.slice(0, 6000) })),
+        { history, totalDocuments: (s.rawPapers || []).length },
+      );
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: r.answer, sources: r.documents, busy: false, status: undefined } : x));
     } catch (e: any) {
-      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: e?.message || "Sorry, that failed. Please try again.", busy: false } : x));
+      setQaTurns(prev => prev.map((x, i) => i === idx ? { ...x, answer: e?.message || "Sorry, that failed. Please try again.", busy: false, status: undefined } : x));
     }
   }
 
@@ -1215,17 +1339,24 @@ export function HomePage() {
       } catch {
         intent = docCorpus.length > 0 && /\?\s*$/.test(t) ? "documents" : "search";
       }
-      if (intent === "documents") {
-        // Focus on freshly-attached documents when present, else the whole corpus.
-        const set = pendingDocs.length ? pendingDocs : docCorpus;
-        if (set.length > 0) { setPendingDocIds([]); await runDocQA(t, set); return; }
-        // Nothing to act on yet — answer conversationally instead of retrieving.
-        await runChat(t);
-        return;
-      }
-      if (intent === "chat") {
-        // If they just attached something, act on it rather than replying generically.
-        if (pendingDocs.length) { setPendingDocIds([]); await runDocQA(t, pendingDocs); return; }
+      if (intent === "documents" || intent === "chat") {
+        // Answer from the collected library for BOTH intents so the assistant never
+        // denies access to sources the user has. Open library questions go to the
+        // tool-calling agent when a capable model is available (it searches and reads
+        // on demand); freshly attached docs and the no-capable-model case use the
+        // deterministic retrieve-and-read path instead.
+        const hasLibrary = (s.rawPapers?.length ?? 0) > 0;
+        if (!pendingDocs.length && hasLibrary) {
+          let agentModel = supportsTools(s.model) ? s.model : "";
+          let note = "";
+          if (!agentModel) {
+            const qwen = localModels.find(m => /qwen2\.5/i.test(m)) || localModels.find(m => /qwen2/i.test(m)) || localModels.find(m => supportsTools(m));
+            if (qwen) { agentModel = qwen; note = `${s.model} can't use tools, so I switched to ${qwen} for this answer.`; }
+          }
+          if (agentModel) { await answerWithAgent(t, agentModel, note); return; }
+        }
+        if (pendingDocs.length || hasLibrary) { await answerFromLibrary(t); return; }
+        // No library yet — a plain conversational reply (greetings, how-to).
         await runChat(t);
         return;
       }
@@ -1311,23 +1442,26 @@ export function HomePage() {
 
       // 2. If the user uploaded their own studies, analyse THOSE (no database
       //    fetch). Otherwise fetch a wide sample so the relevance filter has room.
+      // Always pull from the databases and fold in any uploaded PDFs, so the corpus
+      // is pulled results PLUS the user's own files, never one at the expense of the
+      // other. (Having an upload used to skip the database fetch entirely, which is
+      // why searches "didn't pull" once anything was attached.) To analyse only your
+      // own PDFs, uncheck the databases in the sidebar so the fetch returns nothing.
       const uploaded = (s.rawPapers || []).filter(p => p.source === "Local PDFs");
-      let papers: Paper[];
-      if (uploaded.length > 0) {
-        papers = uploaded;
-        markStage("papers", { status: "done", detail: `${uploaded.length} uploaded studies` });
-      } else {
-        const fetched = await runStage("papers", signal, sig =>
-          DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig)
-        );
-        papers = fetched?.papers || [];
-        if (fetched) {
-          const breakdown = Object.entries(fetched.sourceCounts || {})
-            .map(([k, v]) => `${k}: ${v}`)
-            .join(" · ");
-          markStage("papers", { status: "done", detail: `${papers.length} articles: ${breakdown}` });
-          s.setRawPapers(papers);
-        }
+      const fetched = await runStage("papers", signal, sig =>
+        DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig)
+      );
+      const fetchedPapers = fetched?.papers || [];
+      let papers: Paper[] = [...fetchedPapers, ...uploaded];
+      if (fetched || uploaded.length) {
+        const breakdown = Object.entries(fetched?.sourceCounts || {})
+          .map(([k, v]) => `${k}: ${v}`)
+          .join(" · ");
+        const detail = `${fetchedPapers.length} article${fetchedPapers.length === 1 ? "" : "s"}`
+          + (uploaded.length ? ` + ${uploaded.length} uploaded` : "")
+          + (breakdown ? `: ${breakdown}` : "");
+        markStage("papers", { status: "done", detail });
+        s.setRawPapers(papers);
       }
 
       // 3. LEADS-native relevance rerank. Papers that pass the threshold get
@@ -1666,8 +1800,9 @@ export function HomePage() {
             <div className="bg-primary text-primary-foreground rounded-2xl rounded-tr-sm px-4 py-2 max-w-2xl">{turn.question}</div>
           </div>
           <Card className="p-4">
+            {turn.note && <div className="mb-2 text-xs text-muted-foreground italic">{turn.note}</div>}
             {turn.busy ? (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{turn.question.startsWith("Structured summary") ? "Summarizing your selected sources…" : "Reading your documents…"}</div>
+              <div className="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 className="size-4 animate-spin" />{turn.status || (turn.question.startsWith("Structured summary") ? "Summarizing your selected sources…" : "Reading your documents…")}</div>
             ) : turn.table ? (
               <div className="space-y-2">
                 <div className="flex items-center justify-between gap-2">
