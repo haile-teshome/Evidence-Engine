@@ -47,6 +47,14 @@ class Config:
     PARALLEL_SCREENING_WORKERS = int(os.getenv("PARALLEL_SCREENING_WORKERS", "16"))
     PARALLEL_AGENT_WORKERS = int(os.getenv("PARALLEL_AGENT_WORKERS", "16"))
 
+    # Reproducibility. A fixed decoding seed plus temperature=0 make LOCAL (Ollama)
+    # and OpenAI runs deterministic, so a review can be re-run to identical output.
+    # Anthropic and Gemini expose no seed API, so they are best-effort only.
+    # PROMPT_VERSION is stamped into the run manifest / audit log and bumped whenever
+    # a prompt template changes, so a stored decision can be tied to the exact prompt.
+    RUN_SEED = int(os.getenv("EE_SEED", "42"))
+    PROMPT_VERSION = os.getenv("EE_PROMPT_VERSION", "2026.08.1")
+
 
 class DataSource(Enum):
     """Available data sources for literature search."""

@@ -90,7 +90,7 @@ class AIService:
                 if not key:
                     print("[get_model] OpenAI API key not provided for", model_name)
                     return None
-                return ChatOpenAI(model=model_name, api_key=key, temperature=0)
+                return ChatOpenAI(model=model_name, api_key=key, temperature=0, seed=Config.RUN_SEED)
             if "claude" in name_lower:
                 key = AIService._cloud_key("anthropic", keys.get("anthropic", ""))
                 if not key:
@@ -104,7 +104,8 @@ class AIService:
                     return None
                 return ChatGoogleGenerativeAI(model=model_name, api_key=key, temperature=0)
             # DEFAULT / LOCAL: Ollama (llama3, mistral, qwen, LEADS, …) — no key.
-            return ChatOllama(model=model_name, temperature=0, base_url=ollama_base)
+            # A fixed seed + temperature=0 make local runs deterministic/reproducible.
+            return ChatOllama(model=model_name, temperature=0, base_url=ollama_base, seed=Config.RUN_SEED)
         except Exception as e:
             print(f"[get_model] AI connection error for {model_name}: {e}")
             return None
