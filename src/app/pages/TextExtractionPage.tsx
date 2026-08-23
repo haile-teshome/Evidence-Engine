@@ -14,7 +14,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/
 import {
   ScanText, Sparkles, Search, AlertTriangle, Download,
   MapPin, Quote as QuoteIcon, FileSpreadsheet, Maximize2, ChevronDown, ChevronRight,
-  FileText, ListChecks, X, Plus, Trash2, Table2, Loader2, FormInput, Upload, RotateCcw,
+  FileText, ListChecks, X, Check, Plus, Trash2, Table2, Loader2, FormInput, Upload, RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -108,7 +108,10 @@ export function TextExtractionPage() {
   const [formBusy, setFormBusy] = useState(false);
   const [formProgress, setFormProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
   const [formCurrent, setFormCurrent] = useState<string>("");
-  const [formRows, setFormRows] = useState<{ paper_id: string; title: string; values: Record<string, any> }[]>([]);
+  const [formRows, setFormRows] = useState<{ paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }>; status: Record<string, "suggested" | "accepted" | "rejected"> }[]>([]);
+  // Per-field accept/reject for AI suggestions (reviewer-in-the-loop).
+  const setFieldStatus = (pid: string, fid: string, st: "accepted" | "rejected") =>
+    setFormRows(rows => rows.map(r => r.paper_id === pid ? { ...r, status: { ...r.status, [fid]: st } } : r));
   const formFileRef = useRef<HTMLInputElement>(null);
 
   if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first.</AlertDescription></Alert>;
@@ -198,7 +201,7 @@ export function TextExtractionPage() {
     setFormBusy(true);
     setFormProgress({ done: 0, total: targets.length });
     setFormCurrent(targets[0]?.title || "");
-    const rows: { paper_id: string; title: string; values: Record<string, any> }[] = [];
+    const rows: { paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }>; status: Record<string, "suggested" | "accepted" | "rejected"> }[] = [];
     let done = 0;
     // Local (Ollama) serves one request at a time, so run in series — it also
     // makes the live label exact. Cloud / GPU-served models batch well, so fan
@@ -216,8 +219,17 @@ export function TextExtractionPage() {
             const tables = ((p as any).tables || [])
               .map((t: any) => [t.caption, ...(t.rows || []).map((r: any[]) => r.join(" | "))].join("\n"))
               .join("\n\n");
-            const values = await AIService.extractFields(p.text || "", spec, p.title || "", undefined, tables);
-            rows.push({ paper_id: p.paper_id, title: p.title || "Untitled", values });
+            const rich = await AIService.extractFieldsRich(p.text || "", spec, p.title || "", undefined, tables);
+            const values = rich.values || {};
+            const meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }> = {};
+            const status: Record<string, "suggested" | "accepted" | "rejected"> = {};
+            for (const rf of rich.fields || []) {
+              meta[rf.id] = { source_quote: rf.source_quote || "", confidence: rf.confidence || "none", needs_review: !!rf.needs_review };
+              // Pre-accept confident, unflagged suggestions; flag the rest for review.
+              status[rf.id] = (rf.needs_review || rf.confidence !== "high") ? "suggested" : "accepted";
+            }
+            for (const f of fields) if (!(f.id in status)) status[f.id] = String(values[f.id] ?? "").trim() ? "suggested" : "accepted";
+            rows.push({ paper_id: p.paper_id, title: p.title || "Untitled", values, meta, status });
             setFormRows([...rows]);
           } catch { /* skip failed article */ }
           finally { done += 1; setFormProgress({ done, total: targets.length }); }
@@ -259,7 +271,7 @@ export function TextExtractionPage() {
       c.border = border;
     });
     formRows.forEach((r, i) => {
-      const row = sum.addRow([r.title || "Untitled", ...fields.map(f => String(r.values[f.id] ?? "").trim())]);
+      const row = sum.addRow([r.title || "Untitled", ...fields.map(f => (r.status?.[f.id] === "rejected" ? "" : String(r.values[f.id] ?? "").trim()))]);
       row.eachCell(c => { c.alignment = { vertical: "top", wrapText: true }; c.font = { size: 10 }; c.border = border; });
       const a = row.getCell(1);
       a.value = { text: r.title || "Untitled", hyperlink: `#'${names[i]}'!A1` };
@@ -291,7 +303,7 @@ export function TextExtractionPage() {
         c.border = border;
       });
       fields.forEach((f, j) => {
-        const row = ws.addRow([f.label, String(r.values[f.id] ?? "").trim() || "—"]);
+        const row = ws.addRow([f.label, (r.status?.[f.id] === "rejected" ? "" : String(r.values[f.id] ?? "").trim()) || "—"]);
         row.getCell(1).font = { bold: true, size: 10 };
         row.getCell(1).fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF1F5F9" } };
         row.getCell(2).font = { size: 10 };
@@ -310,7 +322,7 @@ export function TextExtractionPage() {
     if (!formRows.length) { toast.error("Run the form first."); return; }
     const q = (x: any) => `"${String(x ?? "").replace(/"/g, '""')}"`;
     const head = ["Article", ...fields.map(f => f.label)];
-    const rows = formRows.map(r => [r.title, ...fields.map(f => r.values[f.id] ?? "")]);
+    const rows = formRows.map(r => [r.title, ...fields.map(f => (r.status?.[f.id] === "rejected" ? "" : (r.values[f.id] ?? "")))]);
     const csv = [head, ...rows].map(r => r.map(q).join(",")).join("\r\n");
     const blob = new Blob([csv], { type: "text/csv" });
     const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "extraction-form.csv"; a.click(); URL.revokeObjectURL(a.href);
@@ -640,7 +652,7 @@ export function TextExtractionPage() {
               <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b bg-gradient-to-b from-muted/40 to-transparent">
                 <button onClick={() => setResultsCollapsed(c => !c)} className="flex items-center gap-2 text-sm font-medium min-w-0 hover:text-primary" title={resultsCollapsed ? "Expand results" : "Collapse results"}>
                   {resultsCollapsed ? <ChevronRight className="size-4 shrink-0" /> : <ChevronDown className="size-4 shrink-0" />}
-                  <span>Results <span className="text-xs text-muted-foreground font-normal">· {formRows.length} article{formRows.length === 1 ? "" : "s"} × {fields.length} field{fields.length === 1 ? "" : "s"}</span></span>
+                  <span>Results <span className="text-xs text-muted-foreground font-normal">· {formRows.length} article{formRows.length === 1 ? "" : "s"} × {fields.length} field{fields.length === 1 ? "" : "s"}{(() => { const nr = formRows.reduce((n, r) => n + Object.values(r.status || {}).filter(x => x === "suggested").length, 0); return nr ? ` · ${nr} to review` : ""; })()}</span></span>
                 </button>
                 <div className="flex items-center gap-2">
                   <Button size="sm" className="h-8 shadow-sm" onClick={exportFormXlsx}><FileSpreadsheet className="size-3.5 mr-1.5" />Excel</Button>
@@ -660,7 +672,32 @@ export function TextExtractionPage() {
                     {formRows.map(r => (
                       <tr key={r.paper_id} className="border-b border-border/60 last:border-0 align-top hover:bg-muted transition-colors bg-card">
                         <td className="px-3 py-2 sticky left-0 bg-inherit border-r min-w-[220px] max-w-[220px]"><div className="line-clamp-2 font-medium">{r.title}</div></td>
-                        {fields.map(f => <td key={f.id} className="px-3 py-2 whitespace-pre-wrap break-words min-w-[130px] text-foreground/90">{String(r.values[f.id] ?? "").trim() || <span className="text-muted-foreground/40">—</span>}</td>)}
+                        {fields.map(f => {
+                          const st = r.status?.[f.id] || "accepted";
+                          const m = r.meta?.[f.id];
+                          const val = String(r.values[f.id] ?? "").trim();
+                          const conf = m?.confidence || "none";
+                          const dot = conf === "high" ? "bg-emerald-500" : conf === "low" ? "bg-amber-500" : "bg-muted-foreground/30";
+                          return (
+                            <td key={f.id} className={`px-3 py-2 align-top whitespace-pre-wrap break-words min-w-[150px] ${st === "suggested" ? "bg-amber-50/60 dark:bg-amber-950/20" : ""}`}>
+                              <div className="flex items-start gap-1.5">
+                                <span className={`mt-1 size-1.5 rounded-full shrink-0 ${dot}`} title={`AI confidence: ${conf}${m?.source_quote ? `\nSource: "${m.source_quote}"` : ""}`} />
+                                <div className="flex-1 min-w-0">
+                                  <div className={`text-foreground/90 ${st === "rejected" ? "line-through opacity-50" : ""}`}>{val || <span className="text-muted-foreground/40">—</span>}</div>
+                                  {st === "suggested" ? (
+                                    <div className="mt-1 flex items-center gap-1.5">
+                                      <button type="button" onClick={() => setFieldStatus(r.paper_id, f.id, "accepted")} title="Accept suggestion" className="inline-flex items-center text-emerald-600 hover:text-emerald-700"><Check className="size-3.5" /></button>
+                                      <button type="button" onClick={() => setFieldStatus(r.paper_id, f.id, "rejected")} title="Reject suggestion" className="inline-flex items-center text-rose-600 hover:text-rose-700"><X className="size-3.5" /></button>
+                                      <span className="text-[9px] uppercase tracking-wide text-amber-600 dark:text-amber-500">review</span>
+                                    </div>
+                                  ) : st === "rejected" ? (
+                                    <button type="button" onClick={() => setFieldStatus(r.paper_id, f.id, "accepted")} title="Restore" className="mt-1 text-[10px] text-muted-foreground hover:text-foreground">restore</button>
+                                  ) : null}
+                                </div>
+                              </div>
+                            </td>
+                          );
+                        })}
                       </tr>
                     ))}
                   </tbody>
