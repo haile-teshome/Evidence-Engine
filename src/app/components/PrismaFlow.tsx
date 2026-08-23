@@ -348,176 +348,32 @@ export function PrismaFlow({
     }
   }
 
-
-  // Native, EDITABLE Word document matching the on-screen navy Covidence layout.
+  // Word (.docx) export: embeds the polished vector diagram as a high-resolution
+  // image, so the document is publication quality and converts cleanly to PDF.
+  // Numbers/labels are edited inline in the app before exporting, so the figure
+  // always reflects the current data.
   async function exportDocx() {
-    const {
-      Document, Packer, Paragraph, TextRun, AlignmentType,
-      Table, TableRow, TableCell, WidthType, BorderStyle, ShadingType,
-      VerticalAlign, TextDirection, TabStopType, HeightRule, TableLayoutType,
-    } = await import("docx");
-
-    const FONT = "Calibri";
-    const TEAL = "0D6B66", GREEN = "166534", SUB = "64748B", BORD = "A3C4C2", GREY = "94A3B8";
-    const W_BAND = 420, W_MAIN = 4200, W_GAP = 300, W_EXC = 4080;   // twips
-    const INNER = W_BAND + W_MAIN + W_GAP + W_EXC;                  // 9000, fits inside the panel
-    const PAGE = 9360;                                             // Letter content width
-
-    const edge = { style: BorderStyle.SINGLE, size: 6, color: BORD };
-    const dash = { style: BorderStyle.DASHED, size: 6, color: BORD };
-    const none = { style: BorderStyle.NONE, size: 0, color: "FFFFFF" };
-    const boxB = { top: edge, bottom: edge, left: edge, right: edge };
-    const dashB = { top: dash, bottom: dash, left: dash, right: dash };
-    const noB = { top: none, bottom: none, left: none, right: none };
-    const margins = { top: 170, bottom: 170, left: 180, right: 180 };
-
-    const run = (t: string, o: { bold?: boolean; italics?: boolean; color?: string; size?: number } = {}) =>
-      new TextRun({ text: t, bold: o.bold, italics: o.italics, color: o.color, size: o.size ?? 20, font: FONT });
-    const para = (children: any[], o: { align?: any; indentLeft?: number; tabStops?: any; after?: number } = {}) =>
-      new Paragraph({ alignment: o.align, indent: o.indentLeft ? { left: o.indentLeft } : undefined, tabStops: o.tabStops, spacing: { after: o.after ?? 0 }, children });
-
-    // Bold black title with a green "(n = X)".
-    const titlePara = (title: string, count: number) =>
-      para([run(title + " ", { bold: true }), run(`(n = ${count})`, { bold: true, color: GREEN })]);
-    const subPara = (text: string) => para([run(text, { color: SUB, size: 18 })], { indentLeft: 200 });
-    // Exclusion reason with the count right-aligned (tab stop), like the screen.
-    const reasonPara = (label: string, count: number) =>
-      para([run(label, { size: 18 }), run(`\t(n = ${count})`, { size: 18, bold: true })],
-        { tabStops: [{ type: TabStopType.RIGHT, position: W_EXC - 360 }] });
-
-    const boxCell = (children: any[], o: { w: number; fill?: string; dashed?: boolean; rowSpan?: number } ) => new TableCell({
-      width: { size: o.w, type: WidthType.DXA },
-      rowSpan: o.rowSpan, verticalAlign: VerticalAlign.CENTER, margins,
-      borders: o.dashed ? dashB : boxB,
-      shading: { type: ShadingType.CLEAR, color: "auto", fill: o.fill ?? "FFFFFF" },
-      children,
+    const { Document, Packer, Paragraph, ImageRun, AlignmentType } = await import("docx");
+    const { blob, w, h } = await rasterizeSvg(buildSvgString(), 3);
+    const data = new Uint8Array(await blob.arrayBuffer());
+    // Fit the figure to the Letter content width (~6.5in = 624px at 96 DPI),
+    // preserving aspect ratio; the 3x raster keeps it crisp when scaled down.
+    const dispW = 624;
+    const dispH = Math.round(dispW * (h / w));
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: [
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            children: [new ImageRun({ type: "png", data, transformation: { width: dispW, height: dispH } })],
+          }),
+        ],
+      }],
     });
-    const bandCell = (label: string, rowSpan: number) => new TableCell({
-      width: { size: W_BAND, type: WidthType.DXA }, rowSpan,
-      verticalAlign: VerticalAlign.CENTER, margins: { top: 40, bottom: 40, left: 20, right: 20 },
-      borders: noB, shading: { type: ShadingType.CLEAR, color: "auto", fill: TEAL },
-      textDirection: TextDirection.BOTTOM_TO_TOP_LEFT_TO_RIGHT,
-      children: [para([run(label.toUpperCase(), { bold: true, color: "FFFFFF", size: 16 })], { align: AlignmentType.CENTER })],
-    });
-    const plain = (children: any[], w: number) => new TableCell({
-      width: { size: w, type: WidthType.DXA }, borders: noB, verticalAlign: VerticalAlign.CENTER, margins, children,
-    });
-    const gapDown = (w: number) => plain([para([run("↓", { color: GREY, size: 28 })], { align: AlignmentType.CENTER })], w);
-    const gapRight = () => plain([para([run("→", { color: GREY, size: 24 })], { align: AlignmentType.CENTER })], W_GAP);
-    const gapEmpty = (w: number) => plain([para([])], w);
-
-    const noTableB = { top: none, bottom: none, left: none, right: none, insideHorizontal: none, insideVertical: none };
-    const grid = (rows: any[]) => new Table({
-      width: { size: INNER, type: WidthType.DXA },
-      layout: TableLayoutType.FIXED,                 // respect columnWidths, no autofit
-      indent: { size: 0, type: WidthType.DXA },
-      columnWidths: [W_BAND, W_MAIN, W_GAP, W_EXC],
-      borders: noTableB,
-      rows,
-    });
-    // Wrap a phase grid in a light-teal panel (Covidence look): the inner grid is
-    // left-aligned (band flush left) and narrower than the panel, so the tint
-    // shows above/below/right of the white boxes. `clear` = transparent (used to
-    // align the between-phase arrow with the panels).
-    const panel = (inner: any, clear = false) => new Table({
-      width: { size: PAGE, type: WidthType.DXA },
-      layout: TableLayoutType.FIXED,
-      indent: { size: 0, type: WidthType.DXA },
-      columnWidths: [PAGE],
-      borders: noTableB,
-      rows: [new TableRow({ children: [new TableCell({
-        borders: noB,
-        shading: clear ? undefined : { type: ShadingType.CLEAR, color: "auto", fill: "EEF6F5" },
-        margins: { top: 150, bottom: 150, left: 0, right: 0 },
-        children: [inner],
-      })] })],
-    });
-    const spacer = () => new Paragraph({ spacing: { after: 100 }, children: [] });
-
-    // ── Values (honour inline edits via n()/lbl()) ───────────────────────────
-    const identified = n("identified", counts.identified);
-    const srcSubs = Object.entries(sourceCounts).map(([src, cnt]) =>
-      subPara(`${lbl(`src|${src}`, src)} (n = ${n(`src|${src}`, cnt)})`));
-    const ftExclTotal = ftExcItems.length > 0 ? ftExcItems.reduce((a, it) => a + it.count, 0) : n("ftExcluded", ftExcluded);
-
-    const children: any[] = [
-      para([run("PRISMA 2020 Flow Diagram", { bold: true, color: GREEN, size: 30 })], { align: AlignmentType.CENTER, after: 200 }),
-
-      // ── Identification ──────────────────────────────────────────────────
-      panel(grid([
-        new TableRow({ children: [
-          bandCell("Identification", 2),
-          boxCell([titlePara(lbl("dbTitle", "Studies from databases/registers"), identified), ...srcSubs], { w: W_MAIN }),
-          gapEmpty(W_GAP),
-          boxCell([
-            titlePara(lbl("otherTitle", "References from other sources"), n("otherSources", otherSources)),
-            subPara(`Citation searching (n = ${n("citationSearch", 0)})`),
-            subPara(`Grey literature (n = ${n("greyLit", 0)})`),
-          ], { w: W_EXC }),
-        ] }),
-        new TableRow({ children: [
-          gapDown(W_MAIN),
-          gapEmpty(W_GAP),
-          boxCell([
-            titlePara(lbl("removedTitle", "References removed before screening"), n("duplicatesRemoved", counts.duplicates_removed)),
-            subPara(`Duplicates identified (n = ${n("dupManual", counts.duplicates_removed)})`),
-            subPara(`Marked ineligible by automation (n = ${n("autoIneligible", rerankDropped)})`),
-          ], { w: W_EXC }),
-        ] }),
-      ])),
-      spacer(),
-
-      // ── Screening ───────────────────────────────────────────────────────
-      panel(grid([
-        new TableRow({ children: [
-          bandCell("Screening", 5),
-          boxCell([titlePara(lbl("screenedTitle", "Studies screened"), n("screened", screened))], { w: W_MAIN }),
-          gapRight(),
-          boxCell([
-            titlePara(lbl("absExcTitle", "Studies excluded"), n("abstractExcluded", abstractExcluded)),
-            ...abstractExcItems.map(it => reasonPara(it.label, it.count)),
-          ], { w: W_EXC }),
-        ] }),
-        new TableRow({ children: [gapDown(W_MAIN), gapEmpty(W_GAP), gapEmpty(W_EXC)] }),
-        new TableRow({ children: [
-          boxCell([titlePara(lbl("soughtTitle", "Studies sought for retrieval"), n("soughtRetrieval", assessed))], { w: W_MAIN }),
-          gapRight(),
-          boxCell([titlePara(lbl("notRetrievedTitle", "Studies not retrieved"), n("notRetrieved", 0))], { w: W_EXC }),
-        ] }),
-        new TableRow({ children: [gapDown(W_MAIN), gapEmpty(W_GAP), gapEmpty(W_EXC)] }),
-        new TableRow({ children: [
-          boxCell([titlePara(lbl("assessedTitle", "Studies assessed for eligibility"), n("assessed", assessed))], { w: W_MAIN }),
-          gapRight(),
-          boxCell([
-            titlePara(lbl("ftExcTitle", "Studies excluded"), ftExclTotal),
-            ...ftExcItems.map(it => reasonPara(it.label, it.count)),
-          ], { w: W_EXC }),
-        ] }),
-      ])),
-
-      // arrow between Screening and Included, aligned under the main column
-      panel(grid([new TableRow({ children: [gapEmpty(W_BAND), gapDown(W_MAIN), gapEmpty(W_GAP), gapEmpty(W_EXC)] })]), true),
-
-      // ── Included ────────────────────────────────────────────────────────
-      panel(grid([
-        // Min height so the vertical "INCLUDED" band fits on one line.
-        new TableRow({ height: { value: 1150, rule: HeightRule.ATLEAST }, children: [
-          bandCell("Included", 1),
-          boxCell([titlePara(lbl("includedTitle", "Studies included in review"), n("included", included))], { w: W_MAIN }),
-          gapEmpty(W_GAP),
-          boxCell([
-            titlePara(lbl("ongoingTitle", "Included studies ongoing"), n("ongoing", 0)),
-            titlePara(lbl("awaitingTitle", "Studies awaiting classification"), n("awaiting", 0)),
-          ], { w: W_EXC, dashed: true }),
-        ] }),
-      ])),
-    ];
-
-    const doc = new Document({ sections: [{ properties: {}, children }] });
     const out = await Packer.toBlob(doc);
     triggerDownload(out, `prisma-${new Date().toISOString().slice(0, 10)}.docx`);
-    toast.success("Exported as editable Word document");
-
+    toast.success("Exported as Word document");
   }
 
   // ---- Render ---------------------------------------------------------------
@@ -553,8 +409,8 @@ export function PrismaFlow({
               <div className="absolute right-0 mt-1 z-50 w-44 rounded-lg border bg-popover text-popover-foreground shadow-md p-1">
                 <div className="px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Choose a format</div>
                 {[
-                  { label: "SVG (vector)", icon: Code2, run: () => exportSvg() },
                   { label: "Word (.docx)", icon: FileType2, run: () => { void exportDocx(); } },
+                  { label: "SVG (vector)", icon: Code2, run: () => exportSvg() },
                 ].map(opt => (
                   <button key={opt.label} onClick={() => { setExportOpen(false); opt.run(); }}
                     className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-sm hover:bg-muted transition-colors text-left">
@@ -802,18 +658,21 @@ function buildPrisma2020Svg(d: SvgData): string {
   const phaseBars: { x: number; y: number; h: number; label: string }[] = [];
 
   const boxRect = (x: number, bY: number, w: number, h: number, fill = "#fff", dashed = false) =>
-    `<rect x="${x}" y="${bY}" width="${w}" height="${h}" rx="7" fill="${fill}" stroke="${BORDER}" stroke-width="1.25"${dashed ? ' stroke-dasharray="5,3"' : ""}/>`;
+    `<rect x="${x}" y="${bY}" width="${w}" height="${h}" rx="4" fill="${fill}" stroke="${BORDER}" stroke-width="1.25"${dashed ? ' stroke-dasharray="5,3"' : ""}/>`;
 
   const txt = (x: number, tY: number, text: string, opts: { bold?: boolean; size?: number; color?: string; anchor?: string } = {}) =>
     `<text x="${x}" y="${tY}" ${FONT} font-size="${opts.size ?? 12}" font-weight="${opts.bold ? "bold" : "normal"}" fill="${opts.color ?? TEXT}" text-anchor="${opts.anchor ?? "start"}">${esc(text)}</text>`;
 
-  function textBox(x: number, bY: number, w: number, lines: { text: string; bold?: boolean; indent?: boolean; color?: string }[], fill = "#fff", dashed = false) {
+  function textBox(x: number, bY: number, w: number, lines: { text: string; bold?: boolean; indent?: boolean; color?: string; right?: string }[], fill = "#fff", dashed = false) {
     let lineY = bY + BOX_PAD + LH;
     const totalH = BOX_PAD * 2 + lines.length * LH;
     const rects = boxRect(x, bY, w, totalH, fill, dashed);
     const texts = lines.map(l => {
       const ix = x + BOX_PAD + (l.indent ? 12 : 0);
-      const t = txt(ix, lineY, l.text, { bold: l.bold, color: l.color, size: l.bold ? 12 : 11 });
+      const size = l.bold ? 11.5 : 10.5;
+      let t = txt(ix, lineY, l.text, { bold: l.bold, color: l.color, size });
+      // A right-aligned count on the same line (e.g. excluded reasons: "… (n = 8)").
+      if (l.right) t += txt(x + w - BOX_PAD, lineY, l.right, { bold: l.bold, color: l.color, size, anchor: "end" });
       lineY += LH;
       return t;
     }).join("");
@@ -821,14 +680,18 @@ function buildPrisma2020Svg(d: SvgData): string {
   }
 
   function arrow(x1: number, y1: number, x2: number, y2: number, _horizontal = false) {
-    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="$<DownArrow />" stroke-width="2.6" stroke-linecap="round" marker-end="url(#arr)"/>`;
+    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${ARROW}" stroke-width="2.6" stroke-linecap="round" marker-end="url(#arr)"/>`;
   }
 
   parts.push(
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} 900" width="${W}" height="900" ${FONT}>`,
-    `<defs><marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="$<DownArrow />"/></marker></defs>`,
+    `<defs><marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${ARROW}"/></marker></defs>`,
     `<rect width="${W}" height="900" fill="#ffffff"/>`,
   );
+
+  // Title, centered above the flow.
+  parts.push(txt(W / 2, y + 16, "PRISMA 2020 Flow Diagram", { bold: true, size: 17, color: NAVY, anchor: "middle" }));
+  y += 42;
 
   // ── IDENTIFICATION ──────────────────────────────────────────────────────
   const identStart = y;
@@ -849,23 +712,19 @@ function buildPrisma2020Svg(d: SvgData): string {
   const othBox = textBox(RIGHT_COL, y, COL_W, otherLines);
   parts.push(srcBox.svg, othBox.svg);
 
-  y += maxTopH + 10;
+  const spineX = LEFT + COL_W / 2;
 
-  // Arrow from left box down
-  parts.push(arrow(LEFT + COL_W / 2, identStart + maxTopH, LEFT + COL_W / 2, y));
-
-  // Removed box (right side)
+  // References-removed box (right column), placed just below the top boxes.
   const removedLines = [
     { text: `References removed before screening (n = ${d.duplicatesRemoved.toLocaleString()})`, bold: true, color: NAVY },
     { text: `Duplicate records (n = ${d.duplicatesRemoved.toLocaleString()})`, indent: true, color: GRAY },
   ];
-  const removedBox = textBox(RIGHT_COL, y - 5, COL_W, removedLines, LIGHT);
+  const removedY = identStart + maxTopH + 18;
+  const removedBox = textBox(RIGHT_COL, removedY, COL_W, removedLines, LIGHT);
   parts.push(removedBox.svg);
-  // Horizontal arrow from left col to removed box
-  parts.push(arrow(LEFT + COL_W, y - 5 + removedBox.h / 2, RIGHT_COL, y - 5 + removedBox.h / 2, true));
+  const branchY = removedY + removedBox.h / 2;
 
-  y += removedBox.h + 10;
-
+  y = removedY + removedBox.h + 18;
   const identEnd = y;
   phaseBars.push({ x: 10, y: identStart, h: identEnd - identStart, label: "Identification" });
 
@@ -874,43 +733,50 @@ function buildPrisma2020Svg(d: SvgData): string {
 
   // Row 1: screened → excluded
   const screenedBox = textBox(LEFT, y, COL_W, [{ text: `Studies screened (n = ${d.screened.toLocaleString()})`, bold: true, color: NAVY }]);
-  const absExcLines: { text: string; bold?: boolean; indent?: boolean; color?: string }[] = [
+  const absExcLines: { text: string; bold?: boolean; indent?: boolean; color?: string; right?: string }[] = [
     { text: `Studies excluded (n = ${d.abstractExcluded.toLocaleString()})`, bold: true, color: NAVY },
-    ...d.abstractExcItems.map(it => ({ text: `${it.label} (n = ${it.count.toLocaleString()})`, indent: true, color: GRAY })),
+    ...d.abstractExcItems.map(it => ({ text: it.label, right: `(n = ${it.count.toLocaleString()})`, indent: true, color: GRAY })),
   ];
   const absExcBox = textBox(RIGHT_COL, y, COL_W, absExcLines);
   const row1H = Math.max(screenedBox.h, absExcBox.h);
   parts.push(screenedBox.svg, absExcBox.svg);
+
+  // Continuous spine: identified box bottom, elbow out to the removed box, then
+  // straight down into the screened box (the standard PRISMA connector layout).
+  parts.push(`<line x1="${spineX}" y1="${identStart + maxTopH}" x2="${spineX}" y2="${branchY}" stroke="${ARROW}" stroke-width="2.6" stroke-linecap="round"/>`);
+  parts.push(arrow(spineX, branchY, RIGHT_COL, branchY, true));
+  parts.push(arrow(spineX, branchY, spineX, screenStart));
+
   parts.push(arrow(LEFT + COL_W, y + screenedBox.h / 2, RIGHT_COL, y + screenedBox.h / 2, true));
-  y += row1H + 8;
-  parts.push(arrow(LEFT + COL_W / 2, y - 8, LEFT + COL_W / 2, y));
+  y += row1H + 18;
+  parts.push(arrow(spineX, y - 18, spineX, y));
 
   // Row 2: sought for retrieval → not retrieved
   const soughtBox = textBox(LEFT, y, COL_W, [{ text: `Studies sought for retrieval (n = ${d.soughtRetrieval.toLocaleString()})`, bold: true, color: NAVY }]);
   const notRetBox = textBox(RIGHT_COL, y, COL_W, [{ text: `Studies not retrieved (n = ${d.notRetrieved.toLocaleString()})`, bold: true, color: NAVY }]);
   parts.push(soughtBox.svg, notRetBox.svg);
   parts.push(arrow(LEFT + COL_W, y + soughtBox.h / 2, RIGHT_COL, y + soughtBox.h / 2, true));
-  y += Math.max(soughtBox.h, notRetBox.h) + 8;
-  parts.push(arrow(LEFT + COL_W / 2, y - 8, LEFT + COL_W / 2, y));
+  y += Math.max(soughtBox.h, notRetBox.h) + 18;
+  parts.push(arrow(spineX, y - 18, spineX, y));
 
   // Row 3: assessed → excluded at ft
   const assessedBox = textBox(LEFT, y, COL_W, [{ text: `Studies assessed for eligibility (n = ${d.assessed.toLocaleString()})`, bold: true, color: NAVY }]);
-  const ftExcLines: { text: string; bold?: boolean; indent?: boolean; color?: string }[] = [
+  const ftExcLines: { text: string; bold?: boolean; indent?: boolean; color?: string; right?: string }[] = [
     { text: `Studies excluded (n = ${d.ftExcItems.reduce((s, it) => s + it.count, 0).toLocaleString()})`, bold: true, color: NAVY },
-    ...d.ftExcItems.map(it => ({ text: `${it.label} (n = ${it.count.toLocaleString()})`, indent: true, color: GRAY })),
+    ...d.ftExcItems.map(it => ({ text: it.label, right: `(n = ${it.count.toLocaleString()})`, indent: true, color: GRAY })),
   ];
   const ftExcBox = textBox(RIGHT_COL, y, COL_W, ftExcLines.length > 1 ? ftExcLines : [{ text: `Studies excluded (n = 0)`, bold: true, color: NAVY }]);
   const row3H = Math.max(assessedBox.h, ftExcBox.h);
   parts.push(assessedBox.svg, ftExcBox.svg);
   parts.push(arrow(LEFT + COL_W, y + assessedBox.h / 2, RIGHT_COL, y + assessedBox.h / 2, true));
-  y += row3H + 8;
+  y += row3H + 18;
 
   const screenEnd = y;
   phaseBars.push({ x: 10, y: screenStart, h: screenEnd - screenStart, label: "Screening" });
 
   // ── INCLUDED ──────────────────────────────────────────────────────────
   const inclStart = y;
-  parts.push(arrow(LEFT + COL_W / 2, y - 8, LEFT + COL_W / 2, y));
+  parts.push(arrow(spineX, y - 18, spineX, y));
 
   const inclBox = textBox(LEFT, y, COL_W, [{ text: `Studies included in review (n = ${d.included.toLocaleString()})`, bold: true, color: NAVY }], LIGHT);
   const ongoingBox = textBox(RIGHT_COL, y, COL_W, [
