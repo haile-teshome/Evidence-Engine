@@ -14,6 +14,7 @@ import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane"
 import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { ScreenResult, FullTextResult } from "../lib/apiClient";
+import { compileAuditLog, auditToJson, auditToCsv } from "../lib/auditLog";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -407,6 +408,28 @@ export function WritingPage() {
   const [generating, setGenerating] = useState(false);
   const [format, setFormat] = useState<CiteFormat>("BibTeX");
   const [query, setQuery] = useState("");
+  // Auditable AI decision log: compile stored screening + risk-of-bias decisions
+  // and stamp them with the reproducibility manifest (model, seed, prompt version).
+  const [reproManifest, setReproManifest] = useState<any>(null);
+  useEffect(() => { fetch("/api/reproducibility").then(r => r.json()).then(setReproManifest).catch(() => {}); }, []);
+  const auditLog = useMemo(() => compileAuditLog({
+    qualityReports: s.qualityReports,
+    rerankResults: s.rerankResults,
+    model: s.model,
+    manifest: reproManifest ? {
+      seed: reproManifest.seed,
+      prompt_version: reproManifest.prompt_version,
+      temperature: reproManifest.temperature,
+      local_models: (reproManifest.local_models || []).map((m: any) => ({ name: m.name, digest: m.digest })),
+    } : null,
+  }), [s.qualityReports, s.rerankResults, s.model, reproManifest]);
+  const exportAudit = (kind: "json" | "csv") => {
+    const stamped = { ...auditLog, generated_at: new Date().toISOString() };
+    const date = new Date().toISOString().slice(0, 10);
+    if (kind === "json") downloadFile(auditToJson(stamped), `ai-decision-log-${date}.json`, "application/json");
+    else downloadFile(auditToCsv(stamped), `ai-decision-log-${date}.csv`, "text/csv");
+    toast.success(`AI decision log exported (${kind.toUpperCase()})`);
+  };
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [searchDate, setSearchDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [editingSummary, setEditingSummary] = useState(false);
@@ -713,7 +736,64 @@ export function WritingPage() {
           <TabsTrigger value="citations">Citations</TabsTrigger>
           <TabsTrigger value="methods">Search strategy</TabsTrigger>
           <TabsTrigger value="writeup">Methods</TabsTrigger>
+          <TabsTrigger value="audit">AI log</TabsTrigger>
         </TabsList>
+
+        {/* ── AI decision log: every AI decision + run manifest, exportable ────── */}
+        <TabsContent value="audit" className="mt-3">
+          <Card className="p-4 space-y-3">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-sm font-semibold">AI decision log</div>
+                <p className="text-xs text-muted-foreground max-w-2xl mt-0.5">
+                  Every AI-made or AI-suggested decision (relevance screening and risk-of-bias appraisal), with its reasoning and criterion-level verdicts, stamped with the run manifest. Export for a PRISMA-AI / RAISE AI-use declaration.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <Button size="sm" variant="outline" className="h-8" disabled={!auditLog.decisions.length} onClick={() => exportAudit("csv")}><Download className="size-3.5 mr-1.5" />CSV</Button>
+                <Button size="sm" className="h-8" disabled={!auditLog.decisions.length} onClick={() => exportAudit("json")}><Download className="size-3.5 mr-1.5" />JSON</Button>
+              </div>
+            </div>
+            <div className="rounded-md border bg-muted/40 p-2.5 text-[11px] text-muted-foreground grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1">
+              <div><span className="font-medium text-foreground">Model:</span> {s.model}</div>
+              <div><span className="font-medium text-foreground">Seed:</span> {reproManifest?.seed ?? "—"}</div>
+              <div><span className="font-medium text-foreground">Temperature:</span> {reproManifest?.temperature ?? 0}</div>
+              <div><span className="font-medium text-foreground">Prompt version:</span> {reproManifest?.prompt_version ?? "—"}</div>
+            </div>
+            {auditLog.decisions.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No AI decisions recorded yet. Run relevance screening or risk-of-bias appraisal and they will appear here.</p>
+            ) : (
+              <div className="overflow-auto rounded-md border max-h-[calc(100vh-26rem)] min-h-[16rem]">
+                <table className="w-full text-xs border-collapse">
+                  <thead className="bg-muted/50 sticky top-0"><tr className="text-left">
+                    <th className="px-2 py-1.5 font-medium whitespace-nowrap">Stage</th>
+                    <th className="px-2 py-1.5 font-medium">Item</th>
+                    <th className="px-2 py-1.5 font-medium whitespace-nowrap">Verdict</th>
+                    <th className="px-2 py-1.5 font-medium">Reasoning</th>
+                  </tr></thead>
+                  <tbody>
+                    {auditLog.decisions.map((d, i) => (
+                      <tr key={i} className="border-t align-top">
+                        <td className="px-2 py-1.5 whitespace-nowrap text-muted-foreground">{d.stage}</td>
+                        <td className="px-2 py-1.5"><div className="max-w-[20rem] truncate" title={d.item}>{d.item}</div></td>
+                        <td className="px-2 py-1.5 whitespace-nowrap font-medium">{d.verdict}{typeof d.score === "number" ? ` (${d.score.toFixed(2)})` : ""}</td>
+                        <td className="px-2 py-1.5">
+                          <div className="line-clamp-2">{d.reasoning}</div>
+                          {d.criteria && d.criteria.length > 0 && (
+                            <div className="mt-1 space-y-0.5 text-[10px] text-muted-foreground">
+                              {d.criteria.map((c, j) => <div key={j}><span className="font-medium">{c.name}:</span> {c.verdict}</div>)}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground">{auditLog.note}</p>
+          </Card>
+        </TabsContent>
 
         {/* ── Citations: searchable paper list (left) + citation detail (right) ── */}
         <TabsContent value="citations" className="mt-3">
