@@ -66,8 +66,7 @@ const NAV: { id: PageId; label: string; icon: any; anim: keyof typeof ANIM }[] =
   { id: "textextraction", label: "Text Extraction", icon: ScanText, anim: "bob" },
   { id: "quality", label: "Quality Assessment", icon: ShieldCheck, anim: "pop" },
   { id: "prisma", label: "Diagramming", icon: GitBranch, anim: "swing" },
-  // Meta-analysis tab hidden for now. Re-add to restore.
-  // { id: "meta", label: "Meta-analysis", icon: Sigma, anim: "pop" },
+  { id: "meta", label: "Meta-analysis", icon: Sigma, anim: "pop" },
   { id: "writing", label: "Writing Assistant", icon: PenLine, anim: "wiggle" },
 ];
 
