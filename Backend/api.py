@@ -4615,6 +4615,38 @@ def list_local_models():
         return {"running": False, "models": [], "error": str(e)}
 
 
+@app.get("/api/reproducibility")
+def reproducibility():
+    """Run manifest for reproducibility. temperature=0 plus a fixed decoding seed
+    make LOCAL (Ollama) and OpenAI runs deterministic, so a review re-runs to
+    identical output; Anthropic/Gemini expose no seed API, so they are best-effort.
+    Local model digests are pinned so a stored decision names the exact weights."""
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    local_models: List[Dict[str, Any]] = []
+    try:
+        tags = requests.get(f"{ollama_base}/api/tags", timeout=4).json().get("models", [])
+        for m in tags:
+            local_models.append({
+                "name": m.get("name"),
+                "digest": (m.get("digest") or "")[:19],   # short pinned digest
+                "modified": m.get("modified_at", ""),
+            })
+    except Exception:
+        pass
+    return {
+        "seed": Config.RUN_SEED,
+        "temperature": 0,
+        "prompt_version": Config.PROMPT_VERSION,
+        "deterministic_providers": ["ollama (local)", "openai (seeded)"],
+        "best_effort_providers": ["anthropic", "google"],
+        "local_models": local_models,
+        "note": ("temperature=0 and a fixed seed make local Ollama and OpenAI runs "
+                 "reproducible to identical output. Anthropic and Gemini expose no "
+                 "seed, so those are best-effort. Hosted models can also change weights "
+                 "silently; local pinned models (by digest) cannot."),
+    }
+
+
 @app.get("/api/health")
 def health():
     # Surface any in-flight server-side tasks so the user can see what is
