@@ -3,6 +3,7 @@ import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, Qua
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method, SearchLogEntry, ReviewProtocol, ProtocolDeviation } from "./apiClient";
 import { FRESH_LAUNCH } from "./launchFlags";
 import { idbGet, idbSet, idbDel } from "./idb";
+import type { FrameworkId } from "./frameworks";
 
 export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta" | "projects" | "writing";
 
@@ -145,12 +146,16 @@ type Ctx = {
   model: string; setModel: (v: string) => void;
   sources: string[]; setSources: (v: string[]) => void;
   numPerSource: number; setNumPerSource: (v: number) => void;
+  // Per-database paper cap overrides (source name -> max). Sources without an
+  // entry fall back to numPerSource. Edited in the Strategy Review modal.
+  perSourceLimits: Record<string, number>; setPerSourceLimits: React.Dispatch<React.SetStateAction<Record<string, number>>>;
   files: File[]; setFiles: (v: File[]) => void;
 
   // Strategy
   history: HistoryEntry[]; setHistory: React.Dispatch<React.SetStateAction<HistoryEntry[]>>;
   docQa: DocQaTurn[]; setDocQa: React.Dispatch<React.SetStateAction<DocQaTurn[]>>;
   pico: Pico; setPico: React.Dispatch<React.SetStateAction<Pico>>;
+  framework: FrameworkId; setFramework: (v: FrameworkId) => void;
   inclusion: string[]; setInclusion: (v: string[]) => void;
   exclusion: string[]; setExclusion: (v: string[]) => void;
   query: string; setQuery: (v: string) => void;
@@ -332,11 +337,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [model, setModel] = useState("leads");
   const [sources, setSources] = useState<string[]>(["PubMed", "Europe PMC", "Semantic Scholar"]);
   const [numPerSource, setNumPerSource] = useState(15);
+  const [perSourceLimits, setPerSourceLimits] = useState<Record<string, number>>({});
   const [files, setFiles] = useState<File[]>([]);
 
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [docQa, setDocQa] = useState<DocQaTurn[]>([]);
   const [pico, setPico] = useState<Pico>({ population: "", intervention: "", comparator: "", outcome: "" });
+  const [framework, setFramework] = useState<FrameworkId>("pico");
   const [inclusion, setInclusion] = useState<string[]>([]);
   const [exclusion, setExclusion] = useState<string[]>([]);
   const [query, setQuery] = useState("");
@@ -522,8 +529,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => { apiConfig.model = model; }, [model]);
 
   const snapshot = () => ({
-    history, docQa, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
-    sources, numPerSource, model,
+    history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
+    sources, numPerSource, perSourceLimits, model,
     rawPapers, uniquePapers, duplicatesCount, qualityReports, qualityArchive,
     excludedByQuality: Array.from(excludedByQuality),
     qualityOverrides,
@@ -569,6 +576,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setHistory(d.history || []);
     setDocQa((d.docQa || []).filter((t: DocQaTurn) => !t.busy));   // drop any turn that was mid-flight when saved
     setPico(d.pico || { population: "", intervention: "", comparator: "", outcome: "" });
+    setFramework(d.framework === "pcc" ? "pcc" : "pico");
     setInclusion(d.inclusion || []);
     setExclusion(d.exclusion || []);
     setQuery(d.query || "");
@@ -576,6 +584,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setPerDbQueries(prev => pick(d.perDbQueries, prev, {}) ?? {});
     if (Array.isArray(d.sources)) setSources(d.sources);
     if (typeof d.numPerSource === "number") setNumPerSource(d.numPerSource);
+    setPerSourceLimits(d.perSourceLimits && typeof d.perSourceLimits === "object" ? d.perSourceLimits : {});
     if (d.model) setModel(d.model);
     setRawPapers(prev => pick(d.rawPapers, prev));
     setUniquePapers(prev => pick(d.uniquePapers, prev));
@@ -661,8 +670,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
     }, 600);
     return () => clearTimeout(t);
-  }, [history, docQa, pico, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
-      sources, numPerSource, model, rawPapers, uniquePapers, duplicatesCount,
+  }, [history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
+      sources, numPerSource, perSourceLimits, model, rawPapers, uniquePapers, duplicatesCount,
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
       searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive, fullTextResults,
@@ -701,7 +710,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const reset = () => {
-    setHistory([]); setDocQa([]); setPico({ population: "", intervention: "", comparator: "", outcome: "" });
+    setHistory([]); setDocQa([]); setPico({ population: "", intervention: "", comparator: "", outcome: "" }); setFramework("pico");
     setInclusion([]); setExclusion([]); setQuery(""); setUnifiedSearchQuery(""); setPerDbQueries({});
     setSimulation(null); setDbTestResults(null); setAgenticTrace(null); setAgenticSummary(null);
     setRawPapers(null); setUniquePapers(null); setDuplicatesCount(0);
@@ -723,8 +732,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   };
 
   const value: Ctx = {
-    page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, files, setFiles,
-    history, setHistory, docQa, setDocQa, pico, setPico, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
+    page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, perSourceLimits, setPerSourceLimits, files, setFiles,
+    history, setHistory, docQa, setDocQa, pico, setPico, framework, setFramework, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
     unifiedSearchQuery, setUnifiedSearchQuery, perDbQueries, setPerDbQueries, simulation, setSimulation,
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
     simulationRuns, addSimulationRun, clearSimulationRuns,
