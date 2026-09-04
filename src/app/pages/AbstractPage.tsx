@@ -1,6 +1,7 @@
-import { Fragment, useState, useEffect } from "react";
+import { Fragment, useState, useEffect, useMemo } from "react";
 import { useStore } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
+import { frameworkOf, labelFor, type FrameworkId } from "../lib/frameworks";
 import { categoriseAbstractExclusion, effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { ProjectScreeningBar, recordProjectDecision } from "../components/ProjectScreeningBar";
 import { Checkbox } from "../components/ui/checkbox";
@@ -51,17 +52,6 @@ function picoVoteFullLabel(v: PicoVote): string {
     default:        return "Not assessed";
   }
 }
-
-// Non-frozen columns the reviewer can drag to reorder. Keep/Decision/Title are
-// pinned (sticky) and not part of this list.
-const ABS_MOVABLE_COLS: { id: string; label: string; align?: "center" }[] = [
-  { id: "source", label: "Source" },
-  { id: "p", label: "P", align: "center" },
-  { id: "i", label: "I", align: "center" },
-  { id: "c", label: "C", align: "center" },
-  { id: "o", label: "O", align: "center" },
-  { id: "reasoning", label: "Reasoning" },
-];
 
 // ---- page ------------------------------------------------------------------
 
@@ -352,24 +342,42 @@ export function AbstractPage() {
     setEditingLabelId(null);
   };
 
-  // Reorderable (non-frozen) columns. Keep/Decision/Title stay pinned. The
-  // order persists per browser so the reviewer's layout sticks.
+  // Non-frozen columns the reviewer can drag to reorder, driven by the ACTIVE
+  // framework. PICO keys its element columns by their single letter (p/i/c/o) so
+  // previously-saved layouts still load; other frames (e.g. PCC, whose two "C"
+  // letters would collide) key by element id. Keep/Decision/Title stay pinned.
+  const framework = s.framework;
+  const fw = frameworkOf(framework);
+  const ABS_MOVABLE_COLS: { id: string; label: string; align?: "center"; elementId?: string }[] = [
+    { id: "source", label: "Source" },
+    ...fw.elements.map(el => ({
+      id: framework === "pico" ? el.letter.toLowerCase() : el.id,
+      label: framework === "pico" ? el.letter : el.label,
+      align: "center" as const,
+      elementId: el.id,
+    })),
+    { id: "reasoning", label: "Reasoning" },
+  ];
+
+  // The order persists per browser and reconciles with the active framework's
+  // column set: element columns from a different frame drop out, new ones append.
   const DEFAULT_COL_ORDER = ABS_MOVABLE_COLS.map(c => c.id);
-  const [colOrder, setColOrder] = useState<string[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("ee:abstract-col-order") || "null");
-      if (Array.isArray(saved) && saved.length === DEFAULT_COL_ORDER.length && DEFAULT_COL_ORDER.every(id => saved.includes(id))) return saved;
-    } catch { /* ignore */ }
-    return DEFAULT_COL_ORDER;
+  const [rawColOrder, setRawColOrder] = useState<string[]>(() => {
+    try { const saved = JSON.parse(localStorage.getItem("ee:abstract-col-order") || "null"); return Array.isArray(saved) ? saved : []; } catch { return []; }
   });
+  const colOrder = useMemo(() => {
+    const kept = rawColOrder.filter(id => DEFAULT_COL_ORDER.includes(id));
+    const added = DEFAULT_COL_ORDER.filter(id => !kept.includes(id));
+    return [...kept, ...added];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rawColOrder, DEFAULT_COL_ORDER.join("|")]);
   useEffect(() => { try { localStorage.setItem("ee:abstract-col-order", JSON.stringify(colOrder)); } catch { /* ignore */ } }, [colOrder]);
   const [dragCol, setDragCol] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<string | null>(null);
   const orderedCols = colOrder.map(id => ABS_MOVABLE_COLS.find(c => c.id === id)!).filter(Boolean);
-  const moveCol = (from: string, to: string) => setColOrder(prev => {
-    if (from === to) return prev;
-    const a = [...prev]; const fi = a.indexOf(from); const ti = a.indexOf(to);
-    if (fi < 0 || ti < 0) return prev;
+  const moveCol = (from: string, to: string) => setRawColOrder(() => {
+    const a = [...colOrder]; const fi = a.indexOf(from); const ti = a.indexOf(to);
+    if (fi < 0 || ti < 0 || fi === ti) return colOrder;
     a.splice(fi, 1); a.splice(ti, 0, from); return a;
   });
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
@@ -631,7 +639,7 @@ export function AbstractPage() {
                   </div>
                   <div className="ml-auto flex items-center gap-1 shrink-0">
                     {tableQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleRows.length}/{r.length}</span>}
-                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)} className="h-8 px-2" title="Download results as Excel (XLSX)">
+                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides, s.framework)} className="h-8 px-2" title="Download results as Excel (XLSX)">
                       <Download className="size-4" />
                     </Button>
                     <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
@@ -651,7 +659,7 @@ export function AbstractPage() {
                     <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Expand the table to full screen">
                       <Maximize2 className="size-4" />
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
+                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides, s.framework)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
                       <Download className="size-4" />
                     </Button>
                   </div>
@@ -742,15 +750,11 @@ export function AbstractPage() {
                           </div>
                         </td>
                         {orderedCols.map(col => {
-                          switch (col.id) {
-                            case "source": return <td key={col.id} className="px-3 py-2 bg-inherit"><Badge variant="outline">{row.Source}</Badge></td>;
-                            case "p": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Population" field={pa?.population} criterion={s.pico.population} /></td>;
-                            case "i": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Intervention" field={pa?.intervention} criterion={s.pico.intervention} /></td>;
-                            case "c": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Comparator" field={pa?.comparator} criterion={s.pico.comparator} /></td>;
-                            case "o": return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label="Outcome" field={pa?.outcome} criterion={s.pico.outcome} /></td>;
-                            case "reasoning": return <td key={col.id} className="px-3 py-2 text-foreground/90 min-w-[380px] max-w-[560px] bg-inherit"><div className="line-clamp-4 leading-relaxed">{row.Reason}</div></td>;
-                            default: return null;
-                          }
+                          if (col.id === "source") return <td key={col.id} className="px-3 py-2 bg-inherit"><Badge variant="outline">{row.Source}</Badge></td>;
+                          if (col.id === "reasoning") return <td key={col.id} className="px-3 py-2 text-foreground/90 min-w-[380px] max-w-[560px] bg-inherit"><div className="line-clamp-4 leading-relaxed">{row.Reason}</div></td>;
+                          // Frame-element column (PICO P/I/C/O or PCC Population/Concept/Context).
+                          const elId = col.elementId!;
+                          return <td key={col.id} className="px-3 py-2 text-center bg-inherit"><PicoCell label={labelFor(framework, elId)} field={pa?.[elId]} criterion={s.pico[elId]} /></td>;
                         })}
                       </tr>
                       {isOpen && (
@@ -762,17 +766,18 @@ export function AbstractPage() {
                                 <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Abstract</div>
                                 <p className="text-sm leading-relaxed whitespace-pre-wrap text-foreground/90">{row.Abstract || <span className="text-muted-foreground italic">No abstract available.</span>}</p>
                               </div>
-                              {/* Per-PICO assessment */}
+                              {/* Per-element assessment for the active framework */}
                               {pa && (
                                 <div>
-                                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Per-PICO assessment</div>
+                                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">Per-{fw.label} assessment</div>
                                   <div className="grid md:grid-cols-2 gap-2.5">
-                                    {([["Population", pa.population], ["Intervention", pa.intervention], ["Comparator", pa.comparator], ["Outcome", pa.outcome]] as const).map(([lbl, f]) => {
+                                    {fw.elements.map(el => {
+                                      const f = pa?.[el.id];
                                       const v = f?.vote ?? "NA";
                                       return (
-                                        <div key={lbl} className="rounded-lg border bg-card p-3 shadow-sm space-y-1.5">
+                                        <div key={el.id} className="rounded-lg border bg-card p-3 shadow-sm space-y-1.5">
                                           <div className="flex items-center justify-between gap-2">
-                                            <span className="text-sm font-medium">{lbl}</span>
+                                            <span className="text-sm font-medium">{el.label}</span>
                                             <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${picoVoteClass(v)}`}>
                                               {v === "NA" && <Minus className="size-3" />}{picoVoteFullLabel(v)}
                                             </span>
@@ -936,7 +941,9 @@ const PICO_VOTE_TEXT: Record<string, string> = {
 async function downloadAbstractXlsx(
   rows: ScreenResult[],
   overrides: Record<string, "INCLUDE" | "EXCLUDE"> = {},
+  framework: FrameworkId = "pico",
 ) {
+  const els = frameworkOf(framework).elements;
   const wb = new ExcelJS.Workbook();
   wb.creator = "Evidence Engine";
   wb.created = new Date();
@@ -945,6 +952,8 @@ async function downloadAbstractXlsx(
     views: [{ state: "frozen", xSplit: 2, ySplit: 1 }],
   });
 
+  // One vote / quote / reasoning triple per element of the ACTIVE framework.
+  // PICO keeps its P/I/C/O column headers; other frames use the element label.
   ws.columns = [
     { header: "Decision",      key: "decision",   width: 12 },
     { header: "AI Decision",   key: "ai_decision", width: 12 },
@@ -953,18 +962,14 @@ async function downloadAbstractXlsx(
     { header: "Source",        key: "source",     width: 14 },
     { header: "URL",           key: "url",        width: 38 },
     { header: "Reasoning",     key: "reasoning",  width: 60 },
-    { header: "P · vote",      key: "p_vote",     width: 12 },
-    { header: "P · quote",     key: "p_quote",    width: 48 },
-    { header: "P · reasoning", key: "p_reason",   width: 40 },
-    { header: "I · vote",      key: "i_vote",     width: 12 },
-    { header: "I · quote",     key: "i_quote",    width: 48 },
-    { header: "I · reasoning", key: "i_reason",   width: 40 },
-    { header: "C · vote",      key: "c_vote",     width: 12 },
-    { header: "C · quote",     key: "c_quote",    width: 48 },
-    { header: "C · reasoning", key: "c_reason",   width: 40 },
-    { header: "O · vote",      key: "o_vote",     width: 12 },
-    { header: "O · quote",     key: "o_quote",    width: 48 },
-    { header: "O · reasoning", key: "o_reason",   width: 40 },
+    ...els.flatMap(el => {
+      const h = framework === "pico" ? el.letter : el.label;
+      return [
+        { header: `${h} · vote`,      key: `${el.id}_vote`,   width: 12 },
+        { header: `${h} · quote`,     key: `${el.id}_quote`,  width: 48 },
+        { header: `${h} · reasoning`, key: `${el.id}_reason`, width: 40 },
+      ];
+    }),
   ];
 
   // Header styling: dark band with white bold text.
@@ -981,7 +986,7 @@ async function downloadAbstractXlsx(
     const pa = r.Pico_Assessment;
     const overrideVal = overrides[r.paper_id];
     const effective = overrideVal ?? r.Decision;
-    const row = ws.addRow({
+    const rowData: Record<string, any> = {
       decision:    effective,
       ai_decision: r.Decision,
       rev_edit:    overrideVal && overrideVal !== r.Decision ? "yes" : "",
@@ -989,19 +994,14 @@ async function downloadAbstractXlsx(
       source:   r.Source,
       url:      r.URL,
       reasoning: r.Reason,
-      p_vote:   pa?.population.vote   ?? "",
-      p_quote:  pa?.population.evidence ?? "",
-      p_reason: pa?.population.reasoning ?? "",
-      i_vote:   pa?.intervention.vote   ?? "",
-      i_quote:  pa?.intervention.evidence ?? "",
-      i_reason: pa?.intervention.reasoning ?? "",
-      c_vote:   pa?.comparator.vote   ?? "",
-      c_quote:  pa?.comparator.evidence ?? "",
-      c_reason: pa?.comparator.reasoning ?? "",
-      o_vote:   pa?.outcome.vote   ?? "",
-      o_quote:  pa?.outcome.evidence ?? "",
-      o_reason: pa?.outcome.reasoning ?? "",
-    });
+    };
+    for (const el of els) {
+      const f = pa?.[el.id];
+      rowData[`${el.id}_vote`]   = f?.vote ?? "";
+      rowData[`${el.id}_quote`]  = f?.evidence ?? "";
+      rowData[`${el.id}_reason`] = f?.reasoning ?? "";
+    }
+    const row = ws.addRow(rowData);
 
     // Default to top-aligned wrapped text everywhere, quotes are often long.
     row.eachCell((cell) => {
@@ -1031,9 +1031,9 @@ async function downloadAbstractXlsx(
     }
     decCell.alignment = { vertical: "top", horizontal: "center", wrapText: true };
 
-    // Colour the four vote cells by judgment.
-    for (const key of ["p_vote", "i_vote", "c_vote", "o_vote"]) {
-      const cell = row.getCell(key);
+    // Colour each element's vote cell by judgment.
+    for (const el of els) {
+      const cell = row.getCell(`${el.id}_vote`);
       const v = String(cell.value || "").toUpperCase();
       if (v && PICO_VOTE_FILL[v]) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + PICO_VOTE_FILL[v] } };

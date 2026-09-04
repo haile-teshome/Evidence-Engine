@@ -15,10 +15,12 @@ import { Input } from "../components/ui/input";
 import { Textarea } from "../components/ui/textarea";
 import { Separator } from "../components/ui/separator";
 import { PicoCards } from "../components/PicoCards";
+import { frameworkOf, FRAMEWORK_IDS, type FrameworkId } from "../lib/frameworks";
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel } from "../components/ui/dropdown-menu";
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, Download, RotateCcw, Paperclip, Loader2, Hand, Files, Telescope, Search } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, Download, RotateCcw, Paperclip, Loader2, Hand, Files, Telescope, Search, SlidersHorizontal } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
 
@@ -393,8 +395,27 @@ function scoreBadgeClass(score: number, threshold: number): string {
   return "bg-rose-50 text-rose-700";
 }
 
-const PICO_FIELDS = ["population", "intervention", "comparator", "outcome"] as const;
-const PICO_LABEL: Record<string, string> = { population: "P", intervention: "I", comparator: "C", outcome: "O" };
+// Compact −/＋ stepper with a typable field, used for per-database paper limits.
+function NumberStepper({ value, onChange, min = 1, max = 2000, step = 5 }: {
+  value: number; onChange: (n: number) => void; min?: number; max?: number; step?: number;
+}) {
+  const clamp = (n: number) => Math.max(min, Math.min(max, Number.isFinite(n) ? n : min));
+  return (
+    <div className="inline-flex items-center rounded-lg border bg-background overflow-hidden shrink-0">
+      <button type="button" title={`−${step}`} onClick={() => onChange(clamp(value - step))}
+        className="w-7 h-7 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+        <span className="text-sm leading-none">−</span>
+      </button>
+      <input type="number" min={min} max={max} value={value}
+        onChange={e => onChange(clamp(parseInt(e.target.value || String(min), 10)))}
+        className="w-12 h-7 bg-transparent text-center text-xs font-medium tabular-nums outline-none border-x [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" />
+      <button type="button" title={`+${step}`} onClick={() => onChange(clamp(value + step))}
+        className="w-7 h-7 flex items-center justify-center text-muted-foreground hover:text-foreground hover:bg-muted transition-colors">
+        <span className="text-sm leading-none">+</span>
+      </button>
+    </div>
+  );
+}
 
 // Conversational PICO clarifier modal. Fetches one question at a time from the
 // backend until all PICO elements are SR-ready, then calls onDone. Each question
@@ -402,11 +423,13 @@ const PICO_LABEL: Record<string, string> = { population: "P", intervention: "I",
 function ClarifyingQuestionsModal({
   open,
   goal,
+  framework,
   onDone,
   onSkipAll,
 }: {
   open: boolean;
   goal: string;
+  framework: FrameworkId;
   onDone: (answers: Record<string, string>) => void;
   onSkipAll: () => void;
 }) {
@@ -427,7 +450,7 @@ function ClarifyingQuestionsModal({
     setFreeText("");
     setSelected(new Set());
     try {
-      const result = await AIService.getClarifyNext(goal, current, r, Array.from(askedRef.current));
+      const result = await AIService.getClarifyNext(goal, current, r, Array.from(askedRef.current), framework);
       // Stop if done, no question, or the model circled back to an element we
       // already asked about.
       if (result.done || !result.question || askedRef.current.has(result.question.id)) {
@@ -441,7 +464,7 @@ function ClarifyingQuestionsModal({
     } finally {
       setLoading(false);
     }
-  }, [goal, onDone]);
+  }, [goal, framework, onDone]);
 
   useEffect(() => {
     if (open && goal) {
@@ -506,12 +529,13 @@ function ClarifyingQuestionsModal({
             <div className="flex items-center gap-2 min-w-0">
               <Lightbulb className="size-4 text-primary shrink-0" />
               <div className="text-sm font-medium break-words">
-                {showSpinner ? "Checking your PICO elements…" : question!.title}
+                {showSpinner ? `Checking your ${frameworkOf(framework).label} elements…` : question!.title}
               </div>
             </div>
-            {/* PICO field progress pills */}
+            {/* Frame element progress pills */}
             <div className="flex items-center gap-1.5 shrink-0">
-              {PICO_FIELDS.map(f => {
+              {frameworkOf(framework).elements.map(el => {
+                const f = el.id;
                 const done = !!answers[f];
                 const active = !done && question?.id === f;
                 return (
@@ -524,9 +548,9 @@ function ClarifyingQuestionsModal({
                         ? "bg-primary text-primary-foreground border-primary"
                         : "bg-muted text-muted-foreground border-border"
                     }`}
-                    title={f}
+                    title={el.label}
                   >
-                    {PICO_LABEL[f]}
+                    {el.letter}
                   </span>
                 );
               })}
@@ -1275,7 +1299,7 @@ export function HomePage() {
 
   const [refining, setRefining] = useState(false);
   const [refinement, setRefinement] = useState<null | {
-    field: "population" | "intervention" | "comparator" | "outcome";
+    field: string;   // active frame element id (PICO or PCC)
     current: string;
     suggested: string;
     reason: string;
@@ -1292,6 +1316,11 @@ export function HomePage() {
   // async flow there can await the user's answers.
   const [clarifyOpen, setClarifyOpen] = useState(false);
   const [clarifyGoal, setClarifyGoal] = useState("");
+  // Frame shown in the clarifier pills (mirrors s.framework, set just before the
+  // modal opens). fwOverrideRef records when the user manually picks a frame via
+  // the selector, so auto-detect on submit doesn't clobber their choice.
+  const [clarifyFramework, setClarifyFramework] = useState<FrameworkId>(s.framework);
+  const fwOverrideRef = useRef(false);
   // Strategy Review drawer open-state lives in the store so the header bar can
   // toggle it (the floating button was removed).
   const reviewOpen = s.reviewOpen;
@@ -1373,6 +1402,19 @@ export function HomePage() {
     //
     //    Skipped when handleSubmit is called from applyRefinement: the
     //    refinement IS the clarification, no need to ask again.
+    // Auto-detect the question frame (PICO vs PCC) for a fresh review, unless the
+    // user has manually picked one via the selector. `activeFw` (a local) is the
+    // source of truth for the rest of this submit — s.framework won't update within
+    // this same closure after setFramework, so we must thread the local through.
+    let activeFw: FrameworkId = s.framework;
+    if (!opts.skipClarify && s.history.length === 0 && !fwOverrideRef.current) {
+      try {
+        activeFw = await AIService.detectFramework(t);
+      } catch { /* keep current */ }
+      s.setFramework(activeFw);
+      setClarifyFramework(activeFw);
+    }
+
     let clarifyAnswers: Record<string, string> = {};
     if (!opts.skipClarify) {
       try {
@@ -1419,20 +1461,27 @@ export function HomePage() {
       //    operationalised detail is preserved instead of regenerated.
       const prior = s.history.length > 0
         ? { p: s.pico.population, i: s.pico.intervention, c: s.pico.comparator, o: s.pico.outcome,
+            concept: s.pico.concept, context: s.pico.context,
             inclusion: s.inclusion, exclusion: s.exclusion }
         : null;
-      const analysis = await runStage("pico", signal, sig => AIService.inferPicoAndQuery(effectiveText, prior, sig));
+      const fw = activeFw;
+      const analysis = await runStage("pico", signal, sig => AIService.inferPicoAndQuery(effectiveText, prior, fw, sig));
       if (!analysis) { s.updateTask("home-analysis", { status: signal.aborted ? "canceled" : "error" }); return; }
 
-      const newPico = { population: analysis.p, intervention: analysis.i, comparator: analysis.c, outcome: analysis.o };
+      const resolvedFw = analysis.framework || fw;
+      const newPico = {
+        population: analysis.p, intervention: analysis.i, comparator: analysis.c, outcome: analysis.o,
+        concept: analysis.concept || "", context: analysis.context || "", framework: resolvedFw,
+      };
       s.setPico(newPico);
+      s.setFramework(resolvedFw);
       s.setInclusion(analysis.inclusion);
       s.setExclusion(analysis.exclusion);
       s.setQuery(analysis.query);
       s.setUnifiedSearchQuery(analysis.query);
 
       // Frame the question: formalise it from PICO before the search is shown.
-      const formalQ = await runStage("question", signal, sig => AIService.generateFormalQuestion(newPico, sig));
+      const formalQ = await runStage("question", signal, sig => AIService.generateFormalQuestion(newPico, effectiveText, sig));
 
       // Build the search: the MeSH string came back with the PICO call, so it's
       // ready to mark done; then derive the adversarial (counter-evidence) variant
@@ -1449,7 +1498,7 @@ export function HomePage() {
       // own PDFs, uncheck the databases in the sidebar so the fetch returns nothing.
       const uploaded = (s.rawPapers || []).filter(p => p.source === "Local PDFs");
       const fetched = await runStage("papers", signal, sig =>
-        DataAggregator.fetchAll(analysis.query, s.sources, newPico, undefined, sig)
+        DataAggregator.fetchPerSource(analysis.query, s.sources, newPico, s.perSourceLimits, s.numPerSource, sig)
       );
       const fetchedPapers = fetched?.papers || [];
       let papers: Paper[] = [...fetchedPapers, ...uploaded];
@@ -1894,6 +1943,7 @@ export function HomePage() {
       <ClarifyingQuestionsModal
         open={clarifyOpen}
         goal={clarifyGoal}
+        framework={clarifyFramework}
         onDone={(answers) => clarifyResolverRef.current?.(answers)}
         onSkipAll={() => clarifyResolverRef.current?.({})}
       />
@@ -1910,7 +1960,7 @@ export function HomePage() {
 
       {/* Refinement popup, floats above the chat input, Claude-clarifying-question style */}
       {(refining || refinement) && s.history.length > 0 && (
-        <div className={`fixed bottom-20 left-72 z-30 px-6 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
+        <div className="fixed bottom-20 left-72 right-0 z-30 px-6 pointer-events-none transition-all">
           <div className="max-w-4xl mx-auto pointer-events-auto">
             <Card className="p-4 border-primary/40 shadow-xl bg-card/98 backdrop-blur">
               <div className="flex items-start justify-between gap-3">
@@ -1994,39 +2044,60 @@ export function HomePage() {
         </div>
       )}
 
-      {/* ── Strategy Review, collapsible right-hand drawer ────────────────── */}
-      {s.history.length > 0 && (
-        <>
-          {/* Opened from the "Strategy Review" button in the top header bar. */}
-          {/* Drawer panel */}
-          <div
-            className={`fixed top-0 right-0 h-screen w-[400px] max-w-[92vw] bg-card border-l shadow-2xl z-40 flex flex-col transition-transform duration-200 ${reviewOpen ? "translate-x-0" : "translate-x-full"}`}
-            aria-hidden={!reviewOpen}
-          >
-            <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">
-              <div>
-                <h2 className="m-0 text-base">Strategy Review</h2>
-                <span className="text-xs text-muted-foreground">Edit PICO, criteria, search &amp; protocol</span>
-              </div>
-              <button onClick={() => setReviewOpen(false)} className="text-muted-foreground hover:text-foreground" title="Close">
-                <X className="size-4" />
-              </button>
-            </div>
-            <Tabs defaultValue="pico" className="flex-1 flex flex-col min-h-0">
-              <div className="px-4 pt-3 shrink-0">
-                <TabsList className="grid grid-cols-4 w-full">
-                  <TabsTrigger value="pico">PICO</TabsTrigger>
+      {/* ── Strategy Review, centered main-page modal ────────────────── */}
+      <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
+        <DialogContent className="sm:max-w-2xl w-[95vw] h-[82vh] max-h-[720px] flex flex-col p-0 gap-0">
+            <DialogHeader className="px-5 py-4 border-b shrink-0 text-left space-y-0.5">
+              <DialogTitle className="text-base">Strategy Review</DialogTitle>
+              <p className="text-xs text-muted-foreground m-0">Study design, {frameworkOf(s.framework).label}, criteria, search &amp; protocol</p>
+            </DialogHeader>
+            <Tabs defaultValue="design" className="flex-1 flex flex-col min-h-0">
+              <div className="px-5 pt-3 shrink-0">
+                <TabsList className="grid grid-cols-5 w-full">
+                  <TabsTrigger value="design">Study Design</TabsTrigger>
+                  <TabsTrigger value="pico">{frameworkOf(s.framework).label}</TabsTrigger>
                   <TabsTrigger value="criteria">Criteria</TabsTrigger>
                   <TabsTrigger value="search">Search</TabsTrigger>
                   <TabsTrigger value="relevance">Relevance</TabsTrigger>
                 </TabsList>
               </div>
-              <div className="flex-1 overflow-auto p-4">
+              <div className="flex-1 overflow-auto p-5">
+                <TabsContent value="design" className="mt-0 space-y-2.5">
+                  <div className="space-y-2.5">
+                    {FRAMEWORK_IDS.map(fid => {
+                      const meta = frameworkOf(fid);
+                      const active = s.framework === fid;
+                      return (
+                        <button key={fid} type="button"
+                          onClick={() => { fwOverrideRef.current = true; s.setFramework(fid); setClarifyFramework(fid); }}
+                          aria-pressed={active}
+                          className={`w-full text-left rounded-lg border p-3.5 transition-colors ${active ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:bg-muted"}`}>
+                          <div className="flex items-center gap-2">
+                            <span className={`flex items-center justify-center size-5 rounded text-xs font-bold ${active ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}>
+                              {active ? <Check className="size-3.5" /> : meta.label[0]}
+                            </span>
+                            <span className="text-sm font-semibold">{meta.label}</span>
+                            <span className="text-xs text-muted-foreground">{meta.reviewType}</span>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-1.5">{meta.blurb}</p>
+                          <div className="mt-2.5 space-y-1">
+                            {meta.elements.map(e => (
+                              <div key={e.id} className="text-[11px] text-muted-foreground">
+                                <span className="font-semibold text-foreground">{e.label}:</span> {e.desc}
+                              </div>
+                            ))}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </TabsContent>
                 <TabsContent value="pico" className="mt-0 space-y-3">
-                  {(["population", "intervention", "comparator", "outcome"] as const).map(f => (
-                    <div key={f}>
-                      <label className="text-muted-foreground text-sm capitalize">{f}</label>
-                      <Textarea value={s.pico[f]} onChange={e => s.setPico({ ...s.pico, [f]: e.target.value })} rows={2} />
+                  {frameworkOf(s.framework).elements.map(el => (
+                    <div key={el.id}>
+                      <label className="text-muted-foreground text-sm">{el.label}</label>
+                      <Textarea value={(s.pico as Record<string, string>)[el.id] || ""}
+                        onChange={e => s.setPico({ ...s.pico, [el.id]: e.target.value })} rows={2} />
                     </div>
                   ))}
                 </TabsContent>
@@ -2040,9 +2111,64 @@ export function HomePage() {
                     <CriteriaList items={s.exclusion} onChange={s.setExclusion} placeholder="e.g., animal studies" variant="exclude" />
                   </div>
                 </TabsContent>
-                <TabsContent value="search" className="mt-0 space-y-2">
-                  <label className="text-muted-foreground text-sm">Final Search String</label>
-                  <Textarea value={s.query} onChange={e => { s.setQuery(e.target.value); s.setUnifiedSearchQuery(e.target.value); }} rows={8} className="font-mono text-xs" />
+                <TabsContent value="search" className="mt-0 space-y-4">
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-muted-foreground text-sm">Databases &amp; per-database limits</label>
+                      <span className="text-[11px] text-muted-foreground">
+                        Total budget ≈ {s.sources.reduce((sum, src) => sum + (s.perSourceLimits[src] ?? s.numPerSource), 0).toLocaleString()} papers
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground mb-2.5">How many papers to pull from each active database. Rows use the default unless you set a specific cap.</p>
+
+                    {/* Default control */}
+                    <div className="flex items-center justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-2.5 mb-2">
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold">Default</div>
+                        <div className="text-[11px] text-muted-foreground">Applied to every database without its own cap</div>
+                      </div>
+                      <NumberStepper value={s.numPerSource} onChange={n => s.setNumPerSource(n)} />
+                    </div>
+
+                    {/* Per-database rows */}
+                    {s.sources.length === 0 ? (
+                      <div className="rounded-lg border border-dashed px-3 py-4 text-center text-[11px] text-muted-foreground">
+                        No databases selected. Enable databases in the left sidebar under <span className="font-medium">Active Databases</span>.
+                      </div>
+                    ) : (
+                      <div className="rounded-lg border divide-y overflow-hidden">
+                        {s.sources.map(src => {
+                          const overridden = src in s.perSourceLimits;
+                          const eff = s.perSourceLimits[src] ?? s.numPerSource;
+                          return (
+                            <div key={src} className="flex items-center justify-between gap-3 px-3 py-2.5 hover:bg-muted/40 transition-colors">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className="size-2 rounded-full bg-primary/60 shrink-0" />
+                                <span className="text-sm truncate">{src}</span>
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded-full shrink-0 ${overridden ? "bg-primary/10 text-primary font-medium" : "text-muted-foreground"}`}>
+                                  {overridden ? "custom" : "default"}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <NumberStepper value={eff}
+                                  onChange={n => s.setPerSourceLimits(prev => ({ ...prev, [src]: n }))} />
+                                <button type="button" title="Reset to default"
+                                  disabled={!overridden}
+                                  onClick={() => s.setPerSourceLimits(prev => { const n = { ...prev }; delete n[src]; return n; })}
+                                  className={`p-1 rounded-md transition-colors ${overridden ? "text-muted-foreground hover:text-foreground hover:bg-muted" : "opacity-0 pointer-events-none"}`}>
+                                  <RotateCcw className="size-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                  <div>
+                    <label className="text-muted-foreground text-sm block mb-1.5">Final Search String</label>
+                    <Textarea value={s.query} onChange={e => { s.setQuery(e.target.value); s.setUnifiedSearchQuery(e.target.value); }} rows={7} className="font-mono text-xs" />
+                  </div>
                 </TabsContent>
                 <TabsContent value="relevance" className="mt-0 space-y-3">
                   <p className="text-xs text-muted-foreground">
@@ -2100,12 +2226,11 @@ export function HomePage() {
                 </TabsContent>
               </div>
             </Tabs>
-          </div>
-        </>
-      )}
+        </DialogContent>
+      </Dialog>
 
       {/* Chat input, fixed to bottom, matching content width */}
-      <div className={`fixed bottom-0 left-72 z-30 px-6 py-4 pointer-events-none transition-all ${reviewOpen ? "right-[400px]" : "right-0"}`}>
+      <div className="fixed bottom-0 left-72 right-0 z-30 px-6 py-4 pointer-events-none transition-all">
         <div className="max-w-4xl mx-auto pointer-events-auto">
           <input ref={attachRef} type="file" multiple
             accept={ACCEPT_ATTR} className="hidden"
@@ -2125,6 +2250,21 @@ export function HomePage() {
               ))}
             </div>
           )}
+          {/* Study-design & strategy opener on the home bar. Opens the centered
+              modal whose first tab picks the study type (framework). Replaces the
+              old top-header "Strategy Review" button. */}
+          <div className="flex items-center mb-2 px-1.5">
+            <button
+              type="button"
+              onClick={() => setReviewOpen(true)}
+              title="Study design, frame, eligibility criteria, search string & protocol"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border bg-card text-xs font-medium text-foreground hover:bg-muted transition-colors"
+            >
+              <SlidersHorizontal className="size-3.5" />
+              {s.history.length > 0 ? "Study design & strategy" : "Study design"}
+              <span className="ml-1 rounded-full bg-primary/10 text-primary px-1.5 py-0.5 text-[10px] font-semibold">{frameworkOf(s.framework).label}</span>
+            </button>
+          </div>
           <form onSubmit={(e) => { e.preventDefault(); handleSubmit(input); }}
             className="flex gap-2 items-center bg-card/95 backdrop-blur border rounded-full shadow-lg pl-2 pr-2 py-2">
             <Button type="button" size="icon" variant="ghost" className="rounded-full shrink-0 size-9"

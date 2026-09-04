@@ -76,15 +76,6 @@ function Shell() {
               <h1>{meta.title}</h1>
               <p className="text-sm text-muted-foreground">{meta.subtitle}</p>
             </div>
-            {s.page === "home" && s.history.length > 0 && (
-              <button
-                onClick={() => s.setReviewOpen(!s.reviewOpen)}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md border text-xs font-medium transition-colors ${s.reviewOpen ? "bg-primary text-primary-foreground border-primary" : "bg-primary/10 border-primary/30 text-foreground hover:bg-primary/20"}`}
-                title="Edit PICO, criteria & search string"
-              >
-                <SlidersHorizontal className="size-3.5" />Strategy Review
-              </button>
-            )}
             {!engine.done && (
               <span
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400 text-xs font-medium"

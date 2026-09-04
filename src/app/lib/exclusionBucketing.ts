@@ -14,6 +14,19 @@
 
 import type { ScreenResult, FullTextResult } from "./mockServices";
 
+// Frame elements in priority order, covering PICO (population/intervention/
+// comparator/outcome) and PCC (population/concept/context). Bucketing iterates
+// whichever elements are actually present in a study's assessment.
+const FRAME_ORDER = ["population", "intervention", "comparator", "outcome", "concept", "context"];
+const FRAME_FAIL_LABEL: Record<string, string> = {
+  population: "Wrong study population",
+  intervention: "Wrong intervention",
+  comparator: "Wrong comparator",
+  outcome: "Wrong outcome",
+  concept: "Wrong concept",
+  context: "Wrong context",
+};
+
 // ---- effective-decision helpers ------------------------------------------
 
 export type AbstractDecision = "INCLUDE" | "EXCLUDE";
@@ -81,38 +94,23 @@ export function categoriseAbstractExclusion(
     return shorten(primary, 80);
   }
 
-  // 2. Fall back to PICO bucket.
-  const pa = r.Pico_Assessment;
+  // 2. Fall back to the frame bucket. Works for PICO (population/intervention/
+  //    comparator/outcome) and PCC (population/concept/context): iterate whatever
+  //    element assessments are present, in priority order.
+  const pa = r.Pico_Assessment as Record<string, { vote?: string } | undefined> | undefined;
   if (!pa) return "Other reason";
+  const present = FRAME_ORDER.filter(id => pa[id]);
+  const votes = present.map(id => pa[id]!.vote);
+  const failed = present.filter(id => pa[id]!.vote === "FAIL");
+  if (failed.length >= 1) return FRAME_FAIL_LABEL[failed[0]] || "Other reason";
 
-  const votes = {
-    Population:   pa.population.vote,
-    Intervention: pa.intervention.vote,
-    Comparator:   pa.comparator.vote,
-    Outcome:      pa.outcome.vote,
-  };
+  const naCount      = votes.filter(v => v === "NA").length;
+  const partialCount = votes.filter(v => v === "PARTIAL").length;
+  const passCount    = votes.filter(v => v === "PASS").length;
 
-  const FAIL_LABEL: Record<string, string> = {
-    Population:   "Wrong study population",
-    Intervention: "Wrong intervention",
-    Comparator:   "Wrong comparator",
-    Outcome:      "Wrong outcome",
-  };
-
-  // One reason per study: the highest-priority failed element in PICO order
-  // (population > intervention > comparator > outcome), since `votes` is built
-  // in that order. Keeps the PRISMA box to a single clear reason per line.
-  const failed = Object.entries(votes).filter(([, v]) => v === "FAIL").map(([k]) => k);
-  if (failed.length >= 1) return FAIL_LABEL[failed[0]] || "Other reason";
-
-  const values = Object.values(votes);
-  const naCount      = values.filter(v => v === "NA").length;
-  const partialCount = values.filter(v => v === "PARTIAL").length;
-  const passCount    = values.filter(v => v === "PASS").length;
-
-  if (naCount >= 3)      return "Insufficient abstract detail";
-  if (passCount === 0)   return "No PICO match";
-  if (partialCount >= 3) return "Partial match only";
+  if (naCount >= Math.max(2, present.length - 1)) return "Insufficient abstract detail";
+  if (passCount === 0)   return "No frame match";
+  if (partialCount >= Math.max(2, present.length - 1)) return "Partial match only";
   return "Other reason";
 }
 
@@ -150,24 +148,11 @@ export function categoriseFullTextExclusion(
     return shorten(primary, 80);
   }
 
-  // 2. Fall back to PICO mismatch.
-  const pe = r.picoEvidence;
-  const FAIL_LABEL: Record<string, string> = {
-    population:   "Wrong study population",
-    intervention: "Wrong intervention",
-    comparator:   "Wrong comparator",
-    outcome:      "Wrong outcome",
-  };
+  // 2. Fall back to frame mismatch (PICO or PCC — iterate present elements).
+  const pe = r.picoEvidence as Record<string, { match?: string } | undefined> | undefined;
   if (pe) {
-    const noMatches: string[] = [];
-    if (pe.population?.match === "no")   noMatches.push("population");
-    if (pe.intervention?.match === "no") noMatches.push("intervention");
-    if (pe.comparator?.match === "no")   noMatches.push("comparator");
-    if (pe.outcome?.match === "no")      noMatches.push("outcome");
-    // One reason per study: the highest-priority mismatch in PICO order
-    // (population > intervention > comparator > outcome), since `noMatches` is
-    // built in that order.
-    if (noMatches.length >= 1) return FAIL_LABEL[noMatches[0]] || "Other reason";
+    const noMatches = FRAME_ORDER.filter(id => pe[id]?.match === "no");
+    if (noMatches.length >= 1) return FRAME_FAIL_LABEL[noMatches[0]] || "Other reason";
   }
 
   if ((r.exclusion_violations ?? 0) > 0) return "Exclusion criterion met";
