@@ -40,6 +40,7 @@ from pydantic import BaseModel, Field
 from config import Config
 from models import Paper as BackendPaper, PICOCriteria, clean_markup
 from utils import AIService, Deduplicator, AITableExtractor
+import frameworks
 from data_services import DataAggregator, OpenAlexService
 from leads_screening import (
     LEADS_MODEL_NAME,
@@ -225,6 +226,10 @@ class PicoIn(BaseModel):
     intervention: str = ""
     comparator: str = ""
     outcome: str = ""
+    # PCC (scoping) elements; population is shared with the PICO fields above.
+    concept: str = ""
+    context: str = ""
+    framework: str = "pico"
 
 
 class PaperIn(BaseModel):
@@ -255,6 +260,9 @@ def _to_pico(p: PicoIn) -> PICOCriteria:
         intervention=p.intervention,
         comparator=p.comparator,
         outcome=p.outcome,
+        concept=getattr(p, "concept", "") or "",
+        context=getattr(p, "context", "") or "",
+        framework=frameworks.normalize(getattr(p, "framework", "pico")),
     )
 
 
@@ -280,6 +288,9 @@ class InferRequest(BaseModel):
     # Previous strategy to refine from (PICO + criteria), when this is a
     # follow-up message rather than a brand-new research goal.
     prior: Optional[Dict[str, Any]] = None
+    # "pico" (intervention review) or "pcc" (JBI scoping review). When omitted,
+    # the frame is auto-detected from the goal text.
+    framework: Optional[str] = None
 
 
 class Analysis(BaseModel):
@@ -290,6 +301,50 @@ class Analysis(BaseModel):
     inclusion: List[str]
     exclusion: List[str]
     query: str
+    # Frame + PCC-native element values (empty for a PICO frame).
+    framework: str = "pico"
+    concept: str = ""
+    context: str = ""
+
+
+class FrameworkDetectRequest(BaseModel):
+    input: str
+    model: Optional[str] = None
+
+
+@app.post("/api/framework/detect")
+def framework_detect(req: FrameworkDetectRequest):
+    """Pick the question frame (PICO vs PCC) that best fits the researcher's intended
+    study design. Uses the model to classify the goal, with a keyword heuristic as a
+    fast fallback. The UI lets the user override. Returns the detected id plus the
+    registry so the client can render whichever frame without hardcoding elements."""
+    text = (req.input or "").strip()
+    heuristic = frameworks.detect_framework(text)
+    fw = heuristic
+    if text:
+        model = AIService.get_model(resolve_for_thinking(req.model))
+        if model:
+            try:
+                from langchain_core.messages import HumanMessage
+                prompt = (
+                    "Classify the intended review/study design for this research goal. Reply with ONE word only:\n"
+                    "  PICO  = an intervention / effectiveness review that tests whether a specific intervention or\n"
+                    "          exposure changes an outcome compared with a comparator (quantifies an effect).\n"
+                    "  PCC   = a scoping review that MAPS the breadth, range, or nature of evidence on a topic\n"
+                    "          (exploratory, 'what is known / what evidence exists', no comparator or measured effect).\n\n"
+                    f'RESEARCH GOAL: "{text}"\n\n'
+                    "Answer with exactly one token: PICO or PCC."
+                )
+                out = (model.invoke([HumanMessage(content=prompt)]).content or "").strip().lower()
+                if "pcc" in out and "pico" not in out:
+                    fw = "pcc"
+                elif "pico" in out and "pcc" not in out:
+                    fw = "pico"
+                # otherwise keep the heuristic
+            except Exception as e:
+                print(f"[framework_detect] LLM classify failed, using heuristic: {e}")
+    return {"framework": fw, "detected_by": ("model" if fw != heuristic or text else "heuristic"),
+            "registry": frameworks.FRAMEWORKS}
 
 
 def _pico_value(v: Any) -> str:
@@ -339,7 +394,33 @@ def _coerce_str_list(v: Any) -> List[str]:
 @app.post("/api/pico/infer", response_model=Analysis)
 def pico_infer(req: InferRequest):
     model_name = resolve_for_thinking(req.model)
-    data = AIService.infer_pico_and_query(req.input, model_name, req.previous_goal or "", prior=req.prior)
+    # Frame is explicit from the client (which runs /framework/detect and lets the
+    # user override); default to PICO when unspecified so legacy callers are stable.
+    fw = frameworks.normalize(req.framework) if req.framework else "pico"
+    data = AIService.infer_pico_and_query(req.input, model_name, req.previous_goal or "",
+                                          prior=req.prior, framework=fw)
+    if fw == "pcc":
+        # PCC (scoping): Population / Concept / Context. Map Concept onto the
+        # intervention anchor slot and Context onto the population/context block
+        # so the existing deterministic MeSH builder works unchanged.
+        pop_str = _pico_value(data.get("population") or data.get("p", ""))
+        concept_str = _pico_value(data.get("concept") or data.get("i", ""))
+        context_str = _pico_value(data.get("context") or data.get("c", ""))
+        pico = PICOCriteria(
+            population=pop_str, intervention=concept_str, comparator="", outcome="",
+            concept=concept_str, context=context_str, framework="pcc",
+        )
+        try:
+            query = AIService.generate_mesh_query(pico, model_name, goal=req.input or "")
+        except Exception as e:
+            print(f"[pico_infer] mesh query failed: {e}")
+            query = ""
+        return Analysis(
+            p=pop_str, i=concept_str, c=context_str, o="",
+            inclusion=_coerce_str_list(data.get("inclusion")),
+            exclusion=_coerce_str_list(data.get("exclusion")),
+            query=query or "", framework="pcc", concept=concept_str, context=context_str,
+        )
     p_str = _pico_value(data.get("p", ""))
     i_str = _pico_value(data.get("i", ""))
     c_str = _pico_value(data.get("c", ""))
@@ -349,6 +430,7 @@ def pico_infer(req: InferRequest):
         intervention=i_str,
         comparator=c_str,
         outcome=o_str,
+        framework="pico",
     )
     try:
         query = AIService.generate_mesh_query(pico, model_name, goal=req.input or "")
@@ -363,6 +445,7 @@ def pico_infer(req: InferRequest):
         inclusion=_coerce_str_list(data.get("inclusion")),
         exclusion=_coerce_str_list(data.get("exclusion")),
         query=query or "",
+        framework="pico",
     )
 
 
@@ -469,8 +552,9 @@ class ClarifyNextRequest(BaseModel):
     goal: str
     pico_so_far: Dict[str, str] = Field(default_factory=dict)
     round: int = 0   # total questions answered so far — used for the safety cap
-    asked: List[str] = Field(default_factory=list)  # PICO element ids already asked
+    asked: List[str] = Field(default_factory=list)  # element ids already asked
     model: Optional[str] = None
+    framework: str = "pico"
 
 
 @app.post("/api/pico/clarify-next")
@@ -492,31 +576,36 @@ def pico_clarify_next(req: ClarifyNextRequest):
 
     answered = {k: v for k, v in (req.pico_so_far or {}).items() if v and str(v).strip()}
 
-    # At most ONE clarifying question per PICO element. Once all four have been
+    # At most ONE clarifying question per frame element. Once all have been
     # asked (or the safety cap is hit) we're done — no re-asking.
-    PICO_IDS = ["population", "intervention", "comparator", "outcome"]
+    fw = frameworks.normalize(req.framework)
+    frame_meta = frameworks.framework_of(fw)
+    frame_label = frame_meta["label"]                     # "PICO" / "PCC"
+    PICO_IDS = frameworks.element_ids(fw)                 # e.g. ["population","concept","context"]
+    elem_labels = ", ".join(frameworks.label_for(fw, e) for e in PICO_IDS)
     asked = {str(a).strip().lower() for a in (req.asked or [])}
     remaining = [p for p in PICO_IDS if p not in asked]
-    if req.round >= 4 or not remaining:
+    if req.round >= len(PICO_IDS) or not remaining:
         return {"done": True}
 
     pico_lines = (
         "\n".join(f"  {k.upper()}: {v}" for k, v in answered.items())
         or "  (nothing yet)"
     )
-    remaining_label = ", ".join(p.capitalize() for p in remaining)
+    remaining_label = ", ".join(frameworks.label_for(fw, p) for p in remaining)
+    id_enum = " | ".join(f'"{e}"' for e in PICO_IDS)
 
-    prompt = f"""You are a systematic-review librarian helping a researcher pin down their PICO
+    prompt = f"""You are a systematic-review librarian helping a researcher pin down their {frame_label} frame
 before a database search.
 
 RESEARCHER'S GOAL: "{goal}"
 
-PICO elements clarified so far:
+{frame_label} elements clarified so far:
 {pico_lines}
 
 TASK
 ────
-Decide which PICO elements (Population, Intervention, Comparator, Outcome) still
+Decide which {frame_label} elements ({elem_labels}) still
 NEED CLARIFICATION before a search. Only ask about elements that are NOT already
 well-defined.
 
@@ -541,11 +630,10 @@ Rules:
 • Ask AT MOST ONE question, about a single element from the allowed list.
 • If every allowed element is already well-defined → return {{"done": true}}.
   Prefer {{"done": true}} whenever you are unsure — do not ask filler questions.
-• Comparator is frequently left unspecified on purpose; only ask about it when
-  the question clearly hinges on a specific comparison.
-• When you do ask, pick the most important element that needs clarification
-  (priority: Population > Intervention > Outcome > Comparator) and give EXACTLY
-  3 concrete, measurable options relevant to "{goal}".
+• Elements like Comparator/Context are frequently left unspecified on purpose;
+  only ask about one when the question clearly hinges on it.
+• When you do ask, pick the most important element that needs clarification and
+  give EXACTLY 3 concrete, measurable options relevant to "{goal}".
   GOOD options: "adults 18–65 with major depressive disorder (DSM-5)",
   "CBT ≥12 sessions", "remission at 8 weeks (PHQ-9 < 5)".
 
@@ -556,7 +644,7 @@ Return ONLY one of:
 {{
   "done": false,
   "question": {{
-    "id": "population" | "intervention" | "comparator" | "outcome",
+    "id": {id_enum},
     "title": "<focused question ≤12 words ending in '?'>",
     "options": [
       {{"id": "a", "label": "<specific option 1>"}},
@@ -608,11 +696,12 @@ class FormalQuestionRequest(BaseModel):
     pico: PicoIn
     model: Optional[str] = None
     history: List[Dict[str, Any]] = Field(default_factory=list)
+    goal: str = ""   # the researcher's stated input, so the question stays faithful to it
 
 
 @app.post("/api/pico/formal-question")
 def pico_formal_question(req: FormalQuestionRequest):
-    q = AIService.generate_formal_question(_to_pico(req.pico), resolve_for_thinking(req.model), req.history)
+    q = AIService.generate_formal_question(_to_pico(req.pico), resolve_for_thinking(req.model), req.history, goal=req.goal or "")
     return {"question": q}
 
 
@@ -967,31 +1056,27 @@ def pico_refine(req: RefineRequest):
     if not model:
         return {**empty, "reason": "Model unavailable."}
 
-    # Prioritise blanks. Order matters: Population is the most load-bearing for
-    # retrieval relevance, followed by Intervention, Outcome, Comparator.
-    PRIORITY = ["population", "intervention", "outcome", "comparator"]
-    values = {
-        "population": (req.pico.population or "").strip(),
-        "intervention": (req.pico.intervention or "").strip(),
-        "comparator": (req.pico.comparator or "").strip(),
-        "outcome": (req.pico.outcome or "").strip(),
-    }
+    # Prioritise blanks, in the active frame's element order (Population first —
+    # most load-bearing for retrieval relevance).
+    fw = frameworks.normalize(getattr(req.pico, "framework", "pico"))
+    frame_label = frameworks.framework_of(fw)["label"]
+    PRIORITY = frameworks.element_ids(fw)
+    values = {eid: (getattr(req.pico, eid, "") or "").strip() for eid in PRIORITY}
+    elem_block = "\n".join(f"  {frameworks.label_for(fw, eid)}: {values[eid] or '(blank)'}" for eid in PRIORITY)
+    field_enum = " | ".join(f'"{eid}"' for eid in PRIORITY)
     blanks = [f for f in PRIORITY if not values[f]]
 
     if blanks:
         target = blanks[0]
-        prompt = f"""You are a clinical research methodologist helping a researcher specify a
-systematic-review PICO. The researcher's stated goal is below. They did NOT specify the
-{target.upper()} element. Your job is to ask ONE concise clarifying question and offer ONE
+        prompt = f"""You are a research methodologist helping a researcher specify a
+systematic-review {frame_label} frame. The researcher's stated goal is below. They did NOT specify the
+{frameworks.label_for(fw, target).upper()} element. Your job is to ask ONE concise clarifying question and offer ONE
 plausible starting value the researcher can accept, edit, or reject.
 
 RESEARCH GOAL: {req.goal or "(not provided)"}
 
-CURRENT PICO (the blank field is the one we are asking about):
-  Population: {values['population'] or '(blank)'}
-  Intervention: {values['intervention'] or '(blank)'}
-  Comparator: {values['comparator'] or '(blank)'}
-  Outcome: {values['outcome'] or '(blank)'}
+CURRENT {frame_label} (the blank field is the one we are asking about):
+{elem_block}
 
 Rules for the clarifying question:
   • Phrase it as a question to the researcher, ≤ 18 words.
@@ -1011,25 +1096,22 @@ Return ONLY a JSON object with these exact keys:
 """
         is_clarification = True
     else:
-        prompt = f"""You are a clinical research methodologist reviewing a PICO breakdown for a
+        prompt = f"""You are a research methodologist reviewing a {frame_label} breakdown for a
 systematic review. Identify the ONE element that is most under-specified, ambiguous, or
 methodologically weak, and propose a sharper replacement for that element only.
 
 RESEARCH GOAL: {req.goal}
 
-CURRENT PICO:
-  Population: {values['population']}
-  Intervention: {values['intervention']}
-  Comparator: {values['comparator']}
-  Outcome: {values['outcome']}
+CURRENT {frame_label}:
+{elem_block}
 
 Pick the single weakest element and propose a concrete improvement. Be specific — name a
-population subgroup, dose/duration, comparator type, or validated outcome measure. Do not
+subgroup, dose/duration, concept scope, context, or validated measure as appropriate. Do not
 suggest changes to multiple elements; pick the most impactful one.
 
 Return ONLY a JSON object with these exact keys:
 {{
-  "field": "population" | "intervention" | "comparator" | "outcome",
+  "field": {field_enum},
   "current": "<current value verbatim>",
   "suggested": "<sharper replacement, 5-20 words>",
   "reason": "<one-sentence rationale for why this change improves clarity or rigor>"
@@ -1045,7 +1127,7 @@ Return ONLY a JSON object with these exact keys:
             return {**empty, "reason": "Could not parse model response."}
         data = _json.loads(m.group(0))
         field = str(data.get("field", "")).strip().lower()
-        if field not in {"population", "intervention", "comparator", "outcome"}:
+        if field not in set(PRIORITY):
             return {**empty, "reason": "Model returned an invalid field."}
         return {
             "field": field,
@@ -1282,13 +1364,13 @@ def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any
     title = paper.title or "(untitled)"
 
     model = AIService.get_model(model_name)
-    empty: Dict[str, Any] = {
-        "population":   {"vote": "NA", "evidence": "", "reasoning": ""},
-        "intervention": {"vote": "NA", "evidence": "", "reasoning": ""},
-        "comparator":   {"vote": "NA", "evidence": "", "reasoning": ""},
-        "outcome":      {"vote": "NA", "evidence": "", "reasoning": ""},
-        "overall_reasoning": "",
-    }
+    # Framework-driven element set (PICO: P/I/C/O; PCC: Population/Concept/Context).
+    fw = frameworks.normalize(getattr(pico, "framework", "pico"))
+    frame_label = frameworks.framework_of(fw)["label"]
+    elem_defs = frameworks.element_defs(fw)
+    elem_vals = {e["id"]: (getattr(pico, e["id"], "") or "") for e in elem_defs}
+    empty: Dict[str, Any] = {e["id"]: {"vote": "NA", "evidence": "", "reasoning": ""} for e in elem_defs}
+    empty["overall_reasoning"] = ""
     if not model:
         return empty
 
@@ -1299,8 +1381,13 @@ def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any
         "fabricate quotes, and explain your best-effort judgement.)"
     )
 
-    prompt = f"""You are screening a paper against a PICO frame for a systematic review.
-For EACH of the four PICO elements below, decide a vote of PASS, PARTIAL, or FAIL.
+    elem_block = "\n".join(f"  {lbl}: {elem_vals.get(eid) or '(unspecified)'}"
+                           for eid, lbl in [(e["id"], e["label"]) for e in elem_defs])
+    json_shape = "\n".join(f'  "{e["id"]}":    {{ "vote": "...", "evidence": "...", "reasoning": "..." }},'
+                           for e in elem_defs)
+
+    prompt = f"""You are screening a paper against a {frame_label} frame for a systematic review.
+For EACH of the {frame_label} elements below, decide a vote of PASS, PARTIAL, or FAIL.
 Never use "NA" or "UNCERTAIN" — pick the closest of the three labels:
 
   • PASS    — the title/abstract clearly satisfies this element (explicit match).
@@ -1330,11 +1417,8 @@ or "it lacks specificity regarding validated outcomes" — always ground it in
 this study's actual topic. When only a title is available, say what the title
 implies and flag what remains uncertain pending full text.
 
-PICO:
-  Population:   {pico.population or '(unspecified)'}
-  Intervention: {pico.intervention or '(unspecified)'}
-  Comparator:   {pico.comparator or '(unspecified)'}
-  Outcome:      {pico.outcome or '(unspecified)'}
+{frame_label}:
+{elem_block}
 
 PAPER TITLE: {title}
 
@@ -1343,10 +1427,7 @@ PAPER ABSTRACT:
 
 Return ONLY a JSON object with EXACTLY this shape:
 {{
-  "population":    {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
-  "intervention":  {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
-  "comparator":    {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
-  "outcome":       {{ "vote": "...", "evidence": "...", "reasoning": "..." }},
+{json_shape}
   "overall_reasoning": "..."
 }}
 
@@ -1445,10 +1526,7 @@ NEVER fabricate a quote that does not appear in the abstract.
 
         return {"vote": vote, "evidence": evidence, "reasoning": reasoning}
 
-    population   = _clean_field(data.get("population"),   pico.population   or "")
-    intervention = _clean_field(data.get("intervention"), pico.intervention or "")
-    comparator   = _clean_field(data.get("comparator"),   pico.comparator   or "")
-    outcome      = _clean_field(data.get("outcome"),      pico.outcome      or "")
+    assessed = {eid: _clean_field(data.get(eid), elem_vals.get(eid) or "") for eid in elem_vals}
 
     # Never leave the reason blank — fall back to a record-specific, best-effort
     # sentence grounded in the title (the PICO chips may still be NA when no
@@ -1460,17 +1538,11 @@ NEVER fabricate a quote that does not appear in the abstract.
             f'Based only on the title ("{title[:140]}"), a confident PICO match could not '
             f"be confirmed without an abstract — assess {t} at full text."
             if not has_abstract else
-            f'The abstract for "{title[:140]}" could not be mapped to the PICO frame with '
+            f'The abstract for "{title[:140]}" could not be mapped to the {frame_label} frame with '
             f"confidence — assess at full text."
         )
 
-    return {
-        "population":   population,
-        "intervention": intervention,
-        "comparator":   comparator,
-        "outcome":      outcome,
-        "overall_reasoning": overall_reasoning,
-    }
+    return {**assessed, "overall_reasoning": overall_reasoning}
 
 
 def _normalize_abstract_decision(
@@ -1910,12 +1982,8 @@ def _pico_evidence_for_text(source_text: str, pico: PICOCriteria) -> Dict[str, D
     token overlap. Returns evidence + a coarse match label."""
     out: Dict[str, Dict[str, Any]] = {}
     sentences = re.split(r"(?<=[.!?])\s+", source_text or "")
-    fields = [
-        ("population", pico.population),
-        ("intervention", pico.intervention),
-        ("comparator", pico.comparator),
-        ("outcome", pico.outcome),
-    ]
+    # Framework-driven element set (PICO P/I/C/O or PCC Population/Concept/Context).
+    fields = [(eid, val) for eid, _lbl, val in pico.element_items()]
     for field, value in fields:
         if not value:
             out[field] = {"evidence": "", "match": "no", "score": 0, "value": ""}
@@ -5102,7 +5170,21 @@ def writing_protocol(req: ProtocolRequest):
     if not model:
         raise HTTPException(status_code=503, detail="No model available")
     pico = req.pico or {}
-    prompt = f"""You are drafting a systematic-review PROTOCOL to be registered BEFORE the
+    fw = frameworks.normalize(pico.get("framework"))
+    is_pcc = fw == "pcc"
+    elem_lines = "\n".join(f"{frameworks.label_for(fw, eid)}: {pico.get(eid, '')}"
+                           for eid in frameworks.element_ids(fw))
+    if is_pcc:
+        review_kind = "scoping-review PROTOCOL (PRISMA-ScR / JBI methodology)"
+        elig_label = "Eligibility criteria (Population, Concept, Context, and the types of evidence sources)"
+        q_label = "Review objectives (what the scoping review will MAP — extent, range, nature of the evidence; not an effect question)"
+        synth_label = "Data charting and presentation of results (narrative + tabular/mapping; no effect meta-analysis or GRADE)"
+    else:
+        review_kind = "systematic-review PROTOCOL"
+        elig_label = "Eligibility criteria (Population, Intervention, Comparator, Outcomes, Study designs)"
+        q_label = "Review question and objectives"
+        synth_label = "Data synthesis and certainty of evidence (GRADE)"
+    prompt = f"""You are drafting a {review_kind} to be registered BEFORE the
 review begins. Use the details supplied; where a detail is missing, write a
 clearly-labelled placeholder the author can complete (e.g. "[to be specified]").
 Do not invent results or findings. Write clear methods prose using Markdown
@@ -5110,21 +5192,18 @@ headings, covering these sections in order:
 
 1. Title
 2. Background and rationale
-3. Review question and objectives
-4. Eligibility criteria (Population, Intervention, Comparator, Outcomes, Study designs)
+3. {q_label}
+4. {elig_label}
 5. Information sources and search strategy
-6. Study selection process (screening and dual review)
-7. Data extraction
-8. Risk-of-bias assessment
-9. Data synthesis and certainty of evidence (GRADE)
+6. Study/source selection process (screening and dual review)
+7. Data {"charting" if is_pcc else "extraction"}
+8. {"Critical appraisal (optional in scoping reviews; state if performed)" if is_pcc else "Risk-of-bias assessment"}
+9. {synth_label}
 10. Timeline and planned amendments
 
 DETAILS
 Title: {req.title or "(untitled review)"}
-Population: {pico.get('population', '')}
-Intervention: {pico.get('intervention', '')}
-Comparator: {pico.get('comparator', '')}
-Outcome: {pico.get('outcome', '')}
+{elem_lines}
 Inclusion criteria: {'; '.join(req.inclusion) or '(none supplied)'}
 Exclusion criteria: {'; '.join(req.exclusion) or '(none supplied)'}
 Information sources: {', '.join(req.sources) or '(open-access databases)'}

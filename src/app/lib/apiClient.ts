@@ -3,13 +3,21 @@
 
 import { requestHeaders, type LlmProvider } from "./keystore";
 import { dbKeyHeaders } from "./dbKeys";
+import type { FrameworkId } from "./frameworks";
 
-export type Pico = { population: string; intervention: string; comparator: string; outcome: string };
+// The frame object is keyed by element id. PICO uses population/intervention/
+// comparator/outcome; PCC uses population/concept/context. All are optional so
+// either frame can populate its own subset; `framework` records which is active.
+export type Pico = {
+  population: string; intervention: string; comparator: string; outcome: string;
+  concept?: string; context?: string; framework?: FrameworkId;
+};
 export type Paper = { id: string; source: string; title: string; abstract: string; url: string; year?: number; authors?: string };
 
 export type Analysis = {
   p: string; i: string; c: string; o: string;
   inclusion: string[]; exclusion: string[]; query: string;
+  framework?: FrameworkId; concept?: string; context?: string;
 };
 
 export type ClarifyingQuestion = {
@@ -36,11 +44,14 @@ export type PicoFieldAssessment = {
 };
 
 export type PicoAssessment = {
-  population: PicoFieldAssessment;
-  intervention: PicoFieldAssessment;
-  comparator: PicoFieldAssessment;
-  outcome: PicoFieldAssessment;
-  overall_reasoning: string;  // 2-3 sentence synthesis across PICO
+  population?: PicoFieldAssessment;
+  intervention?: PicoFieldAssessment;
+  comparator?: PicoFieldAssessment;
+  outcome?: PicoFieldAssessment;
+  // PCC (scoping) elements — present when the active frame is PCC.
+  concept?: PicoFieldAssessment;
+  context?: PicoFieldAssessment;
+  overall_reasoning: string;  // 2-3 sentence synthesis across the frame
 };
 
 export type ScreenResult = {
@@ -278,8 +289,19 @@ async function getJSON<T = any>(path: string, signal?: AbortSignal): Promise<T> 
 // ---------------------------------------------------------------------------
 
 export const AIService = {
-  async inferPicoAndQuery(input: string, prior?: Partial<Analysis> | null, signal?: AbortSignal): Promise<Analysis> {
-    return postJSON<Analysis>("/pico/infer", { input, prior: prior || undefined, model: apiConfig.model }, signal);
+  async inferPicoAndQuery(input: string, prior?: Partial<Analysis> | null, framework?: FrameworkId, signal?: AbortSignal): Promise<Analysis> {
+    return postJSON<Analysis>("/pico/infer", { input, prior: prior || undefined, model: apiConfig.model, framework }, signal);
+  },
+
+  // Heuristic pre-selection of the question frame (PICO vs PCC) from the goal.
+  // The UI preselects this and lets the user override.
+  async detectFramework(input: string, signal?: AbortSignal): Promise<FrameworkId> {
+    try {
+      const r = await postJSON<{ framework: FrameworkId }>("/framework/detect", { input, model: apiConfig.model }, signal);
+      return r.framework === "pcc" ? "pcc" : "pico";
+    } catch {
+      return "pico";
+    }
   },
 
   // Translate the PubMed-style base query into each engine's native syntax,
@@ -312,18 +334,19 @@ export const AIService = {
     picoSoFar: Record<string, string>,
     round: number,
     asked: string[] = [],
+    framework: FrameworkId = "pico",
     signal?: AbortSignal,
   ): Promise<{ done: boolean; question?: ClarifyingQuestion }> {
     return postJSON<{ done: boolean; question?: ClarifyingQuestion }>(
       "/pico/clarify-next",
-      { goal, pico_so_far: picoSoFar, round, asked, model: apiConfig.model },
+      { goal, pico_so_far: picoSoFar, round, asked, model: apiConfig.model, framework },
       signal,
     );
   },
 
-  async generateFormalQuestion(pico: Pico, signal?: AbortSignal): Promise<string> {
+  async generateFormalQuestion(pico: Pico, goal = "", signal?: AbortSignal): Promise<string> {
     const r = await postJSON<{ question: string }>("/pico/formal-question", {
-      pico, model: apiConfig.model, history: [],
+      pico, model: apiConfig.model, history: [], goal,
     }, signal);
     return r.question || "";
   },
@@ -811,6 +834,27 @@ export const DataAggregator = {
       { query, sources, max_per_source: maxPerSource },
       signal,
     );
+  },
+
+  // Fetch with a PER-DATABASE cap: each source gets `limits[src]` papers, or
+  // `defaultLimit` when it has no explicit entry. Sources sharing the same cap
+  // are fetched in one call; the rest are fetched individually, then merged.
+  async fetchPerSource(query: string, sources: string[], pico: Pico, limits: Record<string, number>, defaultLimit = 50, signal?: AbortSignal): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
+    // Group sources by their effective cap so identical caps batch into one request.
+    const byCap = new Map<number, string[]>();
+    for (const src of sources) {
+      const cap = Math.max(1, Number(limits[src] ?? defaultLimit) || defaultLimit);
+      (byCap.get(cap) ?? byCap.set(cap, []).get(cap)!).push(src);
+    }
+    const papers: Paper[] = [];
+    const sourceCounts: Record<string, number> = {};
+    for (const [cap, srcs] of byCap) {
+      if (signal?.aborted) break;
+      const res = await DataAggregator.fetchAll(query, srcs, pico, cap, signal);
+      papers.push(...(res.papers || []));
+      Object.assign(sourceCounts, res.sourceCounts || {});
+    }
+    return { papers, sourceCounts };
   },
 
   // Fetch the FULL planning corpus for screening: for each source use its

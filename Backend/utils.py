@@ -105,7 +105,12 @@ class AIService:
                 return ChatGoogleGenerativeAI(model=model_name, api_key=key, temperature=0)
             # DEFAULT / LOCAL: Ollama (llama3, mistral, qwen, LEADS, …) — no key.
             # A fixed seed + temperature=0 make local runs deterministic/reproducible.
-            return ChatOllama(model=model_name, temperature=0, base_url=ollama_base, seed=Config.RUN_SEED)
+            # num_predict is a safety ceiling: high enough for any legitimate output
+            # (PICO JSON, criteria, summaries, extraction) but low enough that a model
+            # that fails to stop can't run away for tens of thousands of tokens and
+            # wedge Ollama's single inference slot.
+            return ChatOllama(model=model_name, temperature=0, base_url=ollama_base,
+                              seed=Config.RUN_SEED, num_predict=4096)
         except Exception as e:
             print(f"[get_model] AI connection error for {model_name}: {e}")
             return None
@@ -179,8 +184,11 @@ class AIService:
     #         return None
             
     @staticmethod
-    def infer_pico_and_query(goal: str, model_name: str, previous_goal: str = "", prior: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Extract PICO and criteria from the research goal.
+    def infer_pico_and_query(goal: str, model_name: str, previous_goal: str = "", prior: Optional[Dict[str, Any]] = None, framework: str = "pico") -> Dict[str, Any]:
+        """Extract the question frame + criteria from the research goal.
+
+        framework="pico" -> Population/Intervention/Comparator/Outcome (default).
+        framework="pcc"  -> Population/Concept/Context (JBI scoping review).
 
         Core rule: never CONTRADICT what the user actually wrote. Preserve their
         literal phrasing for elements they specified. For elements they did NOT
@@ -188,6 +196,9 @@ class AIService:
         stated topic — never a narrow stereotype.
         """
         model = AIService.get_model(model_name)
+
+        if (framework or "pico").lower() == "pcc":
+            return AIService._infer_pcc(goal, model, prior)
 
         system_msg = SystemMessage(content=(
             "You are a clinical research methodologist helping a researcher scaffold "
@@ -345,6 +356,93 @@ JSON shape:
             "inclusion": [],
             "exclusion": [],
         }
+
+    @staticmethod
+    def _infer_pcc(goal: str, model, prior: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """PCC (JBI scoping review): extract Population / Concept / Context plus
+        eligibility criteria. Returns keys population/concept/context/inclusion/
+        exclusion (the caller maps Concept onto the search anchor)."""
+        system_msg = SystemMessage(content=(
+            "You are a research methodologist scaffolding a JBI scoping review using the "
+            "PCC frame (Population, Concept, Context). Scoping reviews MAP the extent, range "
+            "and nature of evidence rather than test an intervention's effect — so there is "
+            "no comparator or outcome. Stay loyal to the user's wording for any element they "
+            "stated; for unstated elements infer a BROAD, INCLUSIVE default. Never invent "
+            "narrow specifics the user did not state."
+        ))
+        _has_prior = isinstance(prior, dict) and any(
+            str(prior.get(k) or "").strip() for k in ("population", "concept", "context", "p", "i", "c")
+        )
+        if _has_prior:
+            _inc = "\n".join(f"    - {x}" for x in (prior.get("inclusion") or [])) or "    (none)"
+            _exc = "\n".join(f"    - {x}" for x in (prior.get("exclusion") or [])) or "    (none)"
+            intro = f"""EXISTING SCOPING FRAME from the previous turn — REFINE it, do not rebuild it:
+  Population: {prior.get('population') or prior.get('p', '')}
+  Concept:    {prior.get('concept') or prior.get('i', '')}
+  Context:    {prior.get('context') or prior.get('c', '')}
+  Inclusion criteria:
+{_inc}
+  Exclusion criteria:
+{_exc}
+
+The researcher now asks to MODIFY this frame: "{goal}"
+Apply ONLY the requested change and keep every other operationalised detail intact."""
+        else:
+            intro = f'Current Research Goal: "{goal}"'
+
+        prompt = f"""
+{intro}
+
+Extract these elements for a scoping review into a JSON object. RULES:
+1. STATED elements — preserve the user's literal phrasing verbatim.
+2. UNSTATED elements — supply a BROAD, INCLUSIVE default (scoping reviews are wide by design).
+3. Each element is a SPECIFIC phrase (5–18 words). Examples:
+     • Population: "Community-dwelling older adults (65+), any comorbidity"
+     • Concept: "Use of telehealth for chronic disease self-management"
+     • Context: "Primary-care and community settings in high-income countries, 2010–present"
+4. Generate 5–7 inclusion and 5–7 exclusion criteria (each 8–22 words, operationalised),
+   covering study/source types eligible, population scope, concept scope, context limits,
+   date/language, and evidence-source restrictions. Scoping reviews INCLUDE diverse source
+   types (empirical studies, reviews, grey literature) — reflect that.
+
+JSON shape:
+{{
+    "population": "Population — 5-18 word phrase",
+    "concept": "Concept — the core idea/phenomenon/intervention being mapped (5-18 words)",
+    "context": "Context — setting, geography, timeframe (5-18 words)",
+    "inclusion": ["5-7 specific inclusion criteria"],
+    "exclusion": ["5-7 specific exclusion criteria"]
+}}
+"""
+        try:
+            response = model.invoke([system_msg, HumanMessage(content=prompt)])
+            data = AIService._extract_json(response.content)
+            if data:
+                def clean_item(item):
+                    if isinstance(item, dict):
+                        return str(list(item.values())[0]) if item.values() else str(item)
+                    if isinstance(item, str):
+                        c = re.sub(r"^[^:]*:\s*", "", item)
+                        c = re.sub(r"[{}]", "", c)
+                        return re.sub(r"['\"]", "", c).strip()
+                    return str(item).strip()
+
+                def _clean(v):
+                    s = "" if v is None else str(v).strip()
+                    if s.lower() in {"n/a", "na", "none", "not stated", "unspecified",
+                                     "not specified", "any", "empty", "null"}:
+                        return ""
+                    return s
+                return {
+                    "population": _clean(data.get("population") or data.get("p")),
+                    "concept": _clean(data.get("concept") or data.get("i")),
+                    "context": _clean(data.get("context") or data.get("c")),
+                    "inclusion": [clean_item(x) for x in data.get("inclusion", []) if x][:8],
+                    "exclusion": [clean_item(x) for x in data.get("exclusion", []) if x][:8],
+                }
+        except Exception as e:
+            print(f"PCC analysis error: {e}")
+        return {"population": "", "concept": "", "context": "", "inclusion": [], "exclusion": []}
 
     @staticmethod
     def _pico_to_search_anchors(text: str) -> List[str]:
@@ -1929,41 +2027,62 @@ OUTPUT FORMAT:
 
 
     @staticmethod
-    def generate_formal_question(pico: PICOCriteria, model_name: str, history: list) -> str:
-        """Refines the research question by building on previous iterations."""
+    def generate_formal_question(pico: PICOCriteria, model_name: str, history: list, goal: str = "") -> str:
+        """Compose the formal research question/objective FAITHFULLY from the frame
+        elements and the researcher's stated goal. Framework-aware: a PICO effect
+        question, or a PCC scoping objective. Deliberately anti-drift — it must not
+        introduce concepts the elements/goal don't contain."""
         model = AIService.get_model(model_name)
-        
+
         past_questions = [h['formal_question'] for h in history if 'formal_question' in h]
         history_context = "\n".join([f"- Iteration {i+1}: {q}" for i, q in enumerate(past_questions)])
-        
+
+        import frameworks
+        fw = frameworks.normalize(getattr(pico, "framework", "pico"))
+        frame_meta = frameworks.framework_of(fw)
+        elems = "\n".join(f"        - {label}: {val or '(not specified)'}" for _id, label, val in pico.element_items())
+        if fw == "pcc":
+            structure = ('Phrase it as a scoping-review OBJECTIVE that maps the concept, e.g. '
+                         '"This scoping review maps [Concept] among [Population] in [Context]." '
+                         'A scoping review does NOT test an effect — never use "does/compared to/result in".')
+        else:
+            structure = ('Use the structure "In [Population], does [Intervention] compared to [Comparator] '
+                         'affect [Outcome]?" (adapt the verb naturally, but keep all four elements).')
+
         prompt = f"""
-        You are an expert Clinical Research Librarian. 
-        Task: Refine the current research question based on new user input and previous iterations.
+        You are an expert research librarian composing the formal {"objective" if fw == "pcc" else "question"} for a review.
+        It MUST be faithful to the frame elements and the researcher's stated goal below — this is the
+        single most important rule.
 
-        PREVIOUS ITERATIONS:
-        {history_context if history_context else "None (This is the first draft)"}
+        RESEARCHER'S STATED GOAL (source of truth for topic and wording):
+        "{goal or '(not provided — rely on the frame elements)'}"
 
-        CURRENT UPDATED PICO:
-        - Population: {pico.population}
-        - Intervention: {pico.intervention}
-        - Comparator: {pico.comparator}
-        - Outcome: {pico.outcome}
+        {frame_meta['label']} ELEMENTS (use these values; do not substitute or paraphrase the core concepts):
+{elems}
 
-        GOAL:
-        Synthesize a single, formal research question. 
-        - If the user provided feedback in the latest turn, ensure the new question reflects that adjustment.
-        - Maintain the "In [P], does [I] compared to [C] result in [O]?" structure.
-        - Ensure it is more specific and refined than the previous versions.
-        - Don't return any preamble or filler like "Based on the input here is your research question".
-    
-        Return ONLY the refined question.
+        PREVIOUS ITERATIONS (keep consistent with these; do not drift the topic):
+        {history_context if history_context else "None (this is the first draft)"}
+
+        RULES:
+        - Build the {"objective" if fw == "pcc" else "question"} DIRECTLY from the element values above; every
+          specified element must appear, using the element's own wording (light grammatical smoothing only).
+        - Do NOT introduce any population, intervention, comparator, outcome, concept, or context that is not
+          present in the elements or the stated goal. Do NOT invent ages, doses, timeframes, settings, or
+          subgroups that were not given.
+        - Stay on the researcher's exact topic — never swap a concept for a related-but-different one.
+        - {structure}
+        - One sentence, no preamble or filler.
+
+        Return ONLY the {"objective" if fw == "pcc" else "question"}.
         """
-        
+
         try:
             from langchain_core.messages import HumanMessage
             response = model.invoke([HumanMessage(content=prompt)])
             return response.content.strip().strip('"')
         except Exception:
+            if fw == "pcc":
+                return f"This scoping review maps {pico.concept} among {pico.population} in {pico.context}."
             return f"In {pico.population}, what is the effect of {pico.intervention} vs {pico.comparator} on {pico.outcome}?"
 
 

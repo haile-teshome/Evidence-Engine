@@ -40,24 +40,48 @@ def clean_markup(s: Optional[str]) -> str:
 
 @dataclass
 class PICOCriteria:
-    """PICO framework for systematic review including I/E criteria."""
+    """Question frame for a review. Holds PICO (population/intervention/
+    comparator/outcome) and PCC (population/concept/context) elements; the
+    `framework` field selects which set is active. Kept as one dataclass so the
+    legacy PICO machinery keeps working while PCC rides alongside."""
     population: str = ""
     intervention: str = ""
     comparator: str = ""
     outcome: str = ""
-    inclusion_criteria: str = ""  
-    exclusion_criteria: str = ""  
-    
+    # PCC (scoping) elements — population is shared with PICO above.
+    concept: str = ""
+    context: str = ""
+    framework: str = "pico"
+    inclusion_criteria: str = ""
+    exclusion_criteria: str = ""
+
     def to_dict(self) -> Dict[str, str]:
-        """Convert to dictionary for AI prompting and state management."""
+        """Convert to dictionary for AI prompting and state management. Carries
+        both the PICO short keys (p/i/c/o) and the PCC keys so either frame's
+        consumers find what they need."""
         return {
             'p': self.population,
             'i': self.intervention,
             'c': self.comparator,
             'o': self.outcome,
+            'population': self.population,
+            'concept': self.concept,
+            'context': self.context,
+            'framework': self.framework,
             'inclusion': self.inclusion_criteria,
             'exclusion': self.exclusion_criteria
         }
+
+    def element_items(self):
+        """Ordered [(id, label, value)] for the ACTIVE framework — the single
+        thing framework-aware prompts/UI should iterate over."""
+        from frameworks import element_defs
+        vals = {
+            "population": self.population, "intervention": self.intervention,
+            "comparator": self.comparator, "outcome": self.outcome,
+            "concept": self.concept, "context": self.context,
+        }
+        return [(e["id"], e["label"], vals.get(e["id"], "")) for e in element_defs(self.framework)]
 
 
 @dataclass
