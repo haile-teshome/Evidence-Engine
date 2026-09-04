@@ -546,9 +546,11 @@ export function PrismaFlow({
                 <div className={EXCLUDED_BOX_STYLE}>
                   <div className="font-semibold mb-0.5">
                     <EditableText value={lbl("ftExcTitle", "Studies excluded")} onSave={v => setL("ftExcTitle", v)} />
-                    {" "}(<span className="font-bold text-[#166534]">n = {ftExcItems.length > 0
-                      ? ftExcItems.reduce((s, it) => s + it.count, 0)
-                      : <EditableNumber value={n("ftExcluded", ftExcluded)} onSave={v => setN("ftExcluded", v)} />}</span>)
+                    {" "}(<span className="font-bold text-[#166534]">n = <EditableNumber
+                      value={n("ftExcluded", ftExcItems.length > 0
+                        ? ftExcItems.reduce((s, it) => s + it.count, 0)
+                        : ftExcluded)}
+                      onSave={v => setN("ftExcluded", v)} /></span>)
                   </div>
                   {ftExcItems.map(it => (
                     <div key={it.key} className="flex items-start gap-1 py-0.5">

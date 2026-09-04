@@ -22,6 +22,7 @@ import {
 } from "../components/ui/alert-dialog";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
+import { frameworkOf, labelFor, type FrameworkId } from "../lib/frameworks";
 
 // PICO match → pill styling for the expanded evidence boxes.
 const matchTone = (m?: string) =>
@@ -45,11 +46,14 @@ export function FullTextPage() {
     return n;
   });
 
-  // Reorderable (non-frozen) columns: PICO + each criterion + Reason. Keep/
-  // Decision/Title stay pinned. Order persists and reconciles with the current
-  // criteria set (new criteria append, removed ones drop out). These hooks run
-  // before any early return so hook order stays stable.
-  const movableIds = ["population", "intervention", "comparator", "outcome",
+  // Reorderable (non-frozen) columns: the active framework's elements + each
+  // criterion + Reason. Keep/Decision/Title stay pinned. Order persists and
+  // reconciles with the current element/criteria set (new ones append, removed
+  // ones drop out). These hooks run before any early return so hook order stays
+  // stable.
+  const fw = frameworkOf(s.framework);
+  const frameIds = fw.elements.map(e => e.id);
+  const movableIds = [...frameIds,
     ...s.inclusion.map(c => `c:${c}`), ...s.exclusion.map(c => `c:${c}`), "reason"];
   const [rawColOrder, setRawColOrder] = useState<string[]>(() => {
     try { const saved = JSON.parse(localStorage.getItem("ee:fulltext-col-order") || "null"); return Array.isArray(saved) ? saved : []; } catch { return []; }
@@ -157,11 +161,10 @@ export function FullTextPage() {
   // later via snowball). Offer to screen just these without redoing the rest.
   const newPapers = ft ? passed.filter(p => !ft.some(r => r.paper_id === p.paper_id)) : [];
 
-  const CAP = (x: string) => x.charAt(0).toUpperCase() + x.slice(1);
   const movableCols = colOrder.map(id => {
     if (id === "reason") return { id, label: "Reason", title: "" };
     if (id.startsWith("c:")) { const c = id.slice(2); return { id, label: c, title: c }; }
-    return { id, label: CAP(id), title: "" };
+    return { id, label: labelFor(s.framework, id), title: "" };
   });
 
   // Render one movable body cell for a given column id, reproducing the PICO /
@@ -194,13 +197,13 @@ export function FullTextPage() {
         </td>
       );
     }
-    // PICO column
-    const k = id as "population" | "intervention" | "comparator" | "outcome";
-    const pe = row.picoEvidence?.[k];
+    // Frame-element column (PICO population/intervention/comparator/outcome or
+    // PCC population/concept/context), keyed by element id.
+    const pe = row.picoEvidence?.[id];
     if (!pe || !pe.value) {
-      const naReason = (s.pico[k] || "").trim()
-        ? `The full text did not provide enough information to judge the ${k}.`
-        : `No ${k} was specified in your PICO frame, so there is nothing to assess this article against. Add one on the Home page to enable this check.`;
+      const naReason = (s.pico[id] || "").trim()
+        ? `The full text did not provide enough information to judge the ${id}.`
+        : `No ${id} was specified in your ${fw.label} frame, so there is nothing to assess this article against. Add one on the Home page to enable this check.`;
       return (
         <td key={id} className="px-3 py-2 bg-inherit">
           <ScrollAwarePopover>
@@ -209,7 +212,7 @@ export function FullTextPage() {
             </PopoverTrigger>
             <PopoverContent className="w-80 text-xs space-y-2 relative pr-7">
               <PopoverClose className="absolute right-2 top-2 size-5 grid place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" title="Close"><XIcon className="size-3.5" /></PopoverClose>
-              <div><div className="font-medium mb-1 capitalize">{k}</div><div className="text-muted-foreground"><span className="font-medium text-foreground/80">Not assessed.</span> {naReason}</div></div>
+              <div><div className="font-medium mb-1 capitalize">{id}</div><div className="text-muted-foreground"><span className="font-medium text-foreground/80">Not assessed.</span> {naReason}</div></div>
             </PopoverContent>
           </ScrollAwarePopover>
         </td>
@@ -221,7 +224,7 @@ export function FullTextPage() {
           <PopoverTrigger asChild><button><PicoBadge match={pe.match} /></button></PopoverTrigger>
           <PopoverContent className="w-80 text-xs space-y-2 relative pr-7">
             <PopoverClose className="absolute right-2 top-2 size-5 grid place-items-center rounded text-muted-foreground hover:bg-muted hover:text-foreground" title="Close"><XIcon className="size-3.5" /></PopoverClose>
-            <div><div className="font-medium mb-1 capitalize">{k}</div><div className="text-muted-foreground">{pe.value}</div></div>
+            <div><div className="font-medium mb-1 capitalize">{id}</div><div className="text-muted-foreground">{pe.value}</div></div>
             <div>
               <div className="font-medium mb-1">Evidence from text</div>
               {pe.evidence ? (
@@ -348,7 +351,7 @@ export function FullTextPage() {
                 </div>
                 <div className="ml-auto flex items-center gap-1 shrink-0">
                   {ftQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleFt.length}/{ft.length}</span>}
-                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides)} className="h-8 px-2" title="Download results as Excel (XLSX)">
+                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides, s.framework)} className="h-8 px-2" title="Download results as Excel (XLSX)">
                     <Download className="size-4" />
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
@@ -368,7 +371,7 @@ export function FullTextPage() {
                   <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Expand the table to full screen">
                     <Maximize2 className="size-4" />
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
+                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides, s.framework)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
                     <Download className="size-4" />
                   </Button>
                 </div>
@@ -453,7 +456,7 @@ export function FullTextPage() {
                   </tr>
                   {isOpen && (
                     <tr className="border-b border-border/60 bg-muted/30">
-                      <td colSpan={8 + allCriteria.length} className="p-0">
+                      <td colSpan={3 + movableCols.length} className="p-0">
                         <div className="sticky left-0 w-[min(920px,92vw)] p-4 space-y-4">
                           <div className="rounded-lg border bg-card p-3.5 shadow-sm">
                             <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">Abstract</div>
@@ -468,18 +471,18 @@ export function FullTextPage() {
                             </div>
                           )}
 
-                          {/* PICO evidence — each element in its own box */}
-                          {(["population", "intervention", "comparator", "outcome"] as const).some(k => row.picoEvidence?.[k]?.value) && (
+                          {/* Frame-element evidence — each element in its own box */}
+                          {fw.elements.some(el => row.picoEvidence?.[el.id]?.value) && (
                             <div>
-                              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">PICO evidence</div>
+                              <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-2">{fw.label} evidence</div>
                               <div className="grid md:grid-cols-2 gap-2.5">
-                                {(["population", "intervention", "comparator", "outcome"] as const).map(k => {
-                                  const pe = row.picoEvidence?.[k];
+                                {fw.elements.map(el => {
+                                  const pe = row.picoEvidence?.[el.id];
                                   if (!pe || !pe.value) return null;
                                   return (
-                                    <div key={k} className="rounded-lg border bg-card p-3 shadow-sm space-y-1.5">
+                                    <div key={el.id} className="rounded-lg border bg-card p-3 shadow-sm space-y-1.5">
                                       <div className="flex items-center justify-between gap-2">
-                                        <span className="text-sm font-medium capitalize">{k}</span>
+                                        <span className="text-sm font-medium">{el.label}</span>
                                         <span className={`px-2 py-0.5 rounded-full text-[11px] font-medium border ${matchTone(pe.match)}`}>{matchLabel(pe.match)}</span>
                                       </div>
                                       <p className="text-xs text-foreground/80">{pe.value}</p>
@@ -553,7 +556,9 @@ async function downloadFullTextXlsx(
   rows: FullTextResult[],
   criteria: string[],
   overrides: Record<string, "Include" | "Exclude"> = {},
+  framework: FrameworkId = "pico",
 ) {
+  const els = frameworkOf(framework).elements;
   const wb = new ExcelJS.Workbook();
   wb.creator = "Evidence Engine";
   wb.created = new Date();
@@ -562,7 +567,9 @@ async function downloadFullTextXlsx(
     views: [{ state: "frozen", xSplit: 2, ySplit: 1 }],
   });
 
-  // Static columns + one column per criterion.
+  // Static columns + one match/value/evidence triple per element of the ACTIVE
+  // framework (PICO keeps P/I/C/O headers; other frames use the element label)
+  // + one column per criterion.
   const baseCols = [
     { header: "Decision",      key: "decision",  width: 12 },
     { header: "AI Decision",   key: "ai_decision", width: 12 },
@@ -571,18 +578,14 @@ async function downloadFullTextXlsx(
     { header: "Source",        key: "source",    width: 14 },
     { header: "URL",           key: "url",       width: 38 },
     { header: "Reason",        key: "reason",    width: 60 },
-    { header: "P · match",     key: "p_match",   width: 12 },
-    { header: "P · value",     key: "p_value",   width: 28 },
-    { header: "P · evidence",  key: "p_evidence", width: 48 },
-    { header: "I · match",     key: "i_match",   width: 12 },
-    { header: "I · value",     key: "i_value",   width: 28 },
-    { header: "I · evidence",  key: "i_evidence", width: 48 },
-    { header: "C · match",     key: "c_match",   width: 12 },
-    { header: "C · value",     key: "c_value",   width: 28 },
-    { header: "C · evidence",  key: "c_evidence", width: 48 },
-    { header: "O · match",     key: "o_match",   width: 12 },
-    { header: "O · value",     key: "o_value",   width: 28 },
-    { header: "O · evidence",  key: "o_evidence", width: 48 },
+    ...els.flatMap(el => {
+      const h = framework === "pico" ? el.letter : el.label;
+      return [
+        { header: `${h} · match`,    key: `${el.id}_match`,    width: 12 },
+        { header: `${h} · value`,    key: `${el.id}_value`,    width: 28 },
+        { header: `${h} · evidence`, key: `${el.id}_evidence`, width: 48 },
+      ];
+    }),
     { header: "Inclusion met", key: "inc",       width: 14 },
     { header: "Excl. violations", key: "exc",    width: 16 },
   ];
@@ -614,21 +617,15 @@ async function downloadFullTextXlsx(
       source:   r.Source,
       url:      r.URL,
       reason:   r.Reason,
-      p_match:  pe.population?.match || "",
-      p_value:  pe.population?.value || "",
-      p_evidence: pe.population?.evidence || "",
-      i_match:  pe.intervention?.match || "",
-      i_value:  pe.intervention?.value || "",
-      i_evidence: pe.intervention?.evidence || "",
-      c_match:  pe.comparator?.match || "",
-      c_value:  pe.comparator?.value || "",
-      c_evidence: pe.comparator?.evidence || "",
-      o_match:  pe.outcome?.match || "",
-      o_value:  pe.outcome?.value || "",
-      o_evidence: pe.outcome?.evidence || "",
       inc:      r.inclusion_score,
       exc:      r.exclusion_violations,
     };
+    for (const el of els) {
+      const cell = pe[el.id];
+      rowData[`${el.id}_match`]    = cell?.match || "";
+      rowData[`${el.id}_value`]    = cell?.value || "";
+      rowData[`${el.id}_evidence`] = cell?.evidence || "";
+    }
     criteria.forEach((c, i) => {
       const vote = r.criteriaEval?.[c] ?? "";
       const ev = r.criteriaEvidence?.[c];
@@ -669,9 +666,9 @@ async function downloadFullTextXlsx(
       };
     }
 
-    // Colour the four PICO match cells.
-    for (const key of ["p_match", "i_match", "c_match", "o_match"]) {
-      const cell = row.getCell(key);
+    // Colour each element's match cell.
+    for (const el of els) {
+      const cell = row.getCell(`${el.id}_match`);
       const v = String(cell.value || "").toLowerCase();
       if (v && PICO_MATCH_FILL[v]) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: PICO_MATCH_FILL[v] } };
