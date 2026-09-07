@@ -20,7 +20,7 @@ import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuIte
 import { AnalysisProgress, Stage, StageId } from "../components/AnalysisProgress";
 import { FormattedText } from "../lib/formattedText";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../components/ui/collapsible";
-import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, Download, RotateCcw, Paperclip, Loader2, Hand, Files, Telescope, Search, SlidersHorizontal } from "lucide-react";
+import { Sparkles, Send, ChevronDown, X, Plus, Wand2, Check, Lightbulb, Copy, Download, RotateCcw, Paperclip, Loader2, Files, Telescope, Search, SlidersHorizontal } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { toast } from "sonner";
 
@@ -928,6 +928,12 @@ export function HomePage() {
   const attachRef = useRef<HTMLInputElement>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [input, setInput] = useState("");
+  // Free-form / custom requests are structured by the LLM (never used verbatim).
+  // Shared spinner, the inferred research question, and the draft description for
+  // the Study-design "Infer with AI" boxes.
+  const [inferring, setInferring] = useState(false);
+  const [inferredQuestion, setInferredQuestion] = useState("");
+  const [picoDraft, setPicoDraft] = useState("");
   // Deep scan: run one extra logged, adaptive search round after the first pass.
   // Off by default so the quick path is unchanged; persisted across reloads.
   const [deepScan, setDeepScan] = useState(() => {
@@ -1352,6 +1358,69 @@ export function HomePage() {
     }
   }
 
+  // Turn a plain-language / custom request into a structured strategy via the LLM
+  // — the framework, PICO (or PCC) elements, inclusion/exclusion, the search query
+  // and the research question — instead of using the raw text verbatim. Used by the
+  // Study-design PICO box so a pasted custom request is always interpreted.
+  async function inferStrategyFromText(text: string): Promise<boolean> {
+    const t = text.trim();
+    if (!t) return false;
+    setInferring(true);
+    try {
+      let fw = s.framework;
+      if (s.history.length === 0 && !fwOverrideRef.current) {
+        try { fw = await AIService.detectFramework(t); s.setFramework(fw); } catch { /* keep current */ }
+      }
+      const prior = s.history.length > 0
+        ? { p: s.pico.population, i: s.pico.intervention, c: s.pico.comparator, o: s.pico.outcome,
+            concept: s.pico.concept, context: s.pico.context, inclusion: s.inclusion, exclusion: s.exclusion }
+        : null;
+      const analysis = await AIService.inferPicoAndQuery(t, prior, fw);
+      const resolvedFw = analysis.framework || fw;
+      const newPico = {
+        population: analysis.p, intervention: analysis.i, comparator: analysis.c, outcome: analysis.o,
+        concept: analysis.concept || "", context: analysis.context || "", framework: resolvedFw,
+      };
+      s.setPico(newPico);
+      s.setFramework(resolvedFw);
+      s.setInclusion(analysis.inclusion);
+      s.setExclusion(analysis.exclusion);
+      s.setQuery(analysis.query);
+      s.setUnifiedSearchQuery(analysis.query);
+      try { setInferredQuestion(await AIService.generateFormalQuestion(newPico, t)); } catch { /* optional */ }
+      toast.success("Strategy inferred from your description");
+      return true;
+    } catch {
+      toast.error("Couldn't infer a strategy from that. Try rephrasing.");
+      return false;
+    } finally {
+      setInferring(false);
+    }
+  }
+
+  // Regenerate the search string from the current framework elements via the LLM,
+  // so the query reflects the structured strategy instead of a hand-typed string.
+  async function rebuildQueryFromPico(): Promise<void> {
+    const desc = frameworkOf(s.framework).elements
+      .map(el => `${el.label}: ${((s.pico as Record<string, string>)[el.id] || "").trim()}`)
+      .filter(line => line.split(": ")[1])
+      .join(". ");
+    if (!desc) { toast.error("Fill in the elements first, then rebuild the query."); return; }
+    setInferring(true);
+    try {
+      const prior = { p: s.pico.population, i: s.pico.intervention, c: s.pico.comparator, o: s.pico.outcome,
+                      concept: s.pico.concept, context: s.pico.context, inclusion: s.inclusion, exclusion: s.exclusion };
+      const analysis = await AIService.inferPicoAndQuery(desc, prior, s.framework);
+      s.setQuery(analysis.query);
+      s.setUnifiedSearchQuery(analysis.query);
+      toast.success("Search string rebuilt from your elements");
+    } catch {
+      toast.error("Couldn't rebuild the query.");
+    } finally {
+      setInferring(false);
+    }
+  }
+
   async function handleSubmit(text: string, opts: { skipClarify?: boolean } = {}) {
     const t = text.trim();
     if (!t) return;
@@ -1362,32 +1431,48 @@ export function HomePage() {
     // pipeline. Only a genuine search goal runs that. Skipped for refinements
     // (skipClarify), which are always a deliberate search action.
     if (!opts.skipClarify) {
-      let intent: "documents" | "search" | "chat" = "search";
-      try {
-        intent = await AIService.routeIntent(t, docCorpus.length > 0);
-      } catch {
-        intent = docCorpus.length > 0 && /\?\s*$/.test(t) ? "documents" : "search";
-      }
-      if (intent === "documents" || intent === "chat") {
-        // Answer from the collected library for BOTH intents so the assistant never
-        // denies access to sources the user has. Open library questions go to the
-        // tool-calling agent when a capable model is available (it searches and reads
-        // on demand); freshly attached docs and the no-capable-model case use the
-        // deterministic retrieve-and-read path instead.
-        const hasLibrary = (s.rawPapers?.length ?? 0) > 0;
-        if (!pendingDocs.length && hasLibrary) {
-          let agentModel = supportsTools(s.model) ? s.model : "";
-          let note = "";
-          if (!agentModel) {
-            const qwen = localModels.find(m => /qwen2\.5/i.test(m)) || localModels.find(m => /qwen2/i.test(m)) || localModels.find(m => supportsTools(m));
-            if (qwen) { agentModel = qwen; note = `${s.model} can't use tools, so I switched to ${qwen} for this answer.`; }
-          }
-          if (agentModel) { await answerWithAgent(t, agentModel, note); return; }
+      // A freshly attached file is always answered from that file, with its
+      // extracted text sent as chat context, regardless of how the intent router
+      // would classify the message. "Add a file to the chat" => that file grounds
+      // the reply and lifts response quality.
+      if (pendingDocs.length) { await answerFromLibrary(t); return; }
+
+      // Brand-new review with nothing collected yet: the first substantive message
+      // is a research goal, so always run the infer + search pipeline. This keeps a
+      // conversational-sounding goal from being routed to a verbatim chat reply
+      // instead of being structured by the LLM into PICO + question + search. Short
+      // greetings / how-tos still fall through to a plain chat.
+      const chatty = /^(hi|hey|hello|thanks|thank you|ok(ay)?|yo|sup|help|how (do|can|does)\b|what (is|are|can) you\b)/i.test(t);
+      const forceSearch = s.history.length === 0 && (s.rawPapers?.length ?? 0) === 0 && !chatty && t.length >= 10;
+
+      if (!forceSearch) {
+        let intent: "documents" | "search" | "chat" = "search";
+        try {
+          intent = await AIService.routeIntent(t, docCorpus.length > 0);
+        } catch {
+          intent = docCorpus.length > 0 && /\?\s*$/.test(t) ? "documents" : "search";
         }
-        if (pendingDocs.length || hasLibrary) { await answerFromLibrary(t); return; }
-        // No library yet — a plain conversational reply (greetings, how-to).
-        await runChat(t);
-        return;
+        if (intent === "documents" || intent === "chat") {
+          // Answer from the collected library for BOTH intents so the assistant never
+          // denies access to sources the user has. Open library questions go to the
+          // tool-calling agent when a capable model is available (it searches and reads
+          // on demand); the no-capable-model case uses the deterministic path instead.
+          const hasLibrary = (s.rawPapers?.length ?? 0) > 0;
+          if (hasLibrary) {
+            let agentModel = supportsTools(s.model) ? s.model : "";
+            let note = "";
+            if (!agentModel) {
+              const qwen = localModels.find(m => /qwen2\.5/i.test(m)) || localModels.find(m => /qwen2/i.test(m)) || localModels.find(m => supportsTools(m));
+              if (qwen) { agentModel = qwen; note = `${s.model} can't use tools, so I switched to ${qwen} for this answer.`; }
+            }
+            if (agentModel) { await answerWithAgent(t, agentModel, note); return; }
+            await answerFromLibrary(t);
+            return;
+          }
+          // No library yet — a plain conversational reply (greetings, how-to).
+          await runChat(t);
+          return;
+        }
       }
       // Genuine search: newly-attached docs stay in the corpus but lose "focus".
       setPendingDocIds([]);
@@ -1713,7 +1798,7 @@ export function HomePage() {
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
       {s.history.length === 0 && !analyzing && (
-        <Alert className="flex items-center gap-2"><Hand className="size-4 shrink-0 text-primary" /><AlertDescription>Welcome! Describe your research goal below to generate a strategy and see initial findings.</AlertDescription></Alert>
+        <Alert className="flex items-center gap-2"><span className="shrink-0 text-base leading-none" role="img" aria-label="Waving hand">👋</span><AlertDescription>Welcome! Describe your research goal below to generate a strategy and see initial findings.</AlertDescription></Alert>
       )}
 
       {/* One chronological thread: search (history) entries and chat (Q&A) turns
@@ -2093,6 +2178,25 @@ export function HomePage() {
                   </div>
                 </TabsContent>
                 <TabsContent value="pico" className="mt-0 space-y-3">
+                  {/* Structure a free-form / custom request with the LLM instead of
+                      taking it verbatim: fills the elements, question and search below. */}
+                  <div className="rounded-lg border bg-muted/30 p-3 space-y-2">
+                    <label className="text-xs font-medium text-foreground">Describe your review in plain language</label>
+                    <Textarea value={picoDraft} onChange={e => setPicoDraft(e.target.value)} rows={2}
+                      placeholder={`e.g. Does intermittent fasting improve HbA1c in adults with type 2 diabetes vs continuous calorie restriction?`} />
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] text-muted-foreground">Infers the {frameworkOf(s.framework).label} elements, research question and search string.</p>
+                      <Button size="sm" className="h-8 gap-1.5 shrink-0" disabled={inferring || !picoDraft.trim()}
+                        onClick={async () => { const ok = await inferStrategyFromText(picoDraft); if (ok) setPicoDraft(""); }}>
+                        {inferring ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}Infer with AI
+                      </Button>
+                    </div>
+                  </div>
+                  {inferredQuestion && (
+                    <p className="text-xs italic text-muted-foreground border-l-2 border-primary/40 pl-2.5 leading-snug">
+                      <span className="not-italic font-medium text-foreground">Research question: </span>{inferredQuestion}
+                    </p>
+                  )}
                   {frameworkOf(s.framework).elements.map(el => (
                     <div key={el.id}>
                       <label className="text-muted-foreground text-sm">{el.label}</label>
@@ -2166,7 +2270,14 @@ export function HomePage() {
                     )}
                   </div>
                   <div>
-                    <label className="text-muted-foreground text-sm block mb-1.5">Final Search String</label>
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <label className="text-muted-foreground text-sm">Final Search String</label>
+                      <Button size="sm" variant="ghost" className="h-7 gap-1.5 text-xs px-2 shrink-0"
+                        onClick={rebuildQueryFromPico} disabled={inferring}
+                        title="Regenerate the query from your elements with the LLM instead of hand-editing">
+                        {inferring ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}Rebuild with AI
+                      </Button>
+                    </div>
                     <Textarea value={s.query} onChange={e => { s.setQuery(e.target.value); s.setUnifiedSearchQuery(e.target.value); }} rows={7} className="font-mono text-xs" />
                   </div>
                 </TabsContent>
