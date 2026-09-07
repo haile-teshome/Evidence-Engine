@@ -516,213 +516,255 @@ JSON shape:
         return out
 
     @staticmethod
-    def generate_mesh_query(pico: PICOCriteria, model_name: str, goal: str = "") -> str:
-        """Generate a high-sensitivity PubMed search string anchored to the user's literal phrases.
+    def generate_mesh_query(pico: PICOCriteria, model_name: str, goal: str = "",
+                            ground_mesh: bool = False, return_concepts: bool = False,
+                            seeds: Optional[List[Dict[str, Any]]] = None):
+        """Generate a high-sensitivity PubMed search by decomposing the question
+        into orthogonal concept blocks and AND-ing only the ones that narrow it.
 
-        The LLM is allowed to expand synonyms and add MeSH headings, but every
-        multi-word phrase the user actually wrote (e.g. "Mediterranean diet",
-        "type 2 diabetes") MUST appear verbatim somewhere in the final query.
-        This stops the model from silently broadening "Mediterranean diet" into
-        a generic "dietary intervention" concept and then retrieving any
-        nutrition paper.
+        Strategy (validated on CLEF-TAR): a search is an AND of concept blocks,
+        each an OR of synonyms + grounded MeSH for ONE concept. Precision comes
+        from AND-ing the *discriminating* facets; broad population facets
+        ("adults", "patients", "humans"), study-design facets ("RCT",
+        "observational"), and pure context facets (setting, country, year) are
+        dropped, since requiring them mostly deletes true hits without narrowing
+        scope. Compound facets ("records with BOTH medical AND dental data") are
+        split into separate blocks so the discriminating part (dental) stays
+        required instead of being merged into one over-broad OR list.
+
+        When ``ground_mesh`` is set, each kept concept's MeSH headings are
+        validated / expanded against real NCBI MeSH. When ``return_concepts`` is
+        set, returns ``(query, concepts)`` where concepts is the list of kept
+        blocks as ``[{"name", "tiab", "mesh"}]``; otherwise returns just the
+        query string. Every literal phrase the user wrote is kept verbatim.
         """
         model = AIService.get_model(model_name)
 
         def _strip_inferred_prefix(s: str) -> str:
             return re.sub(r"^\s*\(inferred\)\s*", "", s or "", flags=re.IGNORECASE)
 
-        # ---- 1. Extract CLEAN search anchors from operationalised PICO -------
-        # PICO fields may carry operationalised descriptions ("Adherence to a
-        # Mediterranean diet measured by validated index (e.g., MedDiet Score)")
-        # that are useful for the user-facing card but terrible as search terms.
-        # _pico_to_search_anchors strips parentheticals, operationalisation
-        # suffixes, and criterion-like fragments to leave noun-phrase anchors.
-        intervention_anchors = AIService._pico_to_search_anchors(pico.intervention or "")
-        outcome_anchors = AIService._pico_to_search_anchors(pico.outcome or "")
-        population_anchors = AIService._pico_to_search_anchors(pico.population or "")
+        # ---- 1. Gather source facets from every populated PICO / PCC field ---
+        # Works for both PICO (intervention/comparator/outcome) and PCC
+        # (concept/context); population is shared. Each populated field is raw
+        # material the LLM decomposes into orthogonal concepts below.
+        raw_fields = [
+            pico.intervention, getattr(pico, "concept", ""), pico.outcome,
+            getattr(pico, "context", ""), pico.population,
+        ]
+        field_desc: List[str] = []
+        for val in raw_fields:
+            v = _strip_inferred_prefix(val or "").strip()
+            if v:
+                field_desc.append(v)
+        source_lines = "\n".join(f"  - {d}" for d in field_desc) or "  - (none)"
+        goal_line = f'\nReview question: "{goal.strip()}"' if (goal or "").strip() else ""
 
-        # must_include is the union of clean intervention + outcome anchors.
-        # Population anchors are typically too broad to enforce and are kept
-        # out of the must-include set (they go to the LLM as context only).
-        must_include: List[str] = []
-        seen_lc: set[str] = set()
-        for phrase in intervention_anchors + outcome_anchors:
-            key = phrase.lower()
-            if key not in seen_lc:
-                seen_lc.add(key)
-                must_include.append(phrase)
+        # ---- 2. Decompose into orthogonal named concepts (plain synonyms) ----
+        # The LLM only produces synonyms + MeSH labels; grounding and PubMed
+        # syntax are assembled deterministically below.
+        prompt = f"""You are an expert clinical search librarian building a HIGH-SENSITIVITY PubMed search.
+Break the review below into its CORE SEARCH CONCEPTS and, for each concept, give a
+comprehensive list of synonyms and the relevant MeSH headings.
 
-        _ = goal  # reserved for future use; intentionally unused
+Review elements:
+{source_lines}{goal_line}
 
-        # ---- 2. Ask the LLM ONLY for synonyms (not PubMed syntax) ------------
-        # Small models reliably malform PubMed syntax. We restrict the LLM to
-        # its strength — generating term synonyms — and assemble the PubMed
-        # string deterministically in Python below. We pass the CLEAN anchors
-        # (not the operationalised PICO text) so the LLM sees real noun phrases
-        # and returns synonyms that actually appear in paper titles/abstracts.
-        intervention_clean = " | ".join(intervention_anchors) or _strip_inferred_prefix(pico.intervention or "")
-        outcome_clean = " | ".join(outcome_anchors) or _strip_inferred_prefix(pico.outcome or "")
-        population_clean = " | ".join(population_anchors) or _strip_inferred_prefix(pico.population or "")
+Rules:
+- Identify 2 to 5 ORTHOGONAL concepts (distinct ideas that do not overlap).
+- Split any compound facet into SEPARATE concepts. For example "records containing
+  both medical and dental data" is TWO concepts: an "electronic health records"
+  concept AND a "dental" concept. Never merge two distinct ideas into one list.
+- Give each SPECIFIC / discriminating idea (a named domain, condition, test, data
+  type, or intervention) its own concept. Include a broad population concept
+  (e.g. "adults", "patients") only if the review truly restricts to it, and keep it
+  as its own concept. Do NOT invent concepts for setting, country, or year.
+- For each concept list 6 to 15 terms: the user's exact phrase(s) verbatim,
+  singular/plural and hyphenation variants, British/American spellings, common
+  abbreviations and their expansions, and closely related wording for the SAME
+  idea. Stay on-concept; do not drift or over-broaden.
+- Also give 1 to 4 MeSH controlled-vocabulary headings per concept when they exist.
+- Use plain terms only: NO field tags, NO Boolean operators, NO quotation marks.
 
-        prompt = f"""
-You are an expert clinical search librarian building a HIGH-SENSITIVITY PubMed search.
-For each PICO concept below, produce a COMPREHENSIVE set of search terms so the final
-query captures every relevant paper — thorough, not generic, and not missing variants.
-DO NOT write any PubMed syntax — no square brackets, quotes, Boolean operators, or
-parentheses. Just the plain term strings.
+Return ONLY a JSON object of exactly this shape:
+{{"concepts": [{{"name": "<short concept label>", "terms": ["...", "..."], "mesh": ["...", "..."]}}, "..."]}}
 
-PICO concepts to expand:
-  intervention/exposure: {intervention_clean or "(none)"}
-  outcome:               {outcome_clean or "(none)"}
-  population:            {population_clean or "(none)"}
+EXAMPLE for "AI/ML prediction models using electronic health records with both medical and dental data":
+{{"concepts": [
+  {{"name": "Artificial intelligence", "terms": ["artificial intelligence", "AI", "machine learning", "deep learning", "predictive model", "prediction model", "clinical decision support", "decision support system", "neural network"], "mesh": ["Artificial Intelligence", "Machine Learning", "Decision Support Systems, Clinical"]}},
+  {{"name": "Electronic health records", "terms": ["electronic health record", "electronic health records", "EHR", "electronic medical record", "EMR", "electronic dental record", "health record"], "mesh": ["Electronic Health Records"]}},
+  {{"name": "Dental", "terms": ["dental", "dentistry", "oral health", "odontology", "dental record", "periodontal", "oral medicine"], "mesh": ["Dentistry", "Oral Health", "Dental Records"]}}
+]}}
 
-For each concept, the free-text synonym list should COVER THE WHOLE CONCEPT, including:
-  • the user's exact phrase(s), verbatim
-  • singular/plural and hyphenation variants (e.g. "pet owner", "pet owners", "pet-owner")
-  • British and American spellings (e.g. "behaviour"/"behavior")
-  • common abbreviations / acronyms AND their expansions (e.g. "T2DM", "type 2 diabetes")
-  • lay and technical phrasings authors actually use
-  • closely related wording for the SAME concept (e.g. "cat ownership" → "pet ownership",
-    "companion animal", "feline", "owning a cat")
-Stay on-concept: do NOT drift to a different idea or over-broaden into unrelated topics.
-Also give the relevant PubMed MeSH headings, including closely related / narrower headings.
+Output ONLY the JSON object. No explanation, no markdown, no code fences."""
 
-Return ONLY a JSON object with these exact keys:
-{{
-  "intervention_synonyms": [ "...", ...],   // 6-15 thorough synonyms / variants
-  "intervention_mesh":     [ "...", ...],   // 1-4 MeSH controlled-vocabulary headings
-  "outcome_synonyms":      [ "...", ...],   // 6-15
-  "outcome_mesh":          [ "...", ...],   // 1-4
-  "population_synonyms":   [ "...", ...],   // [] if the population is broad (all adults / humans)
-  "population_mesh":       [ "...", ...]
-}}
+        def _clean_term_list(raw: Any) -> List[str]:
+            out: List[str] = []
+            if isinstance(raw, list):
+                for x in raw:
+                    if isinstance(x, str):
+                        t = x.strip().strip('"').strip("'")
+                        # Strip stray PubMed syntax fragments the model may leak.
+                        t = re.sub(r"\[[A-Za-z]+\]", "", t)
+                        t = re.sub(r"[\[\]]", "", t)
+                        t = re.sub(r"\s+", " ", t).strip(" ,.;:")
+                        if "(" in t or ")" in t:
+                            continue
+                        if re.search(r"≥|>=|≤|<=|\bfollow.?up\b|\d+\s*\+?\s*(years?|months?)",
+                                      t, flags=re.IGNORECASE):
+                            continue
+                        if re.search(r"\b(measured by|defined by|assessed by|with follow|at baseline)\b",
+                                      t, flags=re.IGNORECASE):
+                            continue
+                        if 2 <= len(t) <= 45:
+                            out.append(t)
+            seen: set = set()
+            dedup: List[str] = []
+            for t in out:
+                k = t.lower()
+                if k not in seen:
+                    seen.add(k)
+                    dedup.append(t)
+            return dedup
 
-EXAMPLES:
-  For intervention = "Mediterranean diet":
-    intervention_synonyms: ["Mediterranean diet", "Mediterranean dietary pattern",
-                            "Mediterranean-style diet", "Med diet", "MedDiet",
-                            "Mediterranean eating pattern", "Cretan diet"]
-    intervention_mesh:     ["Diet, Mediterranean"]
-
-  For outcome = "longevity":
-    outcome_synonyms: ["longevity", "lifespan", "life span", "life expectancy",
-                       "all-cause mortality", "survival", "aging", "ageing", "healthspan"]
-    outcome_mesh:     ["Longevity", "Mortality", "Aging"]
-
-  For population = "humans" (broad → no narrowing terms):
-    population_synonyms: []
-    population_mesh:     []
-
-NEVER paraphrase the user's stated terms — if the intervention says "Mediterranean diet",
-the phrase "Mediterranean diet" MUST appear in intervention_synonyms exactly as written.
-"""
-
-        synonyms: Dict[str, Dict[str, List[str]]] = {
-            "intervention": {"tiab": [], "mesh": []},
-            "outcome":      {"tiab": [], "mesh": []},
-            "population":   {"tiab": [], "mesh": []},
-        }
+        concepts: List[Dict[str, Any]] = []
         try:
             r = model.invoke([HumanMessage(content=prompt)])
             data = AIService._extract_json(r.content) or {}
-
-            def _clean_term_list(raw: Any) -> List[str]:
-                out: List[str] = []
-                if isinstance(raw, list):
-                    for x in raw:
-                        if isinstance(x, str):
-                            t = x.strip().strip('"').strip("'")
-                            # Strip stray PubMed syntax fragments that may have
-                            # leaked into the synonym list.
-                            t = re.sub(r"\[[A-Za-z]+\]", "", t)
-                            t = re.sub(r"[\[\]]", "", t)  # leftover square brackets
-                            t = re.sub(r"\s+", " ", t).strip(" ,.;:")
-                            # Reject items that still have unbalanced parens
-                            # OR contain operationalisation / criterion patterns
-                            # we already filtered out of the must-include list.
-                            if "(" in t or ")" in t:
-                                continue
-                            if re.search(r"≥|>=|≤|<=|\bfollow.?up\b|\d+\s*\+?\s*(years?|months?)",
-                                          t, flags=re.IGNORECASE):
-                                continue
-                            if re.search(r"\b(measured by|defined by|assessed by|with follow|at baseline)\b",
-                                          t, flags=re.IGNORECASE):
-                                continue
-                            # Length filter: short enough to plausibly appear
-                            # in a paper title or abstract.
-                            if 2 <= len(t) <= 45:
-                                out.append(t)
-                # dedupe case-insensitively, preserve order
-                seen = set()
-                dedup = []
-                for t in out:
-                    k = t.lower()
-                    if k not in seen:
-                        seen.add(k)
-                        dedup.append(t)
-                return dedup
-
-            synonyms["intervention"]["tiab"] = _clean_term_list(data.get("intervention_synonyms"))
-            synonyms["intervention"]["mesh"] = _clean_term_list(data.get("intervention_mesh"))
-            synonyms["outcome"]["tiab"]      = _clean_term_list(data.get("outcome_synonyms"))
-            synonyms["outcome"]["mesh"]      = _clean_term_list(data.get("outcome_mesh"))
-            synonyms["population"]["tiab"]   = _clean_term_list(data.get("population_synonyms"))
-            synonyms["population"]["mesh"]   = _clean_term_list(data.get("population_mesh"))
+            for c in (data.get("concepts") or []):
+                if not isinstance(c, dict):
+                    continue
+                name = str(c.get("name", "")).strip()
+                tiab = _clean_term_list(c.get("terms"))
+                mesh = _clean_term_list(c.get("mesh"))
+                if name or tiab or mesh:
+                    concepts.append({"name": name or (tiab[0] if tiab else "Concept"),
+                                     "tiab": tiab, "mesh": mesh})
         except Exception as e:
-            print(f"Query synonym generation error: {e}")
+            print(f"Query concept decomposition error: {e}")
 
-        # Ensure every must-include phrase (clean anchor) appears in either the
-        # intervention or outcome tiab list. We try outcome anchors first when
-        # the phrase came from the outcome list, otherwise default to intervention.
-        for phrase in must_include:
-            ph_low = phrase.lower()
-            target = "intervention"
-            if any(ph_low == oa.lower() for oa in outcome_anchors):
-                target = "outcome"
-            elif any(ph_low == pa.lower() for pa in population_anchors):
-                target = "population"
-            if not any(t.lower() == ph_low for t in synonyms[target]["tiab"]):
-                synonyms[target]["tiab"].insert(0, phrase)
+        # ---- 2b. Ground MeSH against real NCBI controlled vocabulary ---------
+        # Validate the model's headings (drop hallucinations via a token-overlap
+        # guard) and fold official entry terms into the free-text list.
+        if ground_mesh:
+            try:
+                from data_services import PubMedService
+            except Exception:
+                PubMedService = None
+            if PubMedService is not None:
+                _stop = {"with", "and", "the", "for", "type", "adult", "adults", "care", "disease", "disorder"}
+                def _toks(x: str) -> set:
+                    return {t for t in re.findall(r"[a-z]{4,}", (x or "").lower())} - _stop
+                for c in concepts:
+                    candidates = list(c["mesh"])
+                    if not candidates and c["tiab"] and len(c["tiab"][0].split()) <= 3:
+                        candidates = [c["tiab"][0]]
+                    if not candidates and c["name"] and len(c["name"].split()) <= 3:
+                        candidates = [c["name"]]
+                    if not candidates:
+                        continue
+                    headings: List[str] = []
+                    entries: List[str] = []
+                    seen_h: set = set()
+                    for cand in candidates[:3]:
+                        h, ent = PubMedService.mesh_lookup(cand)
+                        if h and h.lower() not in seen_h and (_toks(cand) & _toks(h)):
+                            seen_h.add(h.lower())
+                            headings.append(h)
+                            entries.extend(ent[:6])
+                    if headings:
+                        c["mesh"] = headings
+                    have = {t.lower() for t in c["tiab"]}
+                    for e in entries:
+                        if e.lower() not in have and 2 <= len(e) <= 45 and "(" not in e:
+                            c["tiab"].append(e)
+                            have.add(e.lower())
 
-        # ---- 3. Deterministically build the PubMed string --------------------
-        def _build_concept_block(c: Dict[str, List[str]]) -> str:
+        # ---- 2c. Seed-study feedback: broaden the concept a seed overlaps ----
+        if seeds:
+            _sw = {"with", "and", "the", "for", "type", "study", "studies", "trial", "trials",
+                   "review", "using", "versus", "effect", "effects", "among", "between", "patients", "disease"}
+            def _ct(terms: List[str]) -> set:
+                s: set = set()
+                for t in terms:
+                    s |= {w for w in re.findall(r"[a-z]{4,}", (t or "").lower())} - _sw
+                return s
+            ctoks = {i: _ct(c["tiab"] + c["mesh"] + [c["name"]]) for i, c in enumerate(concepts)}
+            for sd in seeds:
+                for m in (sd.get("mesh") or []):
+                    m = str(m).strip()
+                    if not m:
+                        continue
+                    mt = {w for w in re.findall(r"[a-z]{4,}", m.lower())} - _sw
+                    for i, c in enumerate(concepts):
+                        if mt & ctoks[i]:
+                            if m not in c["mesh"] and len(c["mesh"]) < 8:
+                                c["mesh"].append(m)
+                                ctoks[i] |= mt
+                            break
+
+        # ---- 3. Keep only discriminating concepts, then assemble -------------
+        BROAD = re.compile(r"\b(population|participants?|patients?|subjects?|people|persons?|"
+                           r"humans?|adults?|children|child|adolescents?|infants?|neonates?|"
+                           r"elderly|aged|men|women|male|female|individuals?|cases?|controls?)\b",
+                           re.IGNORECASE)
+        DESIGN = re.compile(r"\b(study\s*type|study\s*design|design|methodolog\w*|trial|trials|"
+                            r"rct|randomi\w*|observational|cohort|case[\s-]?control|"
+                            r"cross[\s-]?sectional|prospective|retrospective|publication\s*type)\b",
+                            re.IGNORECASE)
+        CONTEXT = re.compile(r"\b(setting|settings|country|countries|region|regions|geograph\w*|"
+                             r"year|years|date|dates|time\s*period|worldwide|global|nationwide)\b",
+                             re.IGNORECASE)
+        POP_TERM = re.compile(r"^(patients?|adults?|children|people|persons?|subjects?|"
+                              r"individuals?|humans?|men|women|males?|females?|participants?)$",
+                              re.IGNORECASE)
+
+        def _discriminating(c: Dict[str, Any]) -> bool:
+            name = c["name"] or ""
+            if BROAD.search(name) or DESIGN.search(name) or CONTEXT.search(name):
+                return False
+            terms = c["tiab"]
+            if terms:
+                generic = sum(1 for t in terms if POP_TERM.match(t.strip()))
+                if generic >= max(2, int(0.8 * len(terms))):
+                    return False
+            return True
+
+        kept = [c for c in concepts if _discriminating(c)]
+        if not kept:
+            kept = list(concepts)          # never drop every concept
+        kept = kept[:4]                    # cap the number of AND blocks
+
+        def _build_block(c: Dict[str, Any]) -> str:
             terms: List[str] = []
-            for t in c["mesh"]:
-                terms.append(f'"{t}"[Mesh]')
+            seen: set = set()
+            for m in c["mesh"]:
+                tag = f'"{m}"[Mesh]'
+                if tag.lower() not in seen:
+                    seen.add(tag.lower())
+                    terms.append(tag)
             for t in c["tiab"]:
-                # If a tiab synonym already contains a wildcard (e.g. "diabet*")
-                # quote-and-tag it as-is; PubMed accepts "diabet*"[tiab].
-                terms.append(f'"{t}"[tiab]')
+                tag = f'"{t}"[tiab]' if re.search(r"[\s\-/]", t) else f"{t}[tiab]"
+                if tag.lower() not in seen:
+                    seen.add(tag.lower())
+                    terms.append(tag)
             return "(" + " OR ".join(terms) + ")" if terms else ""
 
-        blocks: List[str] = []
-        intv = _build_concept_block(synonyms["intervention"])
-        outc = _build_concept_block(synonyms["outcome"])
-        popu = _build_concept_block(synonyms["population"])
-        if intv:
-            blocks.append(intv)
-        if outc:
-            blocks.append(outc)
-        # Population block included only when it actually narrows retrieval
-        # (the model is asked to return [] for "adults" / "humans" so this
-        # condition naturally falls through for broad inferred populations).
-        if popu and len(synonyms["population"]["tiab"]) + len(synonyms["population"]["mesh"]) >= 2:
-            blocks.append(popu)
+        blocks = [b for b in (_build_block(c) for c in kept) if b]
+
+        def _ret(q: str):
+            if return_concepts:
+                return q, [{"name": c["name"], "tiab": c["tiab"], "mesh": c["mesh"]} for c in kept]
+            return q
 
         if blocks:
-            return " AND ".join(blocks)
+            return _ret(" AND ".join(blocks))
 
         # ---- 4. Last-resort fallback -----------------------------------------
-        # The LLM gave us nothing usable AND we had no must-include phrases.
-        # Construct a minimal query from whatever PICO text exists.
-        if must_include:
-            return " AND ".join(f'("{p}"[tiab] OR "{p}"[Mesh])' for p in must_include)
-
-        pop_terms = (population_clean or "adults").split()[:2]
-        int_terms = (intervention_clean or "treatment").split()[:2]
-        pop_query = " OR ".join([f'"{t}"[tiab]' for t in pop_terms])
-        int_query = " OR ".join([f'"{t}"[tiab]' for t in int_terms])
-        return f"({pop_query}) AND ({int_query})"
+        pop = (_strip_inferred_prefix(pico.population or "") or "adults").split()[:2]
+        intv = (_strip_inferred_prefix(pico.intervention or getattr(pico, "concept", "") or "") or "treatment").split()[:2]
+        pq = " OR ".join(f'"{t}"[tiab]' for t in pop)
+        iq = " OR ".join(f'"{t}"[tiab]' for t in intv)
+        return _ret(f"({pq}) AND ({iq})")
 
     @staticmethod
     def generate_adversarial_query(pico: PICOCriteria, model_name: str) -> str:
@@ -1807,35 +1849,33 @@ OUTPUT FORMAT:
         if not text or not isinstance(text, str):
             return None
             
-        try:
-            # 1. Clean up potential markdown formatting
-            clean_text = text.replace("```json", "").replace("```", "").strip()
-            
-            # 2. Find the boundaries of the JSON object or list
-            # We look for the first occurrence of { or [ and the last } or ]
-            start_brace = clean_text.find('{')
-            start_bracket = clean_text.find('[')
-            
-            # Determine which starts first
-            if start_brace == -1 and start_bracket == -1:
-                # No JSON structure found, try raw load as last resort
+        clean_text = text.replace("```json", "").replace("```", "").strip()
+        # First structural character of a JSON object/array.
+        starts = [i for i in (clean_text.find("{"), clean_text.find("[")) if i != -1]
+        if not starts:
+            try:
                 return json.loads(clean_text)
-                
-            start_idx = start_brace if (start_brace != -1 and (start_bracket == -1 or start_brace < start_bracket)) else start_bracket
-            
-            end_brace = clean_text.rfind('}')
-            end_bracket = clean_text.rfind(']')
-            end_idx = max(end_brace, end_bracket)
-
-            if start_idx != -1 and end_idx != -1:
-                json_str = clean_text[start_idx:end_idx + 1]
-                return json.loads(json_str)
-            
-            return json.loads(clean_text)
-        except Exception as e:
-            # Log the error to the terminal so you can see why it failed
-            print(f"❌ JSON Parsing Error: {e} | Raw Text: {text[:100]}...")
-            return None
+            except Exception as e:
+                print(f"❌ JSON Parsing Error: {e} | Raw Text: {text[:100]}...")
+                return None
+        start_idx = min(starts)
+        # 1) Parse the FIRST complete JSON value and ignore any trailing chatter
+        #    or extra objects the model appended (raw_decode stops at the end of
+        #    the first value, so 'Extra data' after a valid object no longer fails).
+        try:
+            obj, _end = json.JSONDecoder().raw_decode(clean_text, start_idx)
+            return obj
+        except Exception:
+            pass
+        # 2) Fallback: first structural char to the last matching close bracket.
+        end_idx = max(clean_text.rfind("}"), clean_text.rfind("]"))
+        if end_idx > start_idx:
+            try:
+                return json.loads(clean_text[start_idx:end_idx + 1])
+            except Exception as e:
+                print(f"❌ JSON Parsing Error: {e} | Raw Text: {text[:100]}...")
+                return None
+        return None
     # @staticmethod
     # def _extract_json(text: str) -> Optional[Any]:
     #     """Enhanced helper to find JSON lists or objects."""

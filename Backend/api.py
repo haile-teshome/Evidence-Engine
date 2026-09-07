@@ -449,6 +449,112 @@ def pico_infer(req: InferRequest):
     )
 
 
+class SearchBuildRequest(BaseModel):
+    """Input to /api/search/build: the current PICO/PCC elements to turn into a
+    grounded, comprehensive PubMed query. Optional `seeds` are the reviewer's
+    known/relevant studies used to broaden concepts (seed-study feedback)."""
+    pico: PicoIn
+    model: Optional[str] = None
+    goal: Optional[str] = ""
+    seeds: Optional[List[PaperIn]] = None
+
+
+class ConceptBlock(BaseModel):
+    name: str
+    tiab: List[str] = []
+    mesh: List[str] = []
+
+
+class SearchBuildResponse(BaseModel):
+    query: str
+    concepts: List[ConceptBlock]
+
+
+@app.post("/api/search/build", response_model=SearchBuildResponse)
+def search_build(req: SearchBuildRequest):
+    """Phase 1 grounded query builder: LLM concept synonyms -> real NCBI MeSH
+    grounding -> deterministic PubMed assembler. Returns the query plus the
+    per-concept breakdown so the reviewer can see and edit what the search does
+    before it runs. Recall-oriented and validated on CLEF-TAR."""
+    model_name = resolve_for_thinking(req.model)
+    pico = _to_pico(req.pico)
+    # Seed-study feedback: resolve MeSH for any PubMed seeds so their controlled
+    # vocabulary can broaden the matching concept.
+    seeds: List[Dict[str, Any]] = []
+    if req.seeds:
+        from data_services import PubMedService
+        pmids = [str(s.id) for s in req.seeds if str(s.id or "").strip().isdigit()]
+        mesh_by_pmid = PubMedService.fetch_mesh_for_pmids(pmids) if pmids else {}
+        for s in req.seeds:
+            rec = mesh_by_pmid.get(str(s.id), {})
+            seeds.append({"mesh": rec.get("mesh", []), "title": s.title or rec.get("title", "")})
+    try:
+        query, concepts = AIService.generate_mesh_query(
+            pico, model_name, goal=req.goal or "", ground_mesh=True, return_concepts=True,
+            seeds=seeds or None)
+    except Exception as e:
+        print(f"[search_build] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    # generate_mesh_query returns the kept concept blocks as a list of
+    # {name, tiab, mesh} (variable-N: real concept names like "Dental").
+    blocks: List[ConceptBlock] = []
+    concept_list = concepts if isinstance(concepts, list) else []
+    for c in concept_list:
+        if not isinstance(c, dict):
+            continue
+        tiab = c.get("tiab", []) or []
+        mesh = c.get("mesh", []) or []
+        if tiab or mesh:
+            blocks.append(ConceptBlock(name=c.get("name") or "Concept", tiab=tiab, mesh=mesh))
+    return SearchBuildResponse(query=query or "", concepts=blocks)
+
+
+class ResultsAskRequest(BaseModel):
+    """Ask a question grounded in a set of captured records (RAG over results)."""
+    question: str
+    records: List[PaperIn]
+    model: Optional[str] = None
+
+
+class ResultsAskResponse(BaseModel):
+    answer: str
+    cited: List[str] = []
+
+
+@app.post("/api/results/ask", response_model=ResultsAskResponse)
+def results_ask(req: ResultsAskRequest):
+    """Answer a natural-language question using ONLY the provided records
+    (titles + abstracts), citing them by number. Grounds the answer in the
+    reviewer's captured search results."""
+    from langchain_core.messages import HumanMessage, SystemMessage
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    recs = req.records[:60]
+    if not recs:
+        return ResultsAskResponse(answer="No records to search. Run a search first.", cited=[])
+    corpus = "\n\n".join(
+        f"[{i+1}] {r.title}\n{(r.abstract or '(no abstract)')[:1200]}"
+        for i, r in enumerate(recs)
+    )
+    system = ("You are a systematic-review assistant. Answer the user's question using ONLY the "
+              "numbered records provided. Cite the records you use as [N]. If the records do not "
+              "contain the answer, say so plainly. Be concise and specific.")
+    user = f"Records:\n{corpus}\n\nQuestion: {req.question}\n\nAnswer (cite with [N]):"
+    try:
+        resp = model.invoke([SystemMessage(content=system), HumanMessage(content=user)])
+        answer = (resp.content or "").strip()
+    except Exception as e:
+        print(f"[results_ask] {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    cited: List[str] = []
+    for m in re.findall(r"\[(\d+)\]", answer):
+        idx = int(m) - 1
+        if 0 <= idx < len(recs):
+            rid = str(recs[idx].id)
+            if rid not in cited:
+                cited.append(rid)
+    return ResultsAskResponse(answer=answer, cited=cited)
+
+
 class ClarifyQuestionsRequest(BaseModel):
     """Input to /api/pico/clarify-questions: the user's natural-language research
     goal, used to generate 1-3 multiple-choice questions that surface what the
@@ -737,64 +843,70 @@ def _plain_summary(goal: str, papers: List[BackendPaper], model_name: str) -> st
             f"    Abstract: {(p.abstract or '')[:800]}\n\n"
         )
 
-    prompt = f"""You are an expert evidence synthesist. Produce a COMPREHENSIVE plain-text briefing
-on the research question — the kind of document a researcher could read once and walk away with a
-working understanding of the topic, including what is known, what is contested, what is missing,
-and what to ask next.
+    prompt = f"""You are an expert evidence synthesist writing the results narrative of a systematic
+review. Produce a COMPREHENSIVE, critical plain-text synthesis of the evidence on the research
+question: one a methodologist could read once and understand what the literature shows, how strong
+that evidence is, and where studies disagree. Synthesize ACROSS studies; do not summarise them one
+by one.
 
 RESEARCH GOAL: {goal}
 
 LITERATURE ({len(subset)} papers, numbered [1]-[{len(subset)}]):
 {ctx}
 
-Structure the response with exactly these section headers, each followed by a blank line, in this
-order:
+Structure the response with exactly these THREE section headers, each on its own line followed by a
+blank line, in this order (do NOT add any other section):
 
 Research landscape overview
 Arguments supporting the research question
 Arguments against or challenging the research question
-Mechanisms, effect sizes, and study characteristics
-Open questions and follow-up considerations
 
 REQUIREMENTS:
-1. "Research landscape overview" — 1–2 paragraphs (≈ 4–8 sentences). Describe what the literature
-   covers, what populations and settings have been studied, what study designs dominate, and where
-   the evidence base is thin or fragmented. Cite the most representative papers inline.
+1. "Research landscape overview" - 2 to 3 substantial paragraphs of connected prose, not a list. Give
+   the reader the full lay of the land: the volume and maturity of the evidence; the populations,
+   settings, and conditions studied; which study designs and analytic methods dominate (and which are
+   missing); the data sources and sample sizes typically used; where findings converge into consensus
+   and where they diverge or remain contested; and where the base is thin, fragmented, or absent. Weave
+   in the overall strength and consistency of the evidence and how far it is likely to generalise. Cite
+   the most representative papers inline as you make each point.
 
-2. "Arguments supporting the research question" — 4–7 substantive bullet points. Each bullet should
-   make a SPECIFIC claim backed by at least one citation: name the mechanism, the effect size or
-   direction, the population, and the study design where possible. Avoid generic statements.
+2. "Arguments supporting the research question" - 6 to 9 substantive bullets, ordered strongest
+   evidence first. Each bullet makes ONE specific, evidence-backed claim and, wherever the abstracts
+   supply them, includes the CONCRETE numbers: the finding and its direction, the effect size or
+   performance metric (accuracy, AUC, mAP, sensitivity/specificity, hazard/odds ratio, percentage,
+   p-value), the population/setting, the sample size, and the study design. Group studies that agree
+   onto one bullet with a shared citation list rather than listing them separately. Never write a
+   generic claim ("AI can help"): say what was shown, in whom, how well, and how strong the design was.
 
-3. "Arguments against or challenging the research question" — 3–6 substantive bullet points. Cover
-   contradictory findings, null results, methodological limitations of supporting studies,
-   confounders, or settings where the relationship breaks down. Cite specific evidence.
-
-4. "Mechanisms, effect sizes, and study characteristics" — 1 paragraph (≈ 5–8 sentences) or 4–6
-   bullets. Pull out concrete numbers where the abstracts supply them: sample sizes, follow-up
-   durations, hazard ratios, percentages, p-values. Name the proposed biological / behavioural /
-   methodological mechanisms when discussed.
-
-5. "Open questions and follow-up considerations" — 3–5 specific questions a researcher might ask
-   next based on gaps in the current literature. Phrase them as concrete refinements (e.g. "How
-   does the effect change between Mediterranean diet adherence indices, and which index best
-   predicts mortality?") rather than generic ones.
+3. "Arguments against or challenging the research question" - 5 to 8 substantive bullets. Cover BOTH
+   (a) genuinely contradictory or null findings, with their numbers and citations, AND (b) a critical
+   appraisal of the supporting evidence: risk of bias, small or non-representative samples,
+   single-centre or retrospective-only designs, overfitting or absent external/prospective validation,
+   inconsistent data quality or reporting, confounding, and settings or subgroups where the effect
+   weakens or does not hold. Cite specific evidence, and carefully distinguish "no evidence of an
+   effect" from "evidence of no effect".
 
 CITATION RULES:
-  • Cite only papers that are actually relevant to the goal. If a paper is off-topic, ignore it
-    completely — do not mention it, do not cite it.
-  • Use inline citations like [3] or [5, 7]. Never invent a citation number not present in the
-    provided literature.
-  • Cite specific evidence — never write "[3] is relevant" without saying WHAT in [3] is relevant.
+  - Cite only papers actually relevant to the goal. Ignore off-topic ones entirely: do not mention or
+    cite them.
+  - Use inline citations like [3] or [5, 7]. Never invent a number outside [1]-[{len(subset)}].
+  - Place each citation AFTER the claim it supports, at the END of the sentence or bullet (e.g.
+    "... improving early detection and patient outcomes [4, 19]."). NEVER begin a bullet or sentence
+    with a citation, and NEVER use "[N]:" as a label or prefix at the start of a line.
+  - Always cite specific evidence: never write "[3] is relevant" without saying WHAT [3] showed.
+  - Prefer synthesizing several studies per claim over one study per bullet.
 
 FAILURE MODE:
-If FEWER THAN 3 of the provided papers are directly relevant to the goal, do not pad the response.
-Write only the "Research landscape overview" section (1 paragraph) stating that the directly
-relevant evidence base is thin, naming the closest-adjacent findings from the papers you do have,
-and listing 3 ways to broaden or refocus the search. Leave the other sections out entirely.
+If FEWER THAN 3 of the provided papers are directly relevant to the goal, do not pad. Write only the
+"Research landscape overview" section (1 paragraph) stating that the directly relevant evidence base
+is thin, name the closest-adjacent findings, and list 3 ways to broaden or refocus the search. Leave
+the other sections out entirely.
 
 FORMAT:
-Plain text only. No HTML. No markdown bold/italics. No code fences. Dashes for bullets are fine.
-Do NOT include a final reference list — the UI renders one separately.
+Plain text only. No HTML, no markdown bold or italics, no code fences. Dashes for bullets are fine.
+Do NOT include a reference list - the UI renders one separately. Output ONLY the three sections above:
+do NOT add an "evidence quality", "study characteristics", "open questions", "future research", "next
+steps", "conclusion", or "follow-up" section of any kind.
 """
     try:
         r = model.invoke([HumanMessage(content=prompt)])
@@ -859,6 +971,28 @@ def _filter_to_cited(summary: str, papers: list) -> Tuple[str, list]:
     return new_summary, new_papers
 
 
+_LEADING_CITE_RE = re.compile(r"^(\s*(?:[-*•]\s+)?)(\[\d+(?:\s*,\s*\d+)*\])\s*[:.–\-]?\s+(.+)$")
+
+
+def _move_leading_citations(summary: str) -> str:
+    """Move a citation that leads a line (e.g. "- [4, 19]: claim") to the END of
+    the claim ("- claim [4, 19]."), matching the requested reading style where the
+    citation follows the statement it supports."""
+    out = []
+    for line in summary.split("\n"):
+        m = _LEADING_CITE_RE.match(line)
+        if m:
+            prefix, cite, rest = m.group(1), m.group(2), m.group(3).rstrip()
+            if rest and rest[-1] in ".!?;:":
+                rest = f"{rest[:-1]} {cite}{rest[-1]}"
+            else:
+                rest = f"{rest} {cite}"
+            out.append(f"{prefix}{rest}")
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
 @app.post("/api/pico/summary")
 def pico_summary(req: SummaryRequest):
     bps = [_to_backend_paper(p) for p in req.papers]
@@ -889,6 +1023,8 @@ def pico_summary(req: SummaryRequest):
         grouped_papers.extend(by_source[key])
 
     summary = _plain_summary(req.goal, grouped_papers, resolve_for_thinking(req.model))
+    # Move any citation that leads a bullet/sentence to the end of the claim.
+    summary = _move_leading_citations(summary)
     # Strip any hallucinated out-of-range citation numbers.
     summary = _strip_invalid_citations(summary, len(grouped_papers))
     # All grouped_papers passed the LEADS rerank — show them all as references.
@@ -1151,13 +1287,20 @@ class FetchAllRequest(BaseModel):
     sources: List[str]
     max_per_source: int = 10
     limit: Optional[int] = None
+    # Selection strategy when a source matches more than its cap:
+    # "relevance" (best match, default) or "recent" (newest).
+    sort: str = "relevance"
+    # Optional publication-year window (inclusive) applied at the source.
+    year_from: Optional[int] = None
+    year_to: Optional[int] = None
 
 
 @app.post("/api/papers/fetch")
 def papers_fetch(req: FetchAllRequest):
     papers, counts = DataAggregator.fetch_all(
         req.query, req.sources, max_per_source=req.max_per_source,
-        uploaded_files=None, limit=req.limit,
+        uploaded_files=None, limit=req.limit, sort=req.sort,
+        year_from=req.year_from, year_to=req.year_to,
     )
     return {
         "papers": [_paper_to_dict(p) for p in papers],

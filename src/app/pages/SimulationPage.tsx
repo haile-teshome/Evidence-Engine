@@ -483,7 +483,11 @@ export function SimulationPage() {
         <div className="flex items-stretch gap-3">
           <div className="flex-1 min-w-0 flex flex-col">
             <label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Base query · all databases</label>
-            <Textarea value={s.unifiedSearchQuery} onChange={e => updateUnified(e.target.value)} className="font-mono text-sm mt-1 flex-1 min-h-[5.5rem] overflow-auto resize-none" />
+            <Textarea
+              value={s.unifiedSearchQuery}
+              onChange={e => updateUnified(e.target.value)}
+              className="font-mono text-sm mt-1 flex-1 field-sizing-fixed min-h-[5.5rem] overflow-auto resize-none"
+            />
           </div>
           <div className="flex flex-col gap-2 w-56 shrink-0 pt-5">
             {/* Two query-prep actions: each explains what it does so "adapt" vs
@@ -618,18 +622,13 @@ export function SimulationPage() {
                   <Textarea
                     value={s.perDbQueries[activeDb] ?? ""}
                     onChange={e => s.setPerDbQueries(p => ({ ...p, [activeDb]: e.target.value }))}
-                    rows={6}
-                    className="font-mono text-xs mt-1.5"
+                    className="font-mono text-xs mt-1.5 field-sizing-fixed h-[26rem] overflow-auto resize-none"
                   />
                 </div>
                 {(() => {
                   const all = s.dbTestResults?.[activeDb]?.papers ?? [];
                   if (!all.length) {
-                    return (
-                      <div className="rounded-md border border-dashed p-4 text-xs text-muted-foreground text-center">
-                        Edit the query and click <strong>Test</strong> to preview the yield and a sample of results for {activeDb}.
-                      </div>
-                    );
+                    return null;
                   }
                   const totalPages = Math.max(1, Math.ceil(all.length / previewPerPage));
                   const page = Math.min(previewPage, totalPages - 1);

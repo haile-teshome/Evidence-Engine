@@ -48,10 +48,96 @@ def throttled_request(url: str, params: dict = None, headers: dict = None, metho
 
 class PubMedService:
     """Handles PubMed data fetching."""
-    
+
+    _mesh_cache: Dict[str, Tuple[str, List[str]]] = {}
+
     @staticmethod
-    def fetch(query: str, max_results: int) -> List[Paper]:
-        """Fetch papers from PubMed."""
+    def mesh_lookup(term: str) -> Tuple[str, List[str]]:
+        """Ground a free-text concept against real MeSH via NCBI E-utilities.
+
+        Returns (official_descriptor, entry_terms). Empty ("", []) when no
+        descriptor matches. Cached per process. This is what turns an
+        LLM-suggested (possibly hallucinated) heading into a validated MeSH
+        descriptor plus its official synonym (entry) terms, so the assembled
+        query uses controlled vocabulary that actually exists in PubMed.
+        """
+        term = (term or "").strip()
+        if not term:
+            return "", []
+        key = term.lower()
+        if key in PubMedService._mesh_cache:
+            return PubMedService._mesh_cache[key]
+        Entrez.email = Config.ENTREZ_EMAIL
+        try:
+            from request_creds import get_cred
+            _k = get_cred("ncbi") or getattr(Config, "NCBI_API_KEY", "")
+            if _k:
+                Entrez.api_key = _k
+        except Exception:
+            pass
+        heading, entries = "", []
+        try:
+            sh = Entrez.esearch(db="mesh", term=term, retmax=1)
+            ids = Entrez.read(sh).get("IdList", [])
+            sh.close()
+            if ids:
+                summ = Entrez.esummary(db="mesh", id=ids[0])
+                recs = Entrez.read(summ)
+                summ.close()
+                terms = list((recs[0] if recs else {}).get("DS_MeshTerms", []) or [])
+                if terms:
+                    heading = str(terms[0])
+                    entries = [str(t) for t in terms[1:]]
+        except Exception as e:
+            print(f"[mesh_lookup] {term!r}: {e}")
+        PubMedService._mesh_cache[key] = (heading, entries)
+        return heading, entries
+
+    @staticmethod
+    def fetch_mesh_for_pmids(pmids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch MeSH headings + title for known PubMed records (seed studies),
+        so their controlled-vocabulary terms can seed query expansion. Returns
+        {pmid: {"mesh": [...], "title": str}}."""
+        pmids = [str(p).strip() for p in pmids if str(p).strip().isdigit()]
+        if not pmids:
+            return {}
+        Entrez.email = Config.ENTREZ_EMAIL
+        try:
+            from request_creds import get_cred
+            _k = get_cred("ncbi") or getattr(Config, "NCBI_API_KEY", "")
+            if _k:
+                Entrez.api_key = _k
+        except Exception:
+            pass
+        out: Dict[str, Dict[str, Any]] = {}
+        try:
+            h = Entrez.efetch(db="pubmed", id=",".join(pmids[:50]), rettype="medline", retmode="xml")
+            recs = Entrez.read(h)
+            h.close()
+            for art in recs.get("PubmedArticle", []):
+                cit = art["MedlineCitation"]
+                pmid = str(cit.get("PMID", ""))
+                mesh = [str(m["DescriptorName"]) for m in cit.get("MeshHeadingList", []) or []]
+                art_info = cit.get("Article", {})
+                title = str(art_info.get("ArticleTitle", "") or "")
+                out[pmid] = {"mesh": mesh, "title": title}
+        except Exception as e:
+            print(f"[fetch_mesh_for_pmids] {e}")
+        return out
+
+    @staticmethod
+    def fetch(query: str, max_results: int, sort: str = "relevance",
+              year_from: int = None, year_to: int = None) -> List[Paper]:
+        """Fetch papers from PubMed.
+
+        ``sort`` decides WHICH records are kept when a query matches more than
+        ``max_results``: "relevance" keeps PubMed's Best Match top-N (the default,
+        appropriate for a capped sample), "recent" keeps the most recently
+        published. When the total matches are fewer than the cap, every match is
+        returned regardless of ``sort`` (esearch returns all of them).
+
+        ``year_from`` / ``year_to`` restrict by publication year (inclusive) via
+        the esearch date filter, so the limit is applied to a date-scoped pool."""
         Entrez.email = Config.ENTREZ_EMAIL
         # An optional free NCBI key raises the rate limit from 3 to 10 req/s.
         from request_creds import get_cred
@@ -62,12 +148,26 @@ class PubMedService:
         # Add title/abstract search if not specified
         if "[tiab]" not in query.lower() and "[" not in query:
             query = f"({query})[tiab]"
-        
+
+        # Map the selection strategy to an Entrez sort key.
+        esort = "pub_date" if str(sort).lower() in ("recent", "pub_date", "date") else "relevance"
+
+        # Optional publication-date window (researcher-set filter).
+        date_kwargs = {}
+        if year_from or year_to:
+            date_kwargs = {
+                "datetype": "pdat",
+                "mindate": str(int(year_from)) if year_from else "1800",
+                "maxdate": str(int(year_to)) if year_to else "3000",
+            }
+
         try:
             search_handle = Entrez.esearch(
                 db="pubmed",
                 term=query,
-                retmax=max_results
+                retmax=max_results,
+                sort=esort,
+                **date_kwargs,
             )
             id_list = Entrez.read(search_handle)["IdList"]
             
@@ -355,10 +455,16 @@ class EuropePMCService:
     """Handles Europe PMC data fetching."""
 
     @staticmethod
-    def fetch(query: str, max_results: int) -> List[Paper]:
+    def fetch(query: str, max_results: int, sort: str = "relevance",
+              year_from: int = None, year_to: int = None) -> List[Paper]:
         try:
             epmc_query = re.sub(r"\[[^\]]+\]", "", query)
             epmc_query = re.sub(r"\s+", " ", epmc_query).strip()
+            # Optional publication-year window.
+            if year_from or year_to:
+                yf = int(year_from) if year_from else 1800
+                yt = int(year_to) if year_to else 3000
+                epmc_query = f"({epmc_query}) AND (PUB_YEAR:[{yf} TO {yt}])"
             url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
             params = {
                 "query": epmc_query or query,
@@ -369,6 +475,10 @@ class EuropePMCService:
                 # anchor quotes against and every cell collapses to NA.
                 "resultType": "core",
             }
+            # Europe PMC ranks by relevance by default; for "recent" ask it to
+            # sort by publication date descending so the kept N are the newest.
+            if str(sort).lower() in ("recent", "pub_date", "date"):
+                params["sort"] = "P_PDATE_D desc"
             resp = throttled_request(url, params=params).json()
             papers: List[Paper] = []
             for r in resp.get("resultList", {}).get("result", []):
@@ -801,15 +911,23 @@ class DataAggregator:
     }
 
     @staticmethod
-    def fetch_all(query: str, active_sources: List[str], max_per_source: int = 10, uploaded_files=None, limit: int = None):
+    def fetch_all(query: str, active_sources: List[str], max_per_source: int = 10, uploaded_files=None, limit: int = None, sort: str = "relevance", year_from: int = None, year_to: int = None):
         """
         Aggregates raw data from all active sources.
         Deduplication is removed to ensure PRISMA counts accurately reflect total records.
+
+        ``sort`` is the selection strategy used when a source matches more than its
+        cap ("relevance" = keep the best matches, "recent" = keep the newest).
+        ``year_from`` / ``year_to`` restrict by publication year. Both are forwarded
+        only to sources whose fetch() accepts them; the rest are unaffected.
         """
+        import inspect
         all_papers = []
         source_counts = {}
 
         search_count = limit if limit is not None else max_per_source
+        # Extra kwargs forwarded per source only when its fetch() declares them.
+        extra = {"sort": sort, "year_from": year_from, "year_to": year_to}
 
         for source in active_sources:
             papers = []
@@ -822,7 +940,9 @@ class DataAggregator:
 
                 elif source in DataAggregator.SERVICE_MAP:
                     fetch_func = DataAggregator.SERVICE_MAP[source]
-                    papers = fetch_func(query, search_count)
+                    accepted = inspect.signature(fetch_func).parameters
+                    kwargs = {k: v for k, v in extra.items() if k in accepted}
+                    papers = fetch_func(query, search_count, **kwargs)
 
                 count = len(papers)
                 all_papers.extend(papers)

@@ -13,6 +13,11 @@ export type Pico = {
   concept?: string; context?: string; framework?: FrameworkId;
 };
 export type Paper = { id: string; source: string; title: string; abstract: string; url: string; year?: number; authors?: string };
+// How records are selected when a source matches more than its per-database cap.
+export type SelectionStrategy = "relevance" | "recent";
+// Researcher-set filters applied at search time (extensible). Publication-year
+// window is inclusive; null/undefined means unbounded on that end.
+export type SearchFilters = { yearFrom?: number | null; yearTo?: number | null };
 
 export type Analysis = {
   p: string; i: string; c: string; o: string;
@@ -293,6 +298,18 @@ export const AIService = {
     return postJSON<Analysis>("/pico/infer", { input, prior: prior || undefined, model: apiConfig.model, framework }, signal);
   },
 
+  // Grounded query builder (Phase 1): LLM concept synonyms -> real NCBI MeSH
+  // grounding -> deterministic PubMed assembler. Returns the query plus the
+  // per-concept breakdown so the reviewer can see/edit what the search does.
+  async buildSearch(pico: Pico, goal = "", seeds?: { id: string; title: string; abstract?: string; source?: string }[], signal?: AbortSignal): Promise<{ query: string; concepts: { name: string; tiab: string[]; mesh: string[] }[] }> {
+    return postJSON("/search/build", { pico, goal, model: apiConfig.model, seeds: seeds && seeds.length ? seeds : undefined }, signal);
+  },
+
+  // RAG over the captured results: answer a question using only the given records.
+  async askResults(question: string, records: { id: string; title: string; abstract?: string }[], signal?: AbortSignal): Promise<{ answer: string; cited: string[] }> {
+    return postJSON("/results/ask", { question, records, model: apiConfig.model }, signal);
+  },
+
   // Heuristic pre-selection of the question frame (PICO vs PCC) from the goal.
   // The UI preselects this and lets the user override.
   async detectFramework(input: string, signal?: AbortSignal): Promise<FrameworkId> {
@@ -384,23 +401,6 @@ export const AIService = {
       pico, model: apiConfig.model,
     }, signal);
     return r.query || "";
-  },
-
-  // One adaptive "deep scan" round: given the relevant studies found so far,
-  // propose a supplementary query targeting coverage the first search missed.
-  async proposeSupplementaryQuery(
-    pico: Pico,
-    query: string,
-    inclusion: string[],
-    exclusion: string[],
-    keptTitles: string[],
-    signal?: AbortSignal,
-  ): Promise<{ query: string; rationale: string; tactic: string }> {
-    return postJSON<{ query: string; rationale: string; tactic: string }>(
-      "/search/supplementary",
-      { pico, query, inclusion, exclusion, kept_titles: keptTitles, model: apiConfig.model },
-      signal,
-    );
   },
 
   async getPicoSuggestion(goal: string, category: string): Promise<string[]> {
@@ -828,10 +828,10 @@ export const DataAggregator = {
   // matters only insofar as LEADS can score it. Default raised to 50 so the
   // candidate pool is broad enough to find the natural break without missing
   // relevant papers from a single source.
-  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 50, signal?: AbortSignal): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
+  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 50, signal?: AbortSignal, sort: SelectionStrategy = "relevance", filters?: SearchFilters): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
     return postJSON<{ papers: Paper[]; sourceCounts: Record<string, number> }>(
       "/papers/fetch",
-      { query, sources, max_per_source: maxPerSource },
+      { query, sources, max_per_source: maxPerSource, sort, year_from: filters?.yearFrom ?? null, year_to: filters?.yearTo ?? null },
       signal,
     );
   },
@@ -839,7 +839,10 @@ export const DataAggregator = {
   // Fetch with a PER-DATABASE cap: each source gets `limits[src]` papers, or
   // `defaultLimit` when it has no explicit entry. Sources sharing the same cap
   // are fetched in one call; the rest are fetched individually, then merged.
-  async fetchPerSource(query: string, sources: string[], pico: Pico, limits: Record<string, number>, defaultLimit = 50, signal?: AbortSignal): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
+  // `sort` is the selection strategy applied only when a source matches more
+  // than its cap ("relevance" = best match, "recent" = newest); `filters`
+  // restricts what is searched (e.g. publication-year window).
+  async fetchPerSource(query: string, sources: string[], pico: Pico, limits: Record<string, number>, defaultLimit = 50, signal?: AbortSignal, sort: SelectionStrategy = "relevance", filters?: SearchFilters): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
     // Group sources by their effective cap so identical caps batch into one request.
     const byCap = new Map<number, string[]>();
     for (const src of sources) {
@@ -850,7 +853,7 @@ export const DataAggregator = {
     const sourceCounts: Record<string, number> = {};
     for (const [cap, srcs] of byCap) {
       if (signal?.aborted) break;
-      const res = await DataAggregator.fetchAll(query, srcs, pico, cap, signal);
+      const res = await DataAggregator.fetchAll(query, srcs, pico, cap, signal, sort, filters);
       papers.push(...(res.papers || []));
       Object.assign(sourceCounts, res.sourceCounts || {});
     }

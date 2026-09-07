@@ -179,6 +179,29 @@ export function Sidebar() {
 
       {/* Fixed: active tasks + nav tabs stay put while the panels below scroll. */}
       <div className="shrink-0 px-4 pt-4 pb-2">
+        {/* Active tasks bar: pinned ABOVE the nav so it stays in the same place
+            across every tab and action. The nav's sliding pill is measured
+            relative to the <nav> element, so this card mounting/unmounting shifts
+            the nav as a whole but never drags the pill out of alignment. */}
+        {Object.values(s.tasks).filter(t => t.status === "running").length > 0 && (
+          <Card className="p-2 mb-3 bg-primary/5 border-primary/30 space-y-1">
+            {Object.values(s.tasks)
+              .filter(t => t.status === "running")
+              .map(t => (
+                <div key={t.kind} className="flex items-center gap-2 text-xs">
+                  <Loader2 className="size-3 animate-spin text-primary shrink-0" />
+                  <div className="flex-1 truncate font-medium">{TASK_LABEL[t.kind] || t.kind}</div>
+                  <button
+                    className="text-muted-foreground hover:text-foreground"
+                    onClick={() => s.cancelTask(t.kind)}
+                    title="Cancel"
+                  >
+                    <X className="size-3" />
+                  </button>
+                </div>
+              ))}
+          </Card>
+        )}
         {/* Navigation. A single glass pill sits over the active tab and springs its
             y/height whenever the active page changes, so it always animates from its
             current spot to the clicked tab regardless of unrelated re-renders. */}
@@ -214,28 +237,6 @@ export function Sidebar() {
             );
           })}
         </nav>
-
-        {/* Active tasks (persists across navigation). Placed BELOW the nav so that
-            it mounting/unmounting never shifts the nav and drags the sliding pill. */}
-        {Object.values(s.tasks).filter(t => t.status === "running").length > 0 && (
-          <Card className="p-2 bg-primary/5 border-primary/30 space-y-1">
-            {Object.values(s.tasks)
-              .filter(t => t.status === "running")
-              .map(t => (
-                <div key={t.kind} className="flex items-center gap-2 text-xs">
-                  <Loader2 className="size-3 animate-spin text-primary shrink-0" />
-                  <div className="flex-1 truncate font-medium">{TASK_LABEL[t.kind] || t.kind}</div>
-                  <button
-                    className="text-muted-foreground hover:text-foreground"
-                    onClick={() => s.cancelTask(t.kind)}
-                    title="Cancel"
-                  >
-                    <X className="size-3" />
-                  </button>
-                </div>
-              ))}
-          </Card>
-        )}
       </div>
 
       {/* Scrollable region: sessions, model, databases, local PDFs. */}
