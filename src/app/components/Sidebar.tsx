@@ -32,7 +32,7 @@ const TASK_LABEL: Record<string, string> = {
 // Friendly display names for known model tags. Keep the value field
 // pointing at the actual Ollama / provider id; only the label changes.
 function formatModelName(m: string): string {
-  if (/leads.*mistral/i.test(m)) return "LEADS-Mistral 7B  (default, screening)";
+  if (/leads.*mistral/i.test(m)) return "LEADS-Mistral 7B";
   if (/medgemma.*27b/i.test(m)) return "MedGemma 27B  (clinical)";
   if (/medgemma/i.test(m)) return "MedGemma";
   if (/qwen2\.5.*7b/i.test(m)) return "Qwen 2.5 7B";
@@ -116,13 +116,6 @@ export function Sidebar() {
     if (el) setPill({ top: el.offsetTop, height: el.offsetHeight });
   }, [s.page]);
   const [localModels, setLocalModels] = useState<string[]>([]);
-  // Reproducibility manifest (seed + prompt version) for the determinism note.
-  const [repro, setRepro] = useState<{ seed: number; prompt_version: string } | null>(null);
-  useEffect(() => {
-    fetch("/api/reproducibility").then(r => r.json())
-      .then(d => setRepro({ seed: d.seed, prompt_version: d.prompt_version }))
-      .catch(() => {});
-  }, []);
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
   const [, forceKeys] = useState(0);
@@ -308,12 +301,6 @@ export function Sidebar() {
               className="mt-2 inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
               <KeyRound className="size-3.5" />Manage API keys
             </button>
-          )}
-          {repro && (
-            <p className="mt-2 text-[10px] leading-snug text-muted-foreground"
-              title="Runs use temperature 0 and a fixed seed. Local (Ollama) and OpenAI runs reproduce to identical output; Anthropic and Gemini are best-effort (no seed API).">
-              {(!modelProvider || modelProvider === "openai") ? "Deterministic runs" : "Best-effort determinism"} · seed {repro.seed} · prompts {repro.prompt_version}
-            </p>
           )}
         </Card>
 
