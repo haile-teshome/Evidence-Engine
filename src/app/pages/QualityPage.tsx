@@ -8,6 +8,7 @@ import {
 import { effectiveAbstractDecision, effectiveFullTextDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
+import { EmptyState } from "../components/EmptyState";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Checkbox } from "../components/ui/checkbox";
@@ -425,7 +426,9 @@ export function QualityPage() {
 
   // All hooks are declared above; only now is it safe to bail out early.
   if (s.history.length === 0) {
-    return <Alert><AlertDescription>Define a research goal on the Home page first.</AlertDescription></Alert>;
+    return <EmptyState icon={ShieldCheck} title="No research goal yet"
+      description="Define your research question on the Home page, then screen and appraise your included studies here."
+      action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }} />;
   }
 
   const kept = reports ? reports.filter(r => !s.excludedByQuality.has(r.paper_id)).length : 0;
@@ -467,7 +470,9 @@ export function QualityPage() {
             const { papers, stage } = includedPapers();
             const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
             return papers.length === 0 ? (
-              <Alert><AlertDescription>No included articles yet. Run Abstract or Full-Text screening first, then come back to appraise risk of bias.</AlertDescription></Alert>
+              <EmptyState icon={ShieldCheck} title="No included articles yet"
+                description="Run Abstract or Full-Text screening first; included studies flow here for risk-of-bias appraisal."
+                action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Search }} />
             ) : (
               <div className="text-xs text-muted-foreground px-1">
                 {papers.length} included article{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text yet, abstract-only appraisal"}

@@ -18,6 +18,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { Sigma, Play, Calculator, X as XIcon, AlertTriangle } from "lucide-react";
+import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 
 // ===========================================================================
@@ -685,7 +686,9 @@ export function MetaAnalysisPage() {
         </div>
 
         {candidatePapers.length === 0 && (
-          <Alert><AlertDescription>No source articles found. Run Abstract Screening first; included articles feed the meta-analysis.</AlertDescription></Alert>
+          <EmptyState icon={Sigma} title="No source articles yet"
+            description="Run Abstract Screening first; included studies feed effect-size extraction and pooling here."
+            action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }} />
         )}
       </Card>
 

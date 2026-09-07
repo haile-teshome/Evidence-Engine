@@ -11,6 +11,7 @@ import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { PopoverContent, PopoverTrigger, PopoverClose, ScrollAwarePopover } from "../components/ui/popover";
 import { Search, Download, Minus, Zap, ChevronRight, ChevronDown, Maximize2, Minimize2, Plus, RotateCcw, History, X, Check, FileText, CheckCircle2, XCircle, Clock, GripVertical, Sparkles, Pencil, CircleDashed } from "lucide-react";
+import { EmptyState } from "../components/EmptyState";
 import { RapidScreen } from "../components/RapidScreen";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -405,7 +406,9 @@ export function AbstractPage() {
         />
       )}
       {!r && !s.uniquePapers && !s.query && (
-        <Alert><AlertDescription>Define a research goal on the Home page first.</AlertDescription></Alert>
+        <EmptyState icon={Search} title="No research goal yet"
+          description="Define your research question and search strategy on the Home page, then come back to screen titles and abstracts."
+          action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }} />
       )}
       {!r && !s.uniquePapers && s.query && (
         <Alert>

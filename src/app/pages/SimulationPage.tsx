@@ -10,6 +10,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "../componen
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import { ClipboardList, RefreshCw, FileText } from "lucide-react";
+import { EmptyState } from "../components/EmptyState";
 import { ChevronDown, ChevronLeft, ChevronRight, Bot, Play, X, History, GitCompare, Trash2, FlaskConical, Wand2, Loader2, RotateCcw, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { QueryDiff } from "../components/QueryDiff";
@@ -302,7 +303,9 @@ export function SimulationPage() {
   }, [newestRunId]);
 
   if (s.history.length === 0) {
-    return <Alert><AlertDescription>Start by defining a research goal on the Home page.</AlertDescription></Alert>;
+    return <EmptyState icon={ClipboardList} title="No research goal yet"
+      description="Define your research question on the Home page to generate and tune per-database search queries here."
+      action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: ClipboardList }} />;
   }
 
   const updateUnified = (v: string) => {
