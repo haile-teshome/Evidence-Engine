@@ -4,6 +4,7 @@ import { useStore, TextExtractionResult, TextEvidenceItem } from "../lib/store";
 import { AIService } from "../lib/mockServices";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
+import { EmptyState } from "../components/EmptyState";
 import { Button } from "../components/ui/button";
 import { Textarea } from "../components/ui/textarea";
 import { Input } from "../components/ui/input";
@@ -114,8 +115,12 @@ export function TextExtractionPage() {
     setFormRows(rows => rows.map(r => r.paper_id === pid ? { ...r, status: { ...r.status, [fid]: st } } : r));
   const formFileRef = useRef<HTMLInputElement>(null);
 
-  if (!s.results) return <Alert><AlertDescription>Complete Abstract Screening first.</AlertDescription></Alert>;
-  if (acquired.length === 0) return <Alert><AlertDescription>No full texts acquired yet. Fetch them on Full-Text Acquisition first.</AlertDescription></Alert>;
+  if (!s.results) return <EmptyState icon={ScanText} title="Screening not complete yet"
+    description="Complete Abstract Screening first; included studies unlock natural-language text extraction here."
+    action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Search }} />;
+  if (acquired.length === 0) return <EmptyState icon={ScanText} title="No full texts yet"
+    description="Fetch the full text for your included studies on Full-Text Acquisition, then extract values here."
+    action={{ label: "Go to Full-Text Acquisition", onClick: () => s.setPage("acquisition"), icon: Search }} />;
 
   async function run() {
     if (!query.trim()) { toast.error("Enter a question or instruction first."); return; }

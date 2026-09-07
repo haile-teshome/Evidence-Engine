@@ -12,6 +12,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from ".
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, CheckCircle2 } from "lucide-react";
+import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { ScreenResult, FullTextResult } from "../lib/apiClient";
 import { compileAuditLog, auditToJson, auditToCsv } from "../lib/auditLog";
@@ -694,11 +695,9 @@ export function WritingPage() {
 
   if (!includedPapers.length) {
     return (
-      <Alert>
-        <AlertDescription>
-          No articles found. Run a search on the Home page first.
-        </AlertDescription>
-      </Alert>
+      <EmptyState icon={BookOpen} title="No articles yet"
+        description="Run a search on the Home page to gather included studies, then come back to export citations and draft your methods."
+        action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }} />
     );
   }
 
@@ -810,21 +809,21 @@ export function WritingPage() {
                   />
                 </div>
               </div>
-              <div className="overflow-auto flex-1">
+              <div className="overflow-auto flex-1 flex flex-col items-stretch">
                 {filtered.map(({ p, n }) => {
                   const active = p.paper_id === selectedRow?.p.paper_id;
                   return (
                     <button
                       key={p.paper_id}
                       onClick={() => setSelectedId(p.paper_id)}
-                      className={`w-full text-left px-3 py-2.5 border-b transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent hover:bg-muted/50"}`}
+                      className={`w-full shrink-0 text-left px-3 py-2.5 border-b transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent hover:bg-muted/50"}`}
                     >
                       <div className="flex items-center gap-2 mb-1 text-[10px] text-muted-foreground">
                         <span className="tabular-nums">[{n}]</span>
                         <Badge variant="outline" className="text-[10px]">{p.source}</Badge>
                         {p.year && <span className="tabular-nums">{p.year}</span>}
                       </div>
-                      <div className="text-sm leading-snug line-clamp-2 max-h-[2.75em] overflow-hidden">{p.title}</div>
+                      <div className="text-sm leading-snug line-clamp-2">{p.title}</div>
                     </button>
                   );
                 })}
