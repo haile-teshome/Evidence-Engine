@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride, GradeOutcome } from "./mockServices";
-import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method, SearchLogEntry, ReviewProtocol, ProtocolDeviation } from "./apiClient";
+import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method, SearchLogEntry, ReviewProtocol, ProtocolDeviation, SelectionStrategy, SearchFilters } from "./apiClient";
 import { FRESH_LAUNCH } from "./launchFlags";
 import { idbGet, idbSet, idbDel } from "./idb";
 import type { FrameworkId } from "./frameworks";
@@ -149,6 +149,15 @@ type Ctx = {
   // Per-database paper cap overrides (source name -> max). Sources without an
   // entry fall back to numPerSource. Edited in the Strategy Review modal.
   perSourceLimits: Record<string, number>; setPerSourceLimits: React.Dispatch<React.SetStateAction<Record<string, number>>>;
+  // Which records to keep when a source matches more than its cap: best match
+  // ("relevance", default) or newest ("recent"). Chosen in the Review modal.
+  searchSelection: SelectionStrategy; setSearchSelection: (v: SelectionStrategy) => void;
+  // Researcher-set search filters (e.g. publication-year window). Applied at
+  // fetch time in the main search.
+  searchFilters: SearchFilters; setSearchFilters: React.Dispatch<React.SetStateAction<SearchFilters>>;
+  // Manual include/exclude overrides on the relevance rerank, keyed by paper id.
+  // "keep"/"drop" override the auto threshold decision in the Relevance explorer.
+  relevanceOverrides: Record<string, "keep" | "drop">; setRelevanceOverrides: React.Dispatch<React.SetStateAction<Record<string, "keep" | "drop">>>;
   files: File[]; setFiles: (v: File[]) => void;
 
   // Strategy
@@ -175,6 +184,9 @@ type Ctx = {
 
   // Quality Assessment
   rawPapers: Paper[] | null; setRawPapers: (v: Paper[] | null) => void;
+  // Records the reviewer marked as relevant "seed" studies (relevance feedback);
+  // fed back into the grounded query builder to broaden concepts.
+  seedIds: Set<string>; setSeedIds: React.Dispatch<React.SetStateAction<Set<string>>>;
   uniquePapers: Paper[] | null; setUniquePapers: (v: Paper[] | null) => void;
   duplicatesCount: number; setDuplicatesCount: (v: number) => void;
   qualityReports: QualityReport[] | null; setQualityReports: (v: QualityReport[] | null) => void;
@@ -338,6 +350,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [sources, setSources] = useState<string[]>(["PubMed", "Europe PMC", "Semantic Scholar"]);
   const [numPerSource, setNumPerSource] = useState(15);
   const [perSourceLimits, setPerSourceLimits] = useState<Record<string, number>>({});
+  const [searchSelection, setSearchSelection] = useState<SelectionStrategy>("relevance");
+  const [searchFilters, setSearchFilters] = useState<SearchFilters>({});
+  const [relevanceOverrides, setRelevanceOverrides] = useState<Record<string, "keep" | "drop">>({});
   const [files, setFiles] = useState<File[]>([]);
 
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -369,6 +384,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const clearSimulationRuns = () => setSimulationRuns([]);
 
   const [rawPapers, setRawPapers] = useState<Paper[] | null>(null);
+  const [seedIds, setSeedIds] = useState<Set<string>>(new Set());
   const [uniquePapers, setUniquePapers] = useState<Paper[] | null>(null);
   const [duplicatesCount, setDuplicatesCount] = useState(0);
   const [qualityReports, setQualityReports] = useState<QualityReport[] | null>(null);
@@ -530,7 +546,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const snapshot = () => ({
     history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
-    sources, numPerSource, perSourceLimits, model,
+    sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model,
     rawPapers, uniquePapers, duplicatesCount, qualityReports, qualityArchive,
     excludedByQuality: Array.from(excludedByQuality),
     qualityOverrides,
@@ -584,6 +600,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setPerDbQueries(prev => pick(d.perDbQueries, prev, {}) ?? {});
     if (Array.isArray(d.sources)) setSources(d.sources);
     if (typeof d.numPerSource === "number") setNumPerSource(d.numPerSource);
+    if (d.searchSelection === "relevance" || d.searchSelection === "recent") setSearchSelection(d.searchSelection);
+    if (d.searchFilters && typeof d.searchFilters === "object") setSearchFilters(d.searchFilters);
+    if (d.relevanceOverrides && typeof d.relevanceOverrides === "object") setRelevanceOverrides(d.relevanceOverrides);
     setPerSourceLimits(d.perSourceLimits && typeof d.perSourceLimits === "object" ? d.perSourceLimits : {});
     if (d.model) setModel(d.model);
     setRawPapers(prev => pick(d.rawPapers, prev));
@@ -671,7 +690,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }, 600);
     return () => clearTimeout(t);
   }, [history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
-      sources, numPerSource, perSourceLimits, model, rawPapers, uniquePapers, duplicatesCount,
+      sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model, rawPapers, uniquePapers, duplicatesCount,
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
       searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive, fullTextResults,
@@ -732,12 +751,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   };
 
   const value: Ctx = {
-    page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, perSourceLimits, setPerSourceLimits, files, setFiles,
+    page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, perSourceLimits, setPerSourceLimits, searchSelection, setSearchSelection, searchFilters, setSearchFilters, relevanceOverrides, setRelevanceOverrides, files, setFiles,
     history, setHistory, docQa, setDocQa, pico, setPico, framework, setFramework, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
     unifiedSearchQuery, setUnifiedSearchQuery, perDbQueries, setPerDbQueries, simulation, setSimulation,
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
     simulationRuns, addSimulationRun, clearSimulationRuns,
-    rawPapers, setRawPapers, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
+    rawPapers, setRawPapers, seedIds, setSeedIds, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
     qualityReports, setQualityReports, qualityArchive, setQualityArchive, excludedByQuality, setExcludedByQuality,
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
     gradeOutcomes, setGradeOutcomes,
