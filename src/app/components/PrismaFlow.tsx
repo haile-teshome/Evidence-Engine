@@ -142,7 +142,7 @@ const BOX_STYLE = "border border-[#a3c4c2] bg-white rounded text-xs leading-snug
 const EXCLUDED_BOX_STYLE = "border border-[#a3c4c2] bg-white rounded text-xs leading-snug p-2.5 text-[#0f172a] w-full";
 const PHASE_BAR = "text-white text-[10px] font-bold tracking-widest uppercase writing-vertical flex items-center justify-center bg-[#0d6b66] w-7 shrink-0 select-none";
 // Light teal panel behind each phase group, in our colour.
-const SECTION_PANEL = "flex items-stretch bg-[#eef6f5]";
+const SECTION_PANEL = "flex items-stretch bg-[#eef6f5] rounded-xl overflow-hidden border border-[#cfe3e1] shadow-sm";
 
 // ---------------------------------------------------------------------------
 // Exclusion box (right side, with expandable paper list)
@@ -318,24 +318,25 @@ export function PrismaFlow({
   const sourceCounts = counts.source_counts ?? {};
 
   // ---- Export helpers -------------------------------------------------------
-  const buildSvgString = useCallback((): string => {
-    return buildPrisma2020Svg({
-      identified: n("identified", counts.identified),
-      sourceCounts,
-      otherSources: n("otherSources", otherSources),
-      duplicatesRemoved: n("duplicatesRemoved", counts.duplicates_removed),
-      afterDuplicates: n("afterDuplicates", afterDuplicates),
-      screened: n("screened", screened),
-      abstractExcluded: n("abstractExcluded", abstractExcluded),
-      abstractExcItems,
-      soughtRetrieval: n("soughtRetrieval", assessed),
-      notRetrieved: n("notRetrieved", 0),
-      assessed: n("assessed", assessed),
-      ftExcItems,
-      included: n("included", included),
-      labels: labelEdits,
-    });
-  }, [n, counts, sourceCounts, afterDuplicates, screened, abstractExcluded, abstractExcItems, assessed, ftExcItems, included, labelEdits, nEdits]);
+  const prismaData = useCallback((): SvgData => ({
+    identified: n("identified", counts.identified),
+    sourceCounts,
+    otherSources: n("otherSources", otherSources),
+    duplicatesRemoved: n("duplicatesRemoved", counts.duplicates_removed),
+    afterDuplicates: n("afterDuplicates", afterDuplicates),
+    screened: n("screened", screened),
+    abstractExcluded: n("abstractExcluded", abstractExcluded),
+    abstractExcItems,
+    soughtRetrieval: n("soughtRetrieval", assessed),
+    notRetrieved: n("notRetrieved", 0),
+    assessed: n("assessed", assessed),
+    ftExcItems,
+    included: n("included", included),
+    labels: labelEdits,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [n, counts, sourceCounts, afterDuplicates, screened, abstractExcluded, abstractExcItems, assessed, ftExcItems, included, labelEdits, nEdits]);
+
+  const buildSvgString = useCallback((): string => buildPrisma2020Svg(prismaData()), [prismaData]);
 
   function exportSvg() {
     try {
@@ -353,27 +354,21 @@ export function PrismaFlow({
   // Numbers/labels are edited inline in the app before exporting, so the figure
   // always reflects the current data.
   async function exportDocx() {
-    const { Document, Packer, Paragraph, ImageRun, AlignmentType } = await import("docx");
-    const { blob, w, h } = await rasterizeSvg(buildSvgString(), 3);
-    const data = new Uint8Array(await blob.arrayBuffer());
-    // Fit the figure to the Letter content width (~6.5in = 624px at 96 DPI),
-    // preserving aspect ratio; the 3x raster keeps it crisp when scaled down.
-    const dispW = 624;
-    const dispH = Math.round(dispW * (h / w));
+    const docx = await import("docx");
+    const { Document, Packer } = docx;
+    // Build the figure as native DrawingML shapes (rounded boxes, teal phase
+    // pills, real connector arrows) with editable text — no "Convert to Shape".
     const doc = new Document({
       sections: [{
-        properties: {},
-        children: [
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [new ImageRun({ type: "png", data, transformation: { width: dispW, height: dispH } })],
-          }),
-        ],
+        properties: { page: {
+          margin: { top: 900, bottom: 720, left: 720, right: 720 },  // 0.5in sides so the wide figure fits
+        } },
+        children: buildPrismaDocx(prismaData(), docx),
       }],
     });
     const out = await Packer.toBlob(doc);
     triggerDownload(out, `prisma-${new Date().toISOString().slice(0, 10)}.docx`);
-    toast.success("Exported as Word document");
+    toast.success("Exported as an editable Word figure");
   }
 
   // ---- Render ---------------------------------------------------------------
@@ -381,15 +376,15 @@ export function PrismaFlow({
   // Clean flow connectors: a solid teal line with a triangular arrowhead.
   const DOWN = "#0d6b66";
   const DownArrow = () => (
-    <div className="flex flex-col items-center justify-center">
-      <div className="w-[2.5px] h-7 rounded-full" style={{ background: DOWN }} />
-      <div className="size-0 -mt-px" style={{ borderLeft: "5px solid transparent", borderRight: "5px solid transparent", borderTop: `9px solid ${DOWN}` }} />
+    <div className="flex flex-col items-center justify-center self-stretch min-h-full">
+      <div className="w-[3px] flex-1 min-h-[2rem] rounded-full" style={{ background: DOWN }} />
+      <div className="size-0 -mt-px" style={{ borderLeft: "7px solid transparent", borderRight: "7px solid transparent", borderTop: `12px solid ${DOWN}` }} />
     </div>
   );
   const RightArrow = () => (
     <div className="flex items-center self-center w-full">
-      <div className="h-[2.5px] flex-1 rounded-full" style={{ background: DOWN }} />
-      <div className="size-0 -ml-px" style={{ borderTop: "5px solid transparent", borderBottom: "5px solid transparent", borderLeft: `9px solid ${DOWN}` }} />
+      <div className="h-[3px] flex-1 rounded-full" style={{ background: DOWN }} />
+      <div className="size-0 -ml-px" style={{ borderTop: "7px solid transparent", borderBottom: "7px solid transparent", borderLeft: `12px solid ${DOWN}` }} />
     </div>
   );
 
@@ -425,7 +420,7 @@ export function PrismaFlow({
 
       {/* PRISMA 2020 diagram */}
       <div className="overflow-x-auto">
-        <div className="min-w-[700px] rounded-xl overflow-hidden border border-[#cfe3e1]">
+        <div className="min-w-[700px] flex flex-col">
 
           {/* ── IDENTIFICATION ─────────────────────────────────────────── */}
           <div className={SECTION_PANEL}>
@@ -473,10 +468,10 @@ export function PrismaFlow({
           </div>
 
           {/* Flow arrow between Identification and Screening. */}
-          <div className="flex items-stretch bg-[#eef6f5]">
-            <div className="bg-[#0d6b66] w-7 shrink-0" />
-            <div className="flex-1 px-2.5 py-1">
-              <div className="grid grid-cols-[5fr_48px_6fr] gap-2"><DownArrow /><div /><div /></div>
+          <div className="flex py-3">
+            <div className="w-7 shrink-0" />
+            <div className="flex-1 px-2.5">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2"><div className="flex justify-center"><DownArrow /></div><div /><div /></div>
             </div>
           </div>
 
@@ -511,7 +506,7 @@ export function PrismaFlow({
               </div>
 
               {/* Down arrow, centered under the left (flow) column */}
-              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 py-2.5"><DownArrow /><div /><div /></div>
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 py-2.5"><div className="flex justify-center"><DownArrow /></div><div /><div /></div>
 
               {/* Row: sought for retrieval → not retrieved */}
               <div className="grid grid-cols-[5fr_48px_6fr] gap-2 items-start">
@@ -531,7 +526,7 @@ export function PrismaFlow({
               </div>
 
               {/* Down arrow, centered under the left (flow) column */}
-              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 py-2.5"><DownArrow /><div /><div /></div>
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2 py-2.5"><div className="flex justify-center"><DownArrow /></div><div /><div /></div>
 
               {/* Row: assessed for eligibility → excluded at full text.
                   Reasons + counts only, no per-study disclosure. */}
@@ -567,10 +562,10 @@ export function PrismaFlow({
           {/* Between-phase arrow: mirror the panel layout (invisible phase-bar
               spacer + p-2.5 + the same gap-2 grid) so it lines up exactly under
               the flow column, instead of an approximate padding. */}
-          <div className="flex items-stretch bg-[#eef6f5]">
-            <div className="bg-[#0d6b66] w-7 shrink-0" />
-            <div className="flex-1 px-2.5 py-1">
-              <div className="grid grid-cols-[5fr_48px_6fr] gap-2"><DownArrow /><div /><div /></div>
+          <div className="flex py-3">
+            <div className="w-7 shrink-0" />
+            <div className="flex-1 px-2.5">
+              <div className="grid grid-cols-[5fr_48px_6fr] gap-2"><div className="flex justify-center"><DownArrow /></div><div /><div /></div>
             </div>
           </div>
           <div className={SECTION_PANEL}>
@@ -635,184 +630,367 @@ type SvgData = {
   included: number; labels: Record<string, string>;
 };
 
+// Text run inside a box line. Runs flow inline as <tspan>s so a label and its
+// green "(n = …)" count share one editable <text> element in the exported SVG.
+type Run = { text: string; bold?: boolean; color?: string };
+type BoxLine = { runs: Run[]; indent?: boolean; right?: Run; size?: number };
+
 function buildPrisma2020Svg(d: SvgData): string {
+  // Geometry mirrors the on-screen card layout (SECTION_PANEL + grid-cols
+  // [5fr 48px 6fr]) so the export is a 1:1 match that stays fully editable:
+  // every label and number is real <text>, not baked into a raster.
   const W = 920;
-  const NAVY = "#166534";     // header numbers / bold labels
-  const TEAL = "#0d6b66";     // phase bars (matches the on-screen look)
-  const PANEL = "#eef6f5";    // light phase-group background
-  const LIGHT = "#f0fdf4";    // highlighted boxes
-  const BORDER = "#a3c4c2";   // soft box strokes
-  const ARROW = "#0d6b66";    // connector arrows (match the phase bars)
-  const TEXT = "#0f172a";
-  const GRAY = "#475569";
+  const TEAL = "#0d6b66";        // phase bar
+  const PANEL = "#eef6f5";       // card background
+  const CARD_BORDER = "#cfe3e1"; // card outline
+  const BORDER = "#a3c4c2";      // inner box outline
+  const ARROW = "#0d6b66";       // connector arrows
+  const TEXT = "#0f172a";        // primary ink
+  const GREEN = "#166534";       // counts
+  const GRAY = "#6b7280";        // sub-source ink
   const FONT = `font-family="Calibri, Arial, sans-serif"`;
 
+  const CARD_X = 6, CARD_W = W - 12;      // 6 … 914
   const BAR_W = 28;
-  const COL_GAP = 16;
-  const LEFT = BAR_W + COL_GAP + 14;
-  const RIGHT_COL = (W - LEFT) / 2 + LEFT;
-  const COL_W = (W - LEFT - COL_GAP * 3) / 2;
-  const BOX_PAD = 11;
-  const LH = 18;
+  const PAD = 10;                          // card content padding (p-2.5)
+  const contentX = CARD_X + BAR_W + PAD;   // 44
+  const contentR = CARD_X + CARD_W - PAD;  // 904
+  const contentW = contentR - contentX;    // 860
+  const GAP = 8, MID = 48;
+  const flex = contentW - MID - GAP * 2;   // 796
+  const leftColW = Math.round((5 / 11) * flex);   // 362
+  const rightColW = flex - leftColW;              // 434
+  const leftColX = contentX;               // 44
+  const rightColX = leftColX + leftColW + GAP + MID + GAP; // 470
+  const flowCenterX = leftColX + leftColW / 2;    // centre of the flow column
+  const leftColR = leftColX + leftColW;    // right edge of the flow-column box
+
+  const LH = 17, PAD_BOX = 10;
+  const bh = (nLines: number) => PAD_BOX * 2 + nLines * LH;
+
+  const L = (k: string, def: string) => (d.labels && d.labels[k]) || def;
+  const num = (v: number) => v.toLocaleString();
+
+  const title = (label: string, n: number, size = 11.5): BoxLine =>
+    ({ runs: [{ text: label + " ", bold: true, color: TEXT }, { text: `(n = ${num(n)})`, bold: true, color: GREEN }], size });
+  const sub = (label: string, n: number): BoxLine =>
+    ({ runs: [{ text: `${label} (n = ${num(n)})`, color: GRAY }], indent: true, size: 10.5 });
+  const reason = (label: string, n: number): BoxLine =>
+    ({ runs: [{ text: label, color: TEXT }], right: { text: `(n = ${num(n)})`, bold: true, color: TEXT }, size: 10.5 });
+
+  const parts: string[] = [];
+
+  // A white content box with inline, editable text runs.
+  function box(x: number, y: number, w: number, lines: BoxLine[], dashed = false): string {
+    const h = bh(lines.length);
+    let s = `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="5" fill="#ffffff" stroke="${BORDER}" stroke-width="1.25"${dashed ? ' stroke-dasharray="5,3"' : ""}/>`;
+    lines.forEach((ln, i) => {
+      const baseY = y + PAD_BOX + LH * i + 12;
+      const tx = x + PAD_BOX + (ln.indent ? 12 : 0);
+      const size = ln.size ?? 11;
+      const runs = ln.runs.map(r => `<tspan fill="${r.color ?? TEXT}" font-weight="${r.bold ? "bold" : "normal"}">${esc(r.text)}</tspan>`).join("");
+      s += `<text x="${tx}" y="${baseY}" ${FONT} font-size="${size}">${runs}</text>`;
+      if (ln.right) s += `<text x="${x + w - PAD_BOX}" y="${baseY}" ${FONT} font-size="${size}" text-anchor="end" font-weight="${ln.right.bold ? "bold" : "normal"}" fill="${ln.right.color ?? TEXT}">${esc(ln.right.text)}</text>`;
+    });
+    return s;
+  }
+
+  // Card shell: rounded panel + border + left teal phase bar with a rotated label.
+  function card(y: number, h: number, label: string): string {
+    const r = 14;
+    let s = `<rect x="${CARD_X}" y="${y}" width="${CARD_W}" height="${h}" rx="${r}" fill="${PANEL}" stroke="${CARD_BORDER}" stroke-width="1.25"/>`;
+    const bx = CARD_X + 1, by = y + 1, bhgt = h - 2, bw = BAR_W - 1, br = r - 1;
+    s += `<path d="M${bx + bw},${by} L${bx + br},${by} Q${bx},${by} ${bx},${by + br} L${bx},${by + bhgt - br} Q${bx},${by + bhgt} ${bx + br},${by + bhgt} L${bx + bw},${by + bhgt} Z" fill="${TEAL}"/>`;
+    const tcx = CARD_X + BAR_W / 2, tcy = y + h / 2;
+    s += `<text x="${tcx}" y="${tcy}" ${FONT} font-size="10.5" font-weight="bold" letter-spacing="1.5" fill="#ffffff" text-anchor="middle" dominant-baseline="central" transform="rotate(-90 ${tcx} ${tcy})">${esc(label.toUpperCase())}</text>`;
+    return s;
+  }
+
+  const arrowDown = (cx: number, y1: number, y2: number) =>
+    `<line x1="${cx}" y1="${y1}" x2="${cx}" y2="${y2}" stroke="${ARROW}" stroke-width="3" stroke-linecap="round" marker-end="url(#arr)"/>`;
+  const arrowRight = (yc: number, x1: number, x2: number) =>
+    `<line x1="${x1}" y1="${yc}" x2="${x2}" y2="${yc}" stroke="${ARROW}" stroke-width="3" stroke-linecap="round" marker-end="url(#arr)"/>`;
+
+  const GAP_CARD = 40;  // vertical band + arrow between phase cards
+  const GAP_ROW = 34;   // vertical band + arrow between rows inside a card
 
   let y = 20;
-  const parts: string[] = [];
-  const phaseBars: { x: number; y: number; h: number; label: string }[] = [];
-
-  const boxRect = (x: number, bY: number, w: number, h: number, fill = "#fff", dashed = false) =>
-    `<rect x="${x}" y="${bY}" width="${w}" height="${h}" rx="4" fill="${fill}" stroke="${BORDER}" stroke-width="1.25"${dashed ? ' stroke-dasharray="5,3"' : ""}/>`;
-
-  const txt = (x: number, tY: number, text: string, opts: { bold?: boolean; size?: number; color?: string; anchor?: string } = {}) =>
-    `<text x="${x}" y="${tY}" ${FONT} font-size="${opts.size ?? 12}" font-weight="${opts.bold ? "bold" : "normal"}" fill="${opts.color ?? TEXT}" text-anchor="${opts.anchor ?? "start"}">${esc(text)}</text>`;
-
-  function textBox(x: number, bY: number, w: number, lines: { text: string; bold?: boolean; indent?: boolean; color?: string; right?: string }[], fill = "#fff", dashed = false) {
-    let lineY = bY + BOX_PAD + LH;
-    const totalH = BOX_PAD * 2 + lines.length * LH;
-    const rects = boxRect(x, bY, w, totalH, fill, dashed);
-    const texts = lines.map(l => {
-      const ix = x + BOX_PAD + (l.indent ? 12 : 0);
-      const size = l.bold ? 11.5 : 10.5;
-      let t = txt(ix, lineY, l.text, { bold: l.bold, color: l.color, size });
-      // A right-aligned count on the same line (e.g. excluded reasons: "… (n = 8)").
-      if (l.right) t += txt(x + w - BOX_PAD, lineY, l.right, { bold: l.bold, color: l.color, size, anchor: "end" });
-      lineY += LH;
-      return t;
-    }).join("");
-    return { svg: rects + texts, h: totalH };
-  }
-
-  function arrow(x1: number, y1: number, x2: number, y2: number, _horizontal = false) {
-    return `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${ARROW}" stroke-width="2.6" stroke-linecap="round" marker-end="url(#arr)"/>`;
-  }
-
-  parts.push(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} 900" width="${W}" height="900" ${FONT}>`,
-    `<defs><marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${ARROW}"/></marker></defs>`,
-    `<rect width="${W}" height="900" fill="#ffffff"/>`,
-  );
 
   // Title, centered above the flow.
-  parts.push(txt(W / 2, y + 16, "PRISMA 2020 Flow Diagram", { bold: true, size: 17, color: NAVY, anchor: "middle" }));
-  y += 42;
+  parts.push(`<text x="${W / 2}" y="${y + 16}" ${FONT} font-size="17" font-weight="bold" fill="${GREEN}" text-anchor="middle">PRISMA 2020 Flow Diagram</text>`);
+  y += 46;
 
   // ── IDENTIFICATION ──────────────────────────────────────────────────────
-  const identStart = y;
-
-  // Two top boxes
-  const srcLines: { text: string; bold?: boolean; indent?: boolean; color?: string }[] = [
-    { text: `Studies from databases/registers (n = ${d.identified.toLocaleString()})`, bold: true, color: NAVY },
-    ...Object.entries(d.sourceCounts).map(([k, v]) => ({ text: `${k} (n = ${v.toLocaleString()})`, indent: true, color: GRAY })),
+  const dbLines: BoxLine[] = [
+    title(L("dbTitle", "Studies from databases/registers"), d.identified),
+    ...Object.entries(d.sourceCounts).map(([k, v]) => sub(L(`src|${k}`, k), v)),
   ];
-  const otherLines = [
-    { text: `References from other sources (n = ${d.otherSources.toLocaleString()})`, bold: true, color: NAVY },
-    { text: `Citation searching (n = 0)`, indent: true, color: GRAY },
-    { text: `Grey literature (n = 0)`, indent: true, color: GRAY },
+  const otherLines: BoxLine[] = [
+    title(L("otherTitle", "References from other sources"), d.otherSources),
+    sub("Citation searching", 0),
+    sub("Grey literature", 0),
   ];
-  const maxTopH = Math.max(srcLines.length, otherLines.length) * LH + BOX_PAD * 2;
-
-  const srcBox = textBox(LEFT, y, COL_W, srcLines);
-  const othBox = textBox(RIGHT_COL, y, COL_W, otherLines);
-  parts.push(srcBox.svg, othBox.svg);
-
-  const spineX = LEFT + COL_W / 2;
-
-  // References-removed box (right column), placed just below the top boxes.
-  const removedLines = [
-    { text: `References removed before screening (n = ${d.duplicatesRemoved.toLocaleString()})`, bold: true, color: NAVY },
-    { text: `Duplicate records (n = ${d.duplicatesRemoved.toLocaleString()})`, indent: true, color: GRAY },
+  const removedLines: BoxLine[] = [
+    title(L("removedTitle", "References removed before screening"), d.duplicatesRemoved),
+    sub("Duplicate records", d.duplicatesRemoved),
+    sub("Marked ineligible by automation", 0),
   ];
-  const removedY = identStart + maxTopH + 18;
-  const removedBox = textBox(RIGHT_COL, removedY, COL_W, removedLines, LIGHT);
-  parts.push(removedBox.svg);
-  const branchY = removedY + removedBox.h / 2;
+  const idRow1H = Math.max(bh(dbLines.length), bh(otherLines.length));
+  const idRow2H = bh(removedLines.length);
+  const idCardH = PAD + idRow1H + 8 + idRow2H + PAD;
+  const idTop = y;
+  parts.push(card(idTop, idCardH, "Identification"));
+  parts.push(box(leftColX, idTop + PAD, leftColW, dbLines));
+  parts.push(box(rightColX, idTop + PAD, rightColW, otherLines));
+  parts.push(box(rightColX, idTop + PAD + idRow1H + 8, rightColW, removedLines));
+  y = idTop + idCardH;
 
-  y = removedY + removedBox.h + 18;
-  const identEnd = y;
-  phaseBars.push({ x: 10, y: identStart, h: identEnd - identStart, label: "Identification" });
+  // Arrow band between Identification and Screening.
+  parts.push(arrowDown(flowCenterX, y + 8, y + GAP_CARD - 2));
+  y += GAP_CARD;
 
-  // ── SCREENING ─────────────────────────────────────────────────────────
-  const screenStart = y;
-
-  // Row 1: screened → excluded
-  const screenedBox = textBox(LEFT, y, COL_W, [{ text: `Studies screened (n = ${d.screened.toLocaleString()})`, bold: true, color: NAVY }]);
-  const absExcLines: { text: string; bold?: boolean; indent?: boolean; color?: string; right?: string }[] = [
-    { text: `Studies excluded (n = ${d.abstractExcluded.toLocaleString()})`, bold: true, color: NAVY },
-    ...d.abstractExcItems.map(it => ({ text: it.label, right: `(n = ${it.count.toLocaleString()})`, indent: true, color: GRAY })),
+  // ── SCREENING ───────────────────────────────────────────────────────────
+  const screenedLines: BoxLine[] = [title(L("screenedTitle", "Studies screened"), d.screened)];
+  const absExcLines: BoxLine[] = [
+    title(L("absExcTitle", "Studies excluded"), d.abstractExcluded),
+    ...d.abstractExcItems.map(it => reason(it.label, it.count)),
   ];
-  const absExcBox = textBox(RIGHT_COL, y, COL_W, absExcLines);
-  const row1H = Math.max(screenedBox.h, absExcBox.h);
-  parts.push(screenedBox.svg, absExcBox.svg);
-
-  // Continuous spine: identified box bottom, elbow out to the removed box, then
-  // straight down into the screened box (the standard PRISMA connector layout).
-  parts.push(`<line x1="${spineX}" y1="${identStart + maxTopH}" x2="${spineX}" y2="${branchY}" stroke="${ARROW}" stroke-width="2.6" stroke-linecap="round"/>`);
-  parts.push(arrow(spineX, branchY, RIGHT_COL, branchY, true));
-  parts.push(arrow(spineX, branchY, spineX, screenStart));
-
-  parts.push(arrow(LEFT + COL_W, y + screenedBox.h / 2, RIGHT_COL, y + screenedBox.h / 2, true));
-  y += row1H + 18;
-  parts.push(arrow(spineX, y - 18, spineX, y));
-
-  // Row 2: sought for retrieval → not retrieved
-  const soughtBox = textBox(LEFT, y, COL_W, [{ text: `Studies sought for retrieval (n = ${d.soughtRetrieval.toLocaleString()})`, bold: true, color: NAVY }]);
-  const notRetBox = textBox(RIGHT_COL, y, COL_W, [{ text: `Studies not retrieved (n = ${d.notRetrieved.toLocaleString()})`, bold: true, color: NAVY }]);
-  parts.push(soughtBox.svg, notRetBox.svg);
-  parts.push(arrow(LEFT + COL_W, y + soughtBox.h / 2, RIGHT_COL, y + soughtBox.h / 2, true));
-  y += Math.max(soughtBox.h, notRetBox.h) + 18;
-  parts.push(arrow(spineX, y - 18, spineX, y));
-
-  // Row 3: assessed → excluded at ft
-  const assessedBox = textBox(LEFT, y, COL_W, [{ text: `Studies assessed for eligibility (n = ${d.assessed.toLocaleString()})`, bold: true, color: NAVY }]);
-  const ftExcLines: { text: string; bold?: boolean; indent?: boolean; color?: string; right?: string }[] = [
-    { text: `Studies excluded (n = ${d.ftExcItems.reduce((s, it) => s + it.count, 0).toLocaleString()})`, bold: true, color: NAVY },
-    ...d.ftExcItems.map(it => ({ text: it.label, right: `(n = ${it.count.toLocaleString()})`, indent: true, color: GRAY })),
+  const soughtLines: BoxLine[] = [title(L("soughtTitle", "Studies sought for retrieval"), d.soughtRetrieval)];
+  const notRetLines: BoxLine[] = [title(L("notRetrievedTitle", "Studies not retrieved"), d.notRetrieved)];
+  const ftTotal = d.ftExcItems.reduce((s, it) => s + it.count, 0);
+  const assessedLines: BoxLine[] = [title(L("assessedTitle", "Studies assessed for eligibility"), d.assessed)];
+  const ftExcLines: BoxLine[] = [
+    title(L("ftExcTitle", "Studies excluded"), ftTotal),
+    ...d.ftExcItems.map(it => reason(it.label, it.count)),
   ];
-  const ftExcBox = textBox(RIGHT_COL, y, COL_W, ftExcLines.length > 1 ? ftExcLines : [{ text: `Studies excluded (n = 0)`, bold: true, color: NAVY }]);
-  const row3H = Math.max(assessedBox.h, ftExcBox.h);
-  parts.push(assessedBox.svg, ftExcBox.svg);
-  parts.push(arrow(LEFT + COL_W, y + assessedBox.h / 2, RIGHT_COL, y + assessedBox.h / 2, true));
-  y += row3H + 18;
 
-  const screenEnd = y;
-  phaseBars.push({ x: 10, y: screenStart, h: screenEnd - screenStart, label: "Screening" });
+  const scRowAH = Math.max(bh(screenedLines.length), bh(absExcLines.length));
+  const scRowBH = Math.max(bh(soughtLines.length), bh(notRetLines.length));
+  const scRowCH = Math.max(bh(assessedLines.length), bh(ftExcLines.length));
+  const scCardH = PAD + scRowAH + GAP_ROW + scRowBH + GAP_ROW + scRowCH + PAD;
+  const scTop = y;
+  parts.push(card(scTop, scCardH, "Screening"));
+
+  let ry = scTop + PAD;
+  // Row A: screened → excluded
+  parts.push(box(leftColX, ry, leftColW, screenedLines));
+  parts.push(box(rightColX, ry, rightColW, absExcLines));
+  parts.push(arrowRight(ry + bh(1) / 2, leftColR, rightColX));
+  ry += scRowAH;
+  parts.push(arrowDown(flowCenterX, ry + 4, ry + GAP_ROW - 2));
+  ry += GAP_ROW;
+  // Row B: sought → not retrieved
+  parts.push(box(leftColX, ry, leftColW, soughtLines));
+  parts.push(box(rightColX, ry, rightColW, notRetLines));
+  parts.push(arrowRight(ry + bh(1) / 2, leftColR, rightColX));
+  ry += scRowBH;
+  parts.push(arrowDown(flowCenterX, ry + 4, ry + GAP_ROW - 2));
+  ry += GAP_ROW;
+  // Row C: assessed → excluded at full text
+  parts.push(box(leftColX, ry, leftColW, assessedLines));
+  parts.push(box(rightColX, ry, rightColW, ftExcLines));
+  parts.push(arrowRight(ry + bh(1) / 2, leftColR, rightColX));
+  y = scTop + scCardH;
+
+  // Arrow band between Screening and Included.
+  parts.push(arrowDown(flowCenterX, y + 8, y + GAP_CARD - 2));
+  y += GAP_CARD;
 
   // ── INCLUDED ──────────────────────────────────────────────────────────
-  const inclStart = y;
-  parts.push(arrow(spineX, y - 18, spineX, y));
+  const includedLines: BoxLine[] = [title(L("includedTitle", "Studies included in review"), d.included)];
+  const ongoingLines: BoxLine[] = [
+    title(L("ongoingTitle", "Included studies ongoing"), 0),
+    title(L("awaitingTitle", "Studies awaiting classification"), 0),
+  ];
+  const inRowH = Math.max(bh(includedLines.length), bh(ongoingLines.length));
+  const inCardH = PAD + inRowH + PAD;
+  const inTop = y;
+  parts.push(card(inTop, inCardH, "Included"));
+  parts.push(box(leftColX, inTop + PAD, leftColW, includedLines));
+  parts.push(box(rightColX, inTop + PAD, rightColW, ongoingLines, true));
+  y = inTop + inCardH + 12;
 
-  const inclBox = textBox(LEFT, y, COL_W, [{ text: `Studies included in review (n = ${d.included.toLocaleString()})`, bold: true, color: NAVY }], LIGHT);
-  const ongoingBox = textBox(RIGHT_COL, y, COL_W, [
-    { text: `Included studies ongoing (n = 0)`, bold: false, color: GRAY },
-    { text: `Studies awaiting classification (n = 0)`, bold: false, color: GRAY },
-  ], "#fff", true);
-  parts.push(inclBox.svg, ongoingBox.svg);
-  y += Math.max(inclBox.h, ongoingBox.h) + 20;
+  // Assemble with the final height baked into the root <svg> (Safari needs an
+  // explicit height or it reports naturalHeight=0 when rasterizing for PNG/Word).
+  const H = y;
+  const head =
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" ${FONT}>` +
+    `<defs><marker id="arr" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="${ARROW}"/></marker></defs>` +
+    `<rect width="${W}" height="${H}" fill="#ffffff"/>`;
+  return head + parts.join("") + `</svg>`;
+}
 
-  const inclEnd = y;
-  phaseBars.push({ x: 10, y: inclStart, h: inclEnd - inclStart, label: "Included" });
+// ---------------------------------------------------------------------------
+// Word export: a NATIVE, directly-editable PRISMA table (Evidence Engine style)
+// ---------------------------------------------------------------------------
+// Rendered as a borderless Word table so every label and number is real,
+// directly-editable text (no "Convert to Shape"): teal phase bars with vertical
+// labels, light panels behind each phase, white bordered boxes, green counts,
+// and thin connector arrows. Reliable in Word (crisp text, no shape artifacts).
+function buildPrismaDocx(d: SvgData, docx: typeof import("docx")): (InstanceType<typeof docx.Paragraph> | InstanceType<typeof docx.Table>)[] {
+  const {
+    Paragraph, TextRun, Table, TableRow, TableCell, WidthType, TableLayoutType,
+    BorderStyle, ShadingType, TextDirection, VerticalAlign, AlignmentType,
+    HeightRule, TabStopType,
+  } = docx;
 
-  // Draw phase bars
-  for (const bar of phaseBars) {
-    parts.push(`<rect x="${bar.x}" y="${bar.y}" width="${BAR_W}" height="${bar.h}" rx="5" fill="${TEAL}"/>`);
-    const cx = bar.x + BAR_W / 2;
-    const cy = bar.y + bar.h / 2;
-    parts.push(`<text x="${cx}" y="${cy}" ${FONT} font-size="11" font-weight="bold" fill="white" text-anchor="middle" dominant-baseline="middle" transform="rotate(-90 ${cx} ${cy})">${esc(bar.label)}</text>`);
-  }
+  const TEAL = "0D6B66", TEALDK = "0A544F", PANEL = "F0F7F6", BORDER = "CFE3E1";
+  const TITLE = "0F172A", COUNT = "166534", SUB = "64748B", ARROW = "5F8A86";
+  const FONT = "Calibri";
+  const NBSP = String.fromCharCode(160);
+  const NN = (n: number) => `(n${NBSP}=${NBSP}${n.toLocaleString()})`;
+  const L = (k: string, def: string) => (d.labels && d.labels[k]) || def;
 
-  // Light rounded panel behind each phase group (drawn behind the boxes).
-  const panels = phaseBars
-    .map(b => `<rect x="6" y="${b.y - 6}" width="${W - 12}" height="${b.h + 12}" rx="12" fill="${PANEL}"/>`)
-    .join("");
-  parts.splice(3, 0, panels);   // after [svg, defs, bg], before the box/arrow body
+  const COL = { bar: 560, padL: 250, left: 4450, mid: 830, right: 4450, padR: 260 };
+  const COLS = [COL.bar, COL.padL, COL.left, COL.mid, COL.right, COL.padR];
+  const TOTAL = COLS.reduce((a, b) => a + b, 0);
+  const rightInner = COL.right - 360;
 
-  parts.push(`</svg>`);
+  const NB = { style: BorderStyle.NONE, size: 0, color: "auto" };
+  const noBorders = { top: NB, bottom: NB, left: NB, right: NB };
+  const boxBorder = (dashed = false) => {
+    const b = { style: dashed ? BorderStyle.DASHED : BorderStyle.SINGLE, size: 4, color: BORDER };
+    return { top: b, bottom: b, left: b, right: b };
+  };
 
-  // Lock the final height onto the viewBox, the <svg> root, and the background
-  // rect (all start at the 900 placeholder). The explicit root height matters:
-  // WebKit/Safari report naturalHeight=0 for an SVG <img> without one, which
-  // collapses the PNG/Word export canvas to zero height.
-  const finalSvg = parts.join("")
-    .replace(/viewBox="0 0 \d+ \d+"/, `viewBox="0 0 ${W} ${y}"`)
-    .replace(/height="900"/g, `height="${y}"`);
-  return finalSvg;
+  type Line = InstanceType<typeof Paragraph>;
+  const titleLine = (label: string, n: number): Line => new Paragraph({
+    spacing: { after: 24, line: 264, lineRule: "auto" },
+    children: [
+      new TextRun({ text: label + " ", bold: true, color: TITLE, size: 23, font: FONT }),
+      new TextRun({ text: NN(n), bold: true, color: COUNT, size: 23, font: FONT }),
+    ],
+  });
+  const subLine = (label: string, n: number): Line => new Paragraph({
+    spacing: { after: 0, line: 250, lineRule: "auto" },
+    indent: { left: 230 },
+    children: [
+      new TextRun({ text: "–  ", color: ARROW, size: 20, font: FONT }),
+      new TextRun({ text: `${label} ${NN(n)}`, color: SUB, size: 20, font: FONT }),
+    ],
+  });
+  const reasonLine = (label: string, n: number): Line => new Paragraph({
+    spacing: { after: 0, line: 250, lineRule: "auto" },
+    tabStops: [{ type: TabStopType.RIGHT, position: rightInner }],
+    children: [
+      new TextRun({ text: "–  ", color: ARROW, size: 20, font: FONT }),
+      new TextRun({ text: label, color: SUB, size: 20, font: FONT }),
+      new TextRun({ text: `\t${NN(n)}`, bold: true, color: SUB, size: 20, font: FONT }),
+    ],
+  });
+
+  const boxCell = (width: number, paras: Line[], dashed = false) => new TableCell({
+    width: { size: width, type: WidthType.DXA }, borders: boxBorder(dashed),
+    shading: { fill: "FFFFFF", type: ShadingType.CLEAR, color: "auto" },
+    margins: { top: 170, bottom: 170, left: 210, right: 210 },
+    verticalAlign: VerticalAlign.CENTER, children: paras,
+  });
+  const panelCell = (width: number) => new TableCell({
+    width: { size: width, type: WidthType.DXA }, borders: noBorders,
+    shading: { fill: PANEL, type: ShadingType.CLEAR, color: "auto" },
+    children: [new Paragraph({ children: [] })],
+  });
+  const whiteCell = (width: number) => new TableCell({
+    width: { size: width, type: WidthType.DXA }, borders: noBorders,
+    children: [new Paragraph({ children: [] })],
+  });
+  const arrowCell = (width: number, glyph: string, size: number, onPanel: boolean) => new TableCell({
+    width: { size: width, type: WidthType.DXA }, borders: noBorders,
+    ...(onPanel ? { shading: { fill: PANEL, type: ShadingType.CLEAR, color: "auto" } } : {}),
+    verticalAlign: VerticalAlign.CENTER,
+    children: [new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 0 },
+      children: [new TextRun({ text: glyph, color: ARROW, size, font: FONT })] })],
+  });
+  const phaseBarCell = (label: string, rowSpan: number) => new TableCell({
+    width: { size: COL.bar, type: WidthType.DXA }, rowSpan, borders: noBorders,
+    shading: { fill: TEAL, type: ShadingType.CLEAR, color: "auto" },
+    textDirection: TextDirection.BOTTOM_TO_TOP_LEFT_TO_RIGHT, verticalAlign: VerticalAlign.CENTER,
+    children: [new Paragraph({ alignment: AlignmentType.CENTER,
+      children: [new TextRun({ text: label.toUpperCase(), bold: true, color: "FFFFFF", size: 19, font: FONT, characterSpacing: 40 })] })],
+  });
+  const H = (v: number) => ({ value: v, rule: HeightRule.ATLEAST });
+  const row = (height: number, children: InstanceType<typeof TableCell>[]) => new TableRow({ height: H(height), children });
+
+  const ftTotal = d.ftExcItems.reduce((s, it) => s + it.count, 0);
+  const spacerH = 150;
+  const rows: InstanceType<typeof TableRow>[] = [];
+
+  // IDENTIFICATION (rowSpan 5)
+  rows.push(row(spacerH, [phaseBarCell("Identification", 5),
+    panelCell(COL.padL), panelCell(COL.left), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+  rows.push(row(1240, [panelCell(COL.padL),
+    boxCell(COL.left, [titleLine(L("dbTitle", "Studies from databases/registers"), d.identified),
+      ...Object.entries(d.sourceCounts).map(([k, v]) => subLine(L(`src|${k}`, k), v))]),
+    panelCell(COL.mid),
+    boxCell(COL.right, [titleLine(L("otherTitle", "References from other sources"), d.otherSources),
+      subLine("Citation searching", 0), subLine("Grey literature", 0)]),
+    panelCell(COL.padR)]));
+  rows.push(row(170, [panelCell(COL.padL), panelCell(COL.left), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+  rows.push(row(720, [panelCell(COL.padL), panelCell(COL.left),
+    arrowCell(COL.mid, "→", 34, true),
+    boxCell(COL.right, [titleLine(L("removedTitle", "References removed before screening"), d.duplicatesRemoved),
+      subLine("Duplicate records", d.duplicatesRemoved), subLine("Marked ineligible by automation", 0)]),
+    panelCell(COL.padR)]));
+  rows.push(row(spacerH, [panelCell(COL.padL), panelCell(COL.left), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+
+  // between-phase arrow (white)
+  rows.push(row(560, [whiteCell(COL.bar), whiteCell(COL.padL), arrowCell(COL.left, "↓", 44, false), whiteCell(COL.mid), whiteCell(COL.right), whiteCell(COL.padR)]));
+
+  // SCREENING (rowSpan 7)
+  rows.push(row(spacerH, [phaseBarCell("Screening", 7),
+    panelCell(COL.padL), panelCell(COL.left), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+  rows.push(row(800, [panelCell(COL.padL),
+    boxCell(COL.left, [titleLine(L("screenedTitle", "Studies screened"), d.screened)]),
+    arrowCell(COL.mid, "→", 34, true),
+    boxCell(COL.right, [titleLine(L("absExcTitle", "Studies excluded"), d.abstractExcluded),
+      ...d.abstractExcItems.map(it => reasonLine(it.label, it.count))]),
+    panelCell(COL.padR)]));
+  rows.push(row(420, [panelCell(COL.padL), arrowCell(COL.left, "↓", 44, true), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+  rows.push(row(680, [panelCell(COL.padL),
+    boxCell(COL.left, [titleLine(L("soughtTitle", "Studies sought for retrieval"), d.soughtRetrieval)]),
+    arrowCell(COL.mid, "→", 34, true),
+    boxCell(COL.right, [titleLine(L("notRetrievedTitle", "Studies not retrieved"), d.notRetrieved)]),
+    panelCell(COL.padR)]));
+  rows.push(row(420, [panelCell(COL.padL), arrowCell(COL.left, "↓", 44, true), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+  rows.push(row(800, [panelCell(COL.padL),
+    boxCell(COL.left, [titleLine(L("assessedTitle", "Studies assessed for eligibility"), d.assessed)]),
+    arrowCell(COL.mid, "→", 34, true),
+    boxCell(COL.right, [titleLine(L("ftExcTitle", "Studies excluded"), ftTotal),
+      ...d.ftExcItems.map(it => reasonLine(it.label, it.count))]),
+    panelCell(COL.padR)]));
+  rows.push(row(spacerH, [panelCell(COL.padL), panelCell(COL.left), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+
+  // between-phase arrow (white)
+  rows.push(row(560, [whiteCell(COL.bar), whiteCell(COL.padL), arrowCell(COL.left, "↓", 44, false), whiteCell(COL.mid), whiteCell(COL.right), whiteCell(COL.padR)]));
+
+  // INCLUDED (rowSpan 3)
+  rows.push(row(spacerH, [phaseBarCell("Included", 3),
+    panelCell(COL.padL), panelCell(COL.left), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+  rows.push(row(800, [panelCell(COL.padL),
+    boxCell(COL.left, [titleLine(L("includedTitle", "Studies included in review"), d.included)]),
+    panelCell(COL.mid),
+    boxCell(COL.right, [titleLine(L("ongoingTitle", "Included studies ongoing"), 0),
+      titleLine(L("awaitingTitle", "Studies awaiting classification"), 0)], true),
+    panelCell(COL.padR)]));
+  rows.push(row(spacerH, [panelCell(COL.padL), panelCell(COL.left), panelCell(COL.mid), panelCell(COL.right), panelCell(COL.padR)]));
+
+  const table = new Table({
+    columnWidths: COLS,
+    width: { size: TOTAL, type: WidthType.DXA },
+    layout: TableLayoutType.FIXED,
+    borders: { top: NB, bottom: NB, left: NB, right: NB, insideHorizontal: NB, insideVertical: NB },
+    rows,
+  });
+
+  const eyebrow = new Paragraph({
+    spacing: { after: 20 },
+    children: [new TextRun({ text: "EVIDENCE ENGINE", bold: true, color: TEALDK, size: 15, font: FONT, characterSpacing: 60 })],
+  });
+  const heading = new Paragraph({
+    spacing: { after: 90 },
+    border: { bottom: { style: BorderStyle.SINGLE, size: 12, color: TEAL, space: 8 } },
+    children: [new TextRun({ text: "PRISMA 2020 Flow Diagram", bold: true, color: TITLE, size: 30, font: FONT })],
+  });
+  const gap = new Paragraph({ spacing: { after: 120 }, children: [] });
+  return [eyebrow, heading, gap, table];
 }
