@@ -140,7 +140,8 @@ export function Sidebar() {
         setLocalModels(models);
         setOllamaRunning(!!d.running);
         // Pick a sensible installed model. LEADS-mistral wins by benchmark
-        // (recall=1.0, spec=0.68); fall back to medical-tuned > qwen2.5 > llama.
+        // (recall=1.0, spec=0.68); otherwise prefer Qwen, which is the house
+        // default for local work. Llama tags are never auto-selected.
         const leadsTag = models.find(m => /leads.*mistral/i.test(m));
         const isLeadsAlias = s.model === "leads";
         if (isLeadsAlias && leadsTag) {
@@ -151,7 +152,7 @@ export function Sidebar() {
           const preferred = leadsTag
             || models.find(m => /medgemma/i.test(m))
             || models.find(m => /qwen2\.5/i.test(m))
-            || models.find(m => /llama3\.1/i.test(m))
+            || models.find(m => /qwen/i.test(m))
             || models[0];
           s.setModel(preferred);
         }
