@@ -109,8 +109,12 @@ class AIService:
             # (PICO JSON, criteria, summaries, extraction) but low enough that a model
             # that fails to stop can't run away for tens of thousands of tokens and
             # wedge Ollama's single inference slot.
+            # num_ctx MUST be set explicitly: Ollama otherwise falls back to the model
+            # default (2048 on most), which silently truncates long screening and
+            # extraction prompts instead of erroring.
             return ChatOllama(model=model_name, temperature=0, base_url=ollama_base,
-                              seed=Config.RUN_SEED, num_predict=4096)
+                              seed=Config.RUN_SEED, num_predict=4096,
+                              num_ctx=Config.OLLAMA_NUM_CTX)
         except Exception as e:
             print(f"[get_model] AI connection error for {model_name}: {e}")
             return None
@@ -258,6 +262,13 @@ Extract these elements into a JSON object. RULES:
 1. STATED elements — preserve the user's literal phrasing. Never paraphrase
    "Mediterranean diet" as "dietary intervention", or "longevity" as "BMI", or
    "cancer" as "neoplasm". The exact words the user wrote must appear.
+   This includes QUALIFYING CLAUSES: if the user attached a required data source,
+   a required combination ("both X and Y"), or a modality to the intervention,
+   that clause is part of the intervention and must survive into the phrase.
+   Dropping it turns a specific question into a generic one that thousands of
+   irrelevant papers satisfy, which makes screening useless.
+     ✓ "Clinical decision support driven by EHRs holding BOTH medical and dental data"
+     ✗ "Clinical decision support tools"
 
 2. UNSTATED elements — supply a BROAD, INCLUSIVE default that does not conflict
    with the stated topic. Prefer breadth over specificity.
@@ -396,19 +407,37 @@ Apply ONLY the requested change and keep every other operationalised detail inta
 Extract these elements for a scoping review into a JSON object. RULES:
 1. STATED elements — preserve the user's literal phrasing verbatim.
 2. UNSTATED elements — supply a BROAD, INCLUSIVE default (scoping reviews are wide by design).
-3. Each element is a SPECIFIC phrase (5–18 words). Examples:
+3. Each element is a SPECIFIC phrase (5–25 words). Examples:
      • Population: "Community-dwelling older adults (65+), any comorbidity"
      • Concept: "Use of telehealth for chronic disease self-management"
      • Context: "Primary-care and community settings in high-income countries, 2010–present"
-4. Generate 5–7 inclusion and 5–7 exclusion criteria (each 8–22 words, operationalised),
+
+4. CRITICAL — the Concept must carry EVERY QUALIFYING CLAUSE the user attached to
+   it. A scoping review's Concept is what makes the review novel; if you keep only
+   the headline technology and drop the qualifier, the Concept becomes a topic that
+   thousands of irrelevant papers satisfy, and screening collapses.
+   Keep clauses that specify: the required DATA SOURCE, a REQUIRED COMBINATION of
+   things ("both X and Y"), the modality, or the setting the concept must operate in.
+     ✓ RIGHT: "AI/ML prediction models or clinical decision support tools using EHRs
+               that contain BOTH medical and dental data"
+     ✗ WRONG: "AI/ML prediction models or clinical decision support tools"
+               (the "both medical and dental EHR data" requirement was dropped, so
+                every clinical-decision-support paper now matches)
+     ✓ RIGHT: "Wearable-derived continuous glucose data used for insulin dose adjustment"
+     ✗ WRONG: "Wearable devices in diabetes"
+   If the user's question contains the words "both", "that use", "utilizing",
+   "containing", "combined with", or "integrating", the clause that follows is
+   part of the Concept — never drop it.
+5. Generate 5–7 inclusion and 5–7 exclusion criteria (each 8–22 words, operationalised),
    covering study/source types eligible, population scope, concept scope, context limits,
    date/language, and evidence-source restrictions. Scoping reviews INCLUDE diverse source
-   types (empirical studies, reviews, grey literature) — reflect that.
+   types (empirical studies, reviews, grey literature) — reflect that. At least one
+   inclusion criterion must restate the Concept's qualifying clause from rule 4.
 
 JSON shape:
 {{
     "population": "Population — 5-18 word phrase",
-    "concept": "Concept — the core idea/phenomenon/intervention being mapped (5-18 words)",
+    "concept": "Concept — the core idea/phenomenon being mapped, WITH every qualifying clause the user attached (5-25 words)",
     "context": "Context — setting, geography, timeframe (5-18 words)",
     "inclusion": ["5-7 specific inclusion criteria"],
     "exclusion": ["5-7 specific exclusion criteria"]

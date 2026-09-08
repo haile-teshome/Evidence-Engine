@@ -57,6 +57,8 @@ export type PicoAssessment = {
   concept?: PicoFieldAssessment;
   context?: PicoFieldAssessment;
   overall_reasoning: string;  // 2-3 sentence synthesis across the frame
+  bucket?: string;            // 3-5 word headline reason
+  failed_criteria?: string[]; // eligibility criteria that count against the paper
 };
 
 export type ScreenResult = {
@@ -66,6 +68,9 @@ export type ScreenResult = {
   Reason: string;
   Agent_Trace: AgentTrace;
   Pico_Assessment?: PicoAssessment;
+  // Short headline reason. For an exclusion driven by a discriminating element
+  // this names it ("Fails Concept"); otherwise it is the model's own label.
+  Bucket?: string;
 };
 
 export type CriterionEvidence = { decision: "INCLUDE" | "EXCLUDE"; evidence: string; reasoning: string };
@@ -206,7 +211,7 @@ export type QualityOverride = {
 
 // Mutable global so the React store can update `model` without prop-drilling.
 export const apiConfig: { model: string; baseUrl: string } = {
-  model: "llama3.1",
+  model: "qwen2.5:7b",
   baseUrl: (import.meta as any)?.env?.VITE_API_BASE_URL || "/api",
 };
 

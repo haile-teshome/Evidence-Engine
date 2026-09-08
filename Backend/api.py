@@ -1484,7 +1484,116 @@ class ScreenAbstractRequest(BaseModel):
 _PICO_ASSESS_VOTES = {"PASS", "PARTIAL", "FAIL", "NA"}
 
 
-def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any]:
+# Decomposition depends only on the element text, not on the paper, so it is
+# computed once per review rather than once per record. A duplicate call under
+# threading is harmless, so no lock.
+_ELEMENT_PARTS_CACHE: Dict[tuple, List[str]] = {}
+
+
+def _decompose_element(text: str, model_name: str) -> List[str]:
+    """Split an eligibility element into the separate things a paper must have.
+
+    "AI/ML prediction models or clinical decision support tools using electronic
+    health records that contain BOTH medical and dental data" becomes roughly
+    ["AI/ML prediction model or clinical decision support tool",
+     "electronic health records", "medical data", "dental data"].
+
+    Alternatives ("A or B") stay inside ONE part: either satisfies the element.
+    Returns [text] when it cannot decompose, which disables per-part checking.
+    """
+    from langchain_core.messages import HumanMessage
+    key = (text.strip(), model_name)
+    if key in _ELEMENT_PARTS_CACHE:
+        return _ELEMENT_PARTS_CACHE[key]
+
+    model = AIService.get_model(model_name)
+    parts: List[str] = []
+    if model:
+        prompt = f"""Break this eligibility requirement into the separate things a paper
+must ALL have to satisfy it.
+
+Rules:
+  • Split on "and", "using", "containing", "that contain" — these join things that
+    must ALL be true.
+  • NEVER split on "or". Alternatives stay inside ONE entry, because either one
+    satisfies the requirement. Splitting them would force a paper to have both.
+  • A phrase like "both X and Y" describes ONE combined requirement — keep it as a
+    single entry rather than two, so the combination is checked as a combination.
+  • 2 to 4 entries, each a short noun phrase under 10 words.
+
+WORKED EXAMPLE
+REQUIREMENT: "AI/ML prediction models or clinical decision support tools using
+electronic health records that contain both medical and dental data"
+CORRECT: ["AI/ML prediction model or clinical decision support tool",
+          "electronic health records",
+          "both medical and dental data in the same records"]
+WRONG:   ["AI/ML prediction models", "clinical decision support tools", ...]
+  — that splits an "or" into two required things, so a paper would have to have
+    BOTH a prediction model AND a decision-support tool. The requirement says
+    either one is enough.
+
+REQUIREMENT: {text}
+
+Return ONLY a JSON array of strings."""
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            data = AIService._extract_json(r.content)
+            if isinstance(data, list):
+                for item in data[:5]:
+                    p = str(item).strip().strip('"').strip("'")[:80]
+                    if p:
+                        parts.append(p)
+        except Exception as e:
+            print(f"[decompose_element] failed: {e}")
+
+    if not parts:
+        parts = [text.strip()]
+    _ELEMENT_PARTS_CACHE[key] = parts
+    return parts
+
+
+def _part_present(part: str, title: str, abstract: str, model_name: str) -> str:
+    """Ask ONE focused question: is this single requirement present in the paper?
+
+    Returns "yes" | "no" | "unclear". Defaults to "unclear" on any failure, so a
+    broken call can never exclude a paper.
+    """
+    from langchain_core.messages import HumanMessage
+    model = AIService.get_model(model_name)
+    if not model:
+        return "unclear"
+
+    body = (abstract or "").strip()[:6000] or "(no abstract — judge from the title alone)"
+    prompt = f"""TITLE: {title}
+
+ABSTRACT: {body}
+
+QUESTION: Does this study involve {part}?
+
+Count synonyms, related terminology and specific instances as YES. For example:
+a random forest, regression, neural network or any trained "predictive model" IS a
+machine-learning model; periodontal, periodontitis, caries, oral-health or clinical
+attachment measures ARE dental data; comorbidity, multimorbidity, polypharmacy,
+medications or a named systemic disease ARE medical data; EHR, EMR, chart review,
+registry, claims or "de-identified records" ARE health records.
+
+Answer with EXACTLY ONE WORD:
+  yes      — present, or a specific instance of it is present
+  no       — this study is about something else and it is genuinely absent
+  unclear  — the abstract does not say either way"""
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        txt = str(getattr(r, "content", "") or "").lower()
+        m = re.search(r"\b(yes|no|unclear)\b", txt)
+        return m.group(1) if m else "unclear"
+    except Exception as e:
+        print(f"[part_present] failed: {e}")
+        return "unclear"
+
+
+def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str, protocol: str = "",
+                 inclusion: Optional[List[str]] = None,
+                 exclusion: Optional[List[str]] = None) -> Dict[str, Any]:
     """Run a single LLM call that returns per-PICO appraisal with evidence quotes.
 
     Output shape:
@@ -1514,6 +1623,8 @@ def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any
     elem_vals = {e["id"]: (getattr(pico, e["id"], "") or "") for e in elem_defs}
     empty: Dict[str, Any] = {e["id"]: {"vote": "NA", "evidence": "", "reasoning": ""} for e in elem_defs}
     empty["overall_reasoning"] = ""
+    empty["bucket"] = ""
+    empty["failed_criteria"] = []
     if not model:
         return empty
 
@@ -1524,32 +1635,102 @@ def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any
         "fabricate quotes, and explain your best-effort judgement.)"
     )
 
-    elem_block = "\n".join(f"  {lbl}: {elem_vals.get(eid) or '(unspecified)'}"
-                           for eid, lbl in [(e["id"], e["label"]) for e in elem_defs])
+    disc_ids = set(frameworks.discriminating_ids(fw))
+    elem_block = "\n".join(
+        f"  {lbl}{' [DISCRIMINATING]' if eid in disc_ids else ''}: {elem_vals.get(eid) or '(unspecified)'}"
+        for eid, lbl in [(e["id"], e["label"]) for e in elem_defs])
     json_shape = "\n".join(f'  "{e["id"]}":    {{ "vote": "...", "evidence": "...", "reasoning": "..." }},'
                            for e in elem_defs)
+
+    proto_block = (
+        f"\nFULL REVIEW QUESTION / PROTOCOL (authoritative — the element summaries\n"
+        f"below may be abbreviated, so resolve any ambiguity against this):\n"
+        f"{(protocol or '').strip()[:2500]}\n"
+        if (protocol or "").strip() else ""
+    )
+
+    # Eligibility criteria are checked in THIS call rather than a second one.
+    # Only the failures are requested back (as ids), because the exclusion-bucket
+    # UI reads only the FAIL entries — asking for a verdict on all 14 criteria
+    # would triple the output tokens for information nothing consumes.
+    inc_list = [c for c in (inclusion or []) if str(c).strip()]
+    exc_list = [c for c in (exclusion or []) if str(c).strip()]
+    crit_ids: Dict[str, str] = {}
+    crit_lines: List[str] = []
+    for n, c in enumerate(inc_list, 1):
+        crit_ids[f"I{n}"] = c
+        crit_lines.append(f"  I{n}. {c}")
+    for n, c in enumerate(exc_list, 1):
+        crit_ids[f"E{n}"] = c
+        crit_lines.append(f"  E{n}. {c}")
+    crit_block = (
+        "\nELIGIBILITY CRITERIA (I = inclusion, must be met; E = exclusion, must NOT apply):\n"
+        + "\n".join(crit_lines)
+        + "\n\nAlso return \"failed_criteria\": a list of the ids that count AGAINST this\n"
+          "paper — an I-id the paper fails to meet, or an E-id that applies to it.\n"
+          "Return [] when none. Ids only (e.g. [\"I2\",\"E1\"]), no prose.\n"
+        if crit_lines else ""
+    )
 
     prompt = f"""You are screening a paper against a {frame_label} frame for a systematic review.
 For EACH of the {frame_label} elements below, decide a vote of PASS, PARTIAL, or FAIL.
 Never use "NA" or "UNCERTAIN" — pick the closest of the three labels:
 
-  • PASS    — the title/abstract clearly satisfies this element (explicit match).
-  • PARTIAL — it relates to this element but the match is implicit, broader,
-              narrower, or otherwise "on par but not explicit" (e.g. broader
-              population, surrogate outcome, related setting). USE THIS
-              GENEROUSLY when the text touches the concept at all, and when you
-              are inferring from a title alone.
-  • FAIL    — the text addresses this element AND the match is clearly wrong, OR
-              makes no mention whatsoever of anything relevant to this element.
+Work through this test IN ORDER for each element and stop at the first step that
+matches. Do NOT skip to a verdict.
+
+  STEP 1 — Does the paper's subject matter contain what the element asks for?
+    Decide this by MEANING, never by wording. The same thing routinely appears
+    under a different name, and an abstract almost never quotes the element back:
+      dental data   = "periodontal", "oral health", "caries", "dentition", "dental"
+      medical data  = "multimorbidity", "comorbidity", "polypharmacy", "diagnoses",
+                      "medications", a named disease
+      health records= "electronic health record", "EHR/EMR", "chart review",
+                      "administrative claims", "de-identified records", "registry"
+    A study relating multimorbidity to periodontal outcomes in electronic records
+    therefore HAS both a medical and a dental half, even though it never writes
+    the phrase "medical and dental data".
+
+  STEP 2 — If the answer to step 1 is NO, and the paper is plainly ABOUT A
+    DIFFERENT SUBJECT so the missing part could not show up in the full text
+    either  ->  FAIL.
+      Example: element asks for records holding BOTH medical and dental data; the
+      paper is chronic-kidney-disease decision support with no oral or dental
+      content anywhere. The full text will not make dental data appear. FAIL.
+
+  STEP 3 — If the answer to step 1 is YES and the abstract states it explicitly
+    and completely  ->  PASS.
+
+  STEP 4 — If the answer to step 1 is YES but the abstract is implicit, partial,
+    broader or narrower  ->  PARTIAL. Send it to full text rather than discarding
+    it. This is a high-sensitivity FIRST PASS: genuine uncertainty is resolved at
+    full text, never here.
+
+Never FAIL a paper merely because it does not echo the element's wording, and
+never PASS one merely because it sits in the same broad field.
+
+Elements marked [DISCRIMINATING] define what this review is actually about, and a
+FAIL there will exclude the paper outright — so reserve FAIL there for papers that
+are genuinely about a different subject (step 2), not for papers that are on topic
+but vague. Unmarked elements are descriptive scope: judge them generously and
+prefer PARTIAL over FAIL, because they never exclude anything on their own.
+
+For a [DISCRIMINATING] element, do not agonise over the whole conjunction here.
+Each of its required parts is verified separately afterwards, one focused question
+per part, and that separate check is what decides the element's outcome.{proto_block}
 
 For every vote also return:
   • evidence: a SHORT verbatim phrase or sentence copied directly from the
     abstract (≤ 200 characters) that best supports your vote. If there is no
     abstract, return an empty string for evidence — never invent a quote.
+    A FAIL that rests on ABSENCE is the one case where empty evidence is correct
+    and expected: you cannot quote a thing the abstract never mentions. Return ""
+    rather than quoting an unrelated sentence to fill the field.
   • reasoning: one sentence, SPECIFIC to THIS paper — name what the paper
     actually studied (its real population/intervention/outcome as stated in the
-    title or abstract) and why that earns the vote. Never leave it blank and
-    never write a generic template sentence.
+    title or abstract) and why that earns the vote. For a FAIL, name the exact
+    component that is missing. Never leave it blank and never write a generic
+    template sentence.
 
 ALWAYS write a 2-3 sentence "overall_reasoning" that (a) names in one clause what
 THIS paper is actually about (use the title when there's no abstract), then
@@ -1562,16 +1743,22 @@ implies and flag what remains uncertain pending full text.
 
 {frame_label}:
 {elem_block}
-
+{crit_block}
 PAPER TITLE: {title}
 
 PAPER ABSTRACT:
 {abstract_block}
 
+Also return "bucket": a 3-5 word label naming the single most decisive factor
+(e.g. "No dental data", "Wrong study design", "All elements met"). It is shown to
+the reviewer as the at-a-glance reason, so make it specific to this paper.
+
 Return ONLY a JSON object with EXACTLY this shape:
 {{
 {json_shape}
-  "overall_reasoning": "..."
+  "overall_reasoning": "...",
+  "bucket": "...",
+  "failed_criteria": []
 }}
 
 NEVER fabricate a quote that does not appear in the abstract.
@@ -1603,7 +1790,7 @@ NEVER fabricate a quote that does not appear in the abstract.
                 best, best_score = sentence, score
         return best if best_score >= min_overlap else ""
 
-    def _clean_field(raw: Any, pico_seed: str) -> Dict[str, str]:
+    def _clean_field(raw: Any, pico_seed: str) -> Dict[str, Any]:
         if not isinstance(raw, dict):
             # Abstract present but model returned nothing — try a PICO-keyword
             # rescue. If even that finds something, mark PARTIAL; otherwise NA.
@@ -1629,6 +1816,12 @@ NEVER fabricate a quote that does not appear in the abstract.
         elif vote not in {"PASS", "FAIL"}:
             vote = "NA"
 
+        # For a discriminating element the per-part checklist is AUTHORITATIVE and
+        # overrides the model's own one-shot verdict. Judging a four-part
+        # conjunction in a single pass is where small models fail: qwen2.5:7b
+        # called a Random Forest study "does not use AI/ML" and FAILed every paper
+        # it was shown. Asking each part separately and combining them here is both
+        # more accurate and reproducible from what the reviewer can see.
         raw_evidence = str(raw.get("evidence") or "").strip().strip('"').strip("'")
         evidence = ""
 
@@ -1644,8 +1837,14 @@ NEVER fabricate a quote that does not appear in the abstract.
         # element text itself. Catches the case where the model emitted no
         # quote OR an unusable quote, but the abstract clearly addresses the
         # element through related vocabulary.
-        if not evidence:
-            evidence = _best_sentence(pico_seed, min_overlap=1)[:240]
+        #
+        # Deliberately NOT run for FAIL. A FAIL usually rests on ABSENCE, and a
+        # single shared token ("data", "clinical") is enough to drag back some
+        # unrelated sentence, which then reads as evidence FOR the element it is
+        # supposed to refute. Requiring 2 tokens elsewhere keeps the rescue from
+        # firing on one generic word.
+        if not evidence and vote != "FAIL":
+            evidence = _best_sentence(pico_seed, min_overlap=2)[:240]
 
         reasoning = str(raw.get("reasoning") or "").strip()[:300]
 
@@ -1654,22 +1853,52 @@ NEVER fabricate a quote that does not appear in the abstract.
         #     This is the "on par but not explicit" case.
         #   • If the model said NA and we anchored nothing → keep NA.
         #     (Abstract genuinely doesn't address this element.)
-        #   • If the model said PASS/PARTIAL/FAIL but we couldn't anchor a
-        #     quote at all → downgrade to NA (we promised the user that every
-        #     non-NA chip has a quote).
+        #   • If the model said PASS or PARTIAL but we couldn't anchor a quote at
+        #     all → downgrade to NA (we promised the user that every positive chip
+        #     has a quote). FAIL is EXEMPT: "the abstract never mentions dental
+        #     data" is unquotable by construction, and downgrading it to NA was
+        #     silently discarding exactly the votes that should exclude a paper.
         if vote == "NA" and evidence:
             vote = "PARTIAL"
             if not reasoning:
                 reasoning = "Abstract content relates to this PICO element but does not match explicitly."
         elif vote == "NA":
             reasoning = ""
-        if vote != "NA" and not evidence:
+        if vote in {"PASS", "PARTIAL"} and not evidence:
             vote = "NA"
             reasoning = ""
+        if vote == "FAIL" and not reasoning:
+            reasoning = "The title/abstract does not provide what this element requires."
 
         return {"vote": vote, "evidence": evidence, "reasoning": reasoning}
 
     assessed = {eid: _clean_field(data.get(eid), elem_vals.get(eid) or "") for eid in elem_vals}
+
+    # ---- Per-part verification of the discriminating element(s) --------------
+    # One focused yes/no/unclear question per required part, each its own call.
+    # A 7b model that gets a four-part conjunction wrong in a single pass answers
+    # the same four parts correctly when asked one at a time; the cost is N small
+    # calls whose prompts are short and whose output is a single word.
+    for eid in elem_vals:
+        if eid not in disc_ids or not (elem_vals.get(eid) or "").strip():
+            continue
+        parts = _decompose_element(elem_vals[eid], model_name)
+        if len(parts) < 2:
+            continue  # nothing to decompose; leave the one-shot vote alone
+        components = [{"part": p, "present": _part_present(p, title, abstract, model_name)}
+                      for p in parts]
+        if any(c["present"] == "no" for c in components):
+            derived = "FAIL"
+        elif all(c["present"] == "yes" for c in components):
+            derived = "PASS"
+        else:
+            derived = "PARTIAL"
+        missing = [c["part"] for c in components if c["present"] == "no"]
+        assessed[eid]["vote"] = derived
+        assessed[eid]["components"] = components
+        if missing:
+            assessed[eid]["reasoning"] = ("Required part not present: "
+                                          + "; ".join(missing[:3]))[:300]
 
     # Never leave the reason blank — fall back to a record-specific, best-effort
     # sentence grounded in the title (the PICO chips may still be NA when no
@@ -1685,7 +1914,51 @@ NEVER fabricate a quote that does not appear in the abstract.
             f"confidence — assess at full text."
         )
 
-    return {**assessed, "overall_reasoning": overall_reasoning}
+    bucket = str(data.get("bucket") or "").strip()[:60]
+
+    # Map the returned ids back onto the criterion strings the UI knows about.
+    # Unknown ids are dropped rather than guessed at.
+    raw_failed = data.get("failed_criteria")
+    failed_criteria: List[str] = []
+    if isinstance(raw_failed, list):
+        for item in raw_failed:
+            key = str(item).strip().upper()
+            if key in crit_ids and crit_ids[key] not in failed_criteria:
+                failed_criteria.append(crit_ids[key])
+
+    return {**assessed, "overall_reasoning": overall_reasoning,
+            "bucket": bucket, "failed_criteria": failed_criteria}
+
+
+def _decide_from_votes(assessment: Dict[str, Any], framework: str) -> tuple[str, str]:
+    """Derive INCLUDE/EXCLUDE from the per-element votes, in code.
+
+    Previously the decision came from a SEPARATE llm call that never saw these
+    votes, so the same evidence could yield either answer (in one 906-record
+    export, the pattern FAIL/PASS/PASS produced INCLUDE 394 times and EXCLUDE 86
+    times). Deriving it here makes the decision reproducible from, and auditable
+    against, the evidence the reviewer is shown.
+
+    The rule, sensitivity-first as a first-pass abstract screen should be:
+      • FAIL on any DISCRIMINATING element            -> EXCLUDE
+      • no element assessable at all (every vote NA)  -> EXCLUDE (nothing to go on)
+      • otherwise                                     -> INCLUDE
+    PARTIAL and NA never exclude: an abstract that is merely vague belongs at
+    full text, not in the discard pile.
+    """
+    disc = frameworks.discriminating_ids(framework)
+    votes = {eid: str((assessment.get(eid) or {}).get("vote") or "NA").upper()
+             for eid in frameworks.element_ids(framework)}
+
+    failed = [eid for eid in disc if votes.get(eid) == "FAIL"]
+    if failed:
+        labels = ", ".join(frameworks.label_for(framework, eid) for eid in failed)
+        return "EXCLUDE", f"Fails {labels}"
+
+    if votes and all(v == "NA" for v in votes.values()):
+        return "EXCLUDE", "No assessable evidence"
+
+    return "INCLUDE", ""
 
 
 def _normalize_abstract_decision(
@@ -1695,6 +1968,8 @@ def _normalize_abstract_decision(
     paper: PaperIn,
     pico: Optional[PicoIn] = None,
     model_name: Optional[str] = None,
+    protocol: str = "",
+    derive_decision: bool = True,
 ) -> Dict[str, Any]:
     decision = str(raw.get("decision", "Exclude")).strip().lower()
     decision_upper = "INCLUDE" if decision.startswith("inc") else "EXCLUDE"
@@ -1715,14 +1990,48 @@ def _normalize_abstract_decision(
                 best, best_score = s, score
         return best or abstract[:200]
 
-    all_criteria = list(inclusion) + list(exclusion)
-    for crit in all_criteria:
-        v = raw.get(crit)
-        if isinstance(v, str):
-            vu = v.strip().upper()
-            vote = "PASS" if vu in {"INCLUDE", "PASS", "YES", "TRUE"} else (
-                "FAIL" if vu in {"EXCLUDE", "FAIL", "NO", "FALSE"} else "N/A"
+    # Per-element structured assessment with evidence quotes. This single call
+    # now also checks the eligibility criteria and supplies the bucket, so the
+    # generic path no longer needs a second screening call.
+    fw = frameworks.normalize(getattr(pico, "framework", "pico") if pico is not None else "pico")
+    pico_assessment: Dict[str, Any] = {
+        eid: {"vote": "NA", "evidence": "", "reasoning": ""} for eid in frameworks.element_ids(fw)
+    }
+    pico_assessment.update({"overall_reasoning": "", "bucket": "", "failed_criteria": []})
+    if pico is not None and model_name:
+        try:
+            pico_assessment = _pico_assess(
+                paper, pico, model_name, protocol=protocol,
+                inclusion=inclusion, exclusion=exclusion,
             )
+        except Exception as e:
+            print(f"[normalize_abstract] pico_assess failed: {e}")
+
+    # The decision is DERIVED from the votes above (see _decide_from_votes), so
+    # what the reviewer reads is what drove the call. A model that makes its own
+    # verdict — LEADS is fine-tuned to do exactly that — keeps it via
+    # derive_decision=False, which also preserves its benchmark behaviour.
+    if derive_decision:
+        decision_upper, derived_bucket = _decide_from_votes(pico_assessment, fw)
+    else:
+        derived_bucket = ""
+
+    # Criterion-level trace, consumed by the exclusion-bucketing UI. The model
+    # returns only the criteria that count against the paper; everything else is
+    # a pass. When no assessment ran, leave every criterion unjudged.
+    failed = set(pico_assessment.get("failed_criteria") or [])
+    assessed_criteria = bool(pico_assessment.get("overall_reasoning"))
+    for crit in list(inclusion) + list(exclusion):
+        legacy = raw.get(crit)
+        if isinstance(legacy, str):
+            lv = legacy.strip().upper()
+            vote = "PASS" if lv in {"INCLUDE", "PASS", "YES", "TRUE"} else (
+                "FAIL" if lv in {"EXCLUDE", "FAIL", "NO", "FALSE"} else "N/A"
+            )
+        elif crit in failed:
+            vote = "FAIL"
+        elif assessed_criteria:
+            vote = "PASS"
         else:
             vote = "N/A"
         agent_trace[crit] = {
@@ -1730,22 +2039,6 @@ def _normalize_abstract_decision(
             "reasoning": f"Criterion evaluation: {vote}",
             "evidence": _evidence_for(crit),
         }
-
-    # Per-PICO structured assessment with evidence quotes. The "overall_reasoning"
-    # synthesises across population/intervention/comparator/outcome and becomes
-    # the new Reason string shown in the screening table.
-    pico_assessment: Dict[str, Any] = {
-        "population":   {"vote": "NA", "evidence": "", "reasoning": ""},
-        "intervention": {"vote": "NA", "evidence": "", "reasoning": ""},
-        "comparator":   {"vote": "NA", "evidence": "", "reasoning": ""},
-        "outcome":      {"vote": "NA", "evidence": "", "reasoning": ""},
-        "overall_reasoning": "",
-    }
-    if pico is not None and model_name:
-        try:
-            pico_assessment = _pico_assess(paper, pico, model_name)
-        except Exception as e:
-            print(f"[normalize_abstract] pico_assess failed: {e}")
 
     # _pico_assess always returns a record-specific, non-blank overall_reasoning
     # (it judges from the title when no abstract is present), so use it directly.
@@ -1755,8 +2048,14 @@ def _normalize_abstract_decision(
         or reason.strip()
         or ("Meets inclusion criteria" if decision_upper == "INCLUDE" else "Excluded")
     )
+    bucket = (
+        derived_bucket
+        or str(pico_assessment.get("bucket") or "").strip()
+        or str(raw.get("bucket") or "").strip()
+    )
 
     return {
+        "Bucket": bucket,
         "paper_id": paper.id,
         "Source": paper.source,
         "Title": paper.title,
@@ -1771,10 +2070,28 @@ def _normalize_abstract_decision(
 
 def _screen_one(paper: BackendPaper, pico: PICOCriteria, model_name: str,
                 inclusion: List[str], exclusion: List[str], protocol: str = "") -> Dict[str, Any]:
-    """Route a single paper to LEADS or to the generic screener depending on model."""
+    """Run the model's OWN verdict pass.
+
+    Only LEADS needs this: it is fine-tuned to emit a screening verdict, and its
+    benchmark numbers depend on that verdict being used as-is. For every other
+    model the verdict is derived from the per-element votes instead, so calling
+    the generic screener here would be a second LLM round-trip whose answer we
+    then throw away.
+    """
     if is_leads_model(model_name):
         return screen_paper_leads(paper, pico)
     return AIService.screen_paper(paper, pico, model_name, inclusion, exclusion, protocol)
+
+
+def _screening_workers(model_name: str, n_papers: int) -> int:
+    """Worker count sized to the backend actually serving the model.
+
+    Ollama exposes a handful of inference slots per instance, so 16 workers at a
+    local model just queue behind each other. Cloud APIs have no such ceiling.
+    """
+    local = not any(k in (model_name or "").lower() for k in ("gpt", "claude", "gemini"))
+    cap = Config.PARALLEL_SCREENING_WORKERS_LOCAL if local else Config.PARALLEL_SCREENING_WORKERS
+    return max(1, min(cap, n_papers or 1))
 
 
 @app.post("/api/screen/abstract")
@@ -1785,12 +2102,15 @@ def screen_abstract(req: ScreenAbstractRequest):
     _ss["inclusion_list"] = list(req.inclusion or [])
     _ss["exclusion_list"] = list(req.exclusion or [])
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
-    raw = _screen_one(paper, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+    leads = is_leads_model(model_name)
+    raw = (_screen_one(paper, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+           if leads else {})
     # Per-PICO assessment uses the reasoning-tier model regardless of screening
     # model, because structured JSON output is its strength.
     pico_model = resolve_for_thinking(req.model)
     return _normalize_abstract_decision(
         raw, req.inclusion, req.exclusion, req.paper, pico=req.pico, model_name=pico_model,
+        protocol=req.protocol or "", derive_decision=not leads,
     )
 
 
@@ -1811,16 +2131,19 @@ def screen_abstract_batch(req: ScreenAbstractBatchRequest):
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
 
     pico_model = resolve_for_thinking(req.model)
+    leads = is_leads_model(model_name)
 
     def _one(p_in: PaperIn) -> Dict[str, Any]:
         bp = _to_backend_paper(p_in)
-        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+        raw = (_screen_one(bp, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+               if leads else {})
         return _normalize_abstract_decision(
             raw, req.inclusion, req.exclusion, p_in, pico=req.pico, model_name=pico_model,
+            protocol=req.protocol or "", derive_decision=not leads,
         )
 
     results: List[Dict[str, Any]] = []
-    workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, len(req.papers) or 1))
+    workers = _screening_workers(pico_model, len(req.papers))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for fut in as_completed([ex.submit(_one, p) for p in req.papers]):
             try:
