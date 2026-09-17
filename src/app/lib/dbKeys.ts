@@ -39,6 +39,33 @@ export function setDbKey(source: DbSource, key: string): void {
 }
 export function hasDbKey(source: DbSource): boolean { return !!getDbKey(source); }
 
+// ---------------------------------------------------------------------------
+// Contact email. Not a key and not an account: several scholarly APIs require a
+// real, working address as their politeness policy. Unpaywall hard-rejects any
+// call without one (HTTP 422), and NCBI raises your rate limit when it can tell
+// who you are. Stored on-device beside the keys and sent as a request header, so
+// no address is ever baked into the app.
+// ---------------------------------------------------------------------------
+const EMAIL_KEY = "ee:contact-email";
+
+export function getContactEmail(): string {
+  try { return localStorage.getItem(EMAIL_KEY) || ""; } catch { return ""; }
+}
+export function setContactEmail(email: string): void {
+  try {
+    const e = email.trim();
+    if (e) localStorage.setItem(EMAIL_KEY, e);
+    else localStorage.removeItem(EMAIL_KEY);
+  } catch { /* ignore */ }
+  emit();
+}
+export function isValidContactEmail(email: string): boolean {
+  const e = email.trim();
+  if (!/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(e)) return false;
+  // A placeholder domain is rejected by the very APIs this unlocks.
+  return !/(example\.(com|org)|localhost|test\.com)$/i.test(e.split("@")[1] || "");
+}
+
 // Headers to attach to every backend request for any data-source key that is set.
 export function dbKeyHeaders(): Record<string, string> {
   const h: Record<string, string> = {};
@@ -46,5 +73,7 @@ export function dbKeyHeaders(): Record<string, string> {
     const k = getDbKey(s);
     if (k) h[HEADER[s]] = k;
   }
+  const email = getContactEmail();
+  if (email && isValidContactEmail(email)) h["X-User-Contact-Email"] = email;
   return h;
 }

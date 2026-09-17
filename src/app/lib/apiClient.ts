@@ -637,7 +637,12 @@ export const AIService = {
     }));
   },
 
-  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{ status: "found" | "missing"; text?: string; reason?: string; source?: string; pdf_key?: string }> {
+  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{
+    status: "found" | "missing"; text?: string; reason?: string; source?: string; pdf_key?: string;
+    /** Present on a miss: why, and where a human can go to get it by hand. */
+    reason_code?: string; oa_status?: string; doi?: string; pmid?: string;
+    links?: Record<string, string>;
+  }> {
     return postJSON("/fulltext/fetch", {
       Title: paper.Title, URL: paper.URL, Source: paper.Source, paper_id: paper.paper_id || null,
     }, signal);
@@ -878,7 +883,14 @@ export const DataAggregator = {
     pico: Pico,
     opts: { cap?: number; signal?: AbortSignal } = {},
   ): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; truncated: string[] }> {
-    const cap = opts.cap ?? 2000;
+    // No implicit ceiling. Abstract screening must see every record the planning
+    // stage said the query yields — silently screening the first 2000 of 12,000
+    // and reporting PRISMA counts off that sample would misstate the review.
+    // `opts.cap` stays available as an EXPLICIT opt-in for callers that really
+    // do want a sample; UNPLANNED_BUDGET applies only when a source reported no
+    // planned yield at all, so we still have some number to ask for.
+    const cap = opts.cap;                  // undefined => unlimited
+    const UNPLANNED_BUDGET = 2000;
     const papers: Paper[] = [];
     const sourceCounts: Record<string, number> = {};
     const truncated: string[] = [];
@@ -887,8 +899,10 @@ export const DataAggregator = {
       const q = (perDbQueries[src] || baseQuery || "").trim();
       if (!q) continue;
       const planned = yields?.[src];
-      const budget = planned && planned > 0 ? Math.min(planned, cap) : cap;
-      if (planned && planned > cap) truncated.push(`${src} (${planned.toLocaleString()} → ${cap.toLocaleString()})`);
+      const budget = planned && planned > 0
+        ? (cap ? Math.min(planned, cap) : planned)
+        : (cap ?? UNPLANNED_BUDGET);
+      if (cap && planned && planned > cap) truncated.push(`${src} (${planned.toLocaleString()} → ${cap.toLocaleString()})`);
       const res = await DataAggregator.fetchAll(q, [src], pico, budget, opts.signal);
       papers.push(...res.papers);
       Object.assign(sourceCounts, res.sourceCounts);
@@ -1218,6 +1232,10 @@ export const ALL_SOURCES = SOURCES_POOL;
 export const AGENT_NAMES = AGENTS;
 
 export function formatDuration(seconds: number): string {
+  // NaN and undefined fall through every comparison below and render as
+  // "NaNh NaNm" in the progress bar, which is what a reviewer sees while a
+  // long screening run is going.
+  if (!Number.isFinite(seconds) || seconds < 0) return "0.0s";
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;

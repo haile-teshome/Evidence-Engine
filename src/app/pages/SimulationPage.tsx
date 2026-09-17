@@ -313,6 +313,22 @@ export function SimulationPage() {
     s.setSimulation(null);
   };
 
+  // Changing a per-database query invalidates that plan exactly as changing the
+  // base query does. Without this the Databases panel keeps showing the OLD
+  // count while the editor holds the NEW query, and abstract screening then
+  // fetches the new query using the old query's yield as its budget — the
+  // curation silently stops tracking.
+  const updatePerDb = (src: string, v: string) => {
+    s.setPerDbQueries(p => ({ ...p, [src]: v }));
+    s.setSimulation(null);
+    s.setDbTestResults(prev => {
+      if (!prev || !(src in prev)) return prev;
+      const next = { ...prev };
+      delete next[src];
+      return next;
+    });
+  };
+
   function saveRun(counts: Record<string, number>, source: "manual" | "ai-optimize") {
     s.addSimulationRun({
       unifiedQuery: s.unifiedSearchQuery,
@@ -606,7 +622,7 @@ export function SimulationPage() {
                 <div className="flex items-center gap-2 shrink-0">
                   <Button
                     size="sm" variant="outline" className="text-xs h-8"
-                    onClick={() => s.setPerDbQueries(p => ({ ...p, [activeDb]: s.unifiedSearchQuery }))}
+                    onClick={() => updatePerDb(activeDb, s.unifiedSearchQuery)}
                     title="Reset this database's query to the base query"
                   >
                     <RotateCcw className="size-3.5 mr-1.5" />Reset to base
@@ -621,7 +637,7 @@ export function SimulationPage() {
                   <label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Query for {activeDb}</label>
                   <Textarea
                     value={s.perDbQueries[activeDb] ?? ""}
-                    onChange={e => s.setPerDbQueries(p => ({ ...p, [activeDb]: e.target.value }))}
+                    onChange={e => updatePerDb(activeDb, e.target.value)}
                     className="font-mono text-xs mt-1.5 field-sizing-fixed h-[26rem] overflow-auto resize-none"
                   />
                 </div>
