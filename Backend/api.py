@@ -23,9 +23,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # IMPORTANT: install the headless shim BEFORE importing utils / data_services
-from streamlit_shim import install as _install_shim, session_state as _ss
 
-_install_shim()
 
 import hashlib
 import base64
@@ -52,8 +50,11 @@ from leads_screening import (
 )
 import instruments as _inst
 
+import time
 import requests
 from bs4 import BeautifulSoup
+from html import unescape as html_unescape
+from urllib.parse import quote, urljoin
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +67,12 @@ app = FastAPI(title="Evidence Engine API", version="0.1.0")
 # Replaces the former Supabase edge function so the app stays fully local.
 from store import router as store_router  # noqa: E402
 
+# Screening prioritisation. Kept in its own module because it is the one
+# component whose algorithm is pinned to a published benchmark figure.
+from ranking import router as ranking_router  # noqa: E402
+
 app.include_router(store_router)
+app.include_router(ranking_router)
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +502,7 @@ def search_build(req: SearchBuildRequest):
         print(f"[search_build] {e}")
         raise HTTPException(status_code=500, detail=str(e))
     # generate_mesh_query returns the kept concept blocks as a list of
-    # {name, tiab, mesh} (variable-N: real concept names like "Dental").
+    # {name, tiab, mesh} (variable-N: whatever concept names the review yields).
     blocks: List[ConceptBlock] = []
     concept_list = concepts if isinstance(concepts, list) else []
     for c in concept_list:
@@ -1364,8 +1370,17 @@ class SimulateYieldRequest(BaseModel):
 
 @app.post("/api/simulation/yield")
 def simulation_yield(req: SimulateYieldRequest):
-    counts = DataAggregator.simulate_yield(req.query, req.sources)
-    return {"counts": counts}
+    # simulate_yield guards each source individually, but a failure in the
+    # surrounding code (a bad query, an import error) used to surface as a 500
+    # traceback in the browser. Report zeros and say so instead: the Planning
+    # tab can render "0 for every source", it cannot render a stack trace.
+    try:
+        counts = DataAggregator.simulate_yield(req.query, req.sources)
+        return {"counts": counts}
+    except Exception as e:
+        print(f"[simulation_yield] {e}")
+        return {"counts": {s: 0 for s in (req.sources or [])},
+                "error": "Could not estimate yield for this query."}
 
 
 # ── Per-database syntax adaptation ──────────────────────────────────────────────
@@ -1484,7 +1499,257 @@ class ScreenAbstractRequest(BaseModel):
 _PICO_ASSESS_VOTES = {"PASS", "PARTIAL", "FAIL", "NA"}
 
 
-def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any]:
+# Decomposition depends only on the element text, not on the paper, so it is
+# computed once per review rather than once per record. A duplicate call under
+# threading is harmless, so no lock.
+_ELEMENT_PARTS_CACHE: Dict[tuple, List[Dict[str, Any]]] = {}
+
+# Connectives a decomposed part may keep from the sentence it was cut out of.
+# Left in place they turn "Does this study involve X?" into a malformed question.
+_LEADING_CONNECTIVE = re.compile(
+    r"^(?:that\s+(?:contain|contains|include|includes|use|uses|hold|holds)?|"
+    r"which\s+\w+|using|containing|include|including|involving|based\s+on|"
+    r"with|for|to|in|on|of|and|or)\s+",
+    re.I,
+)
+
+
+def _merge_or_alternatives(parts: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:
+    """Rejoin parts the model split across an "or", against instruction.
+
+    "A or B" means either satisfies the element, so splitting it into two required
+    parts silently demands both and drops every paper that has only one. The
+    prompt forbids the split and the model still does it, so enforce it here:
+    locate each part in the source text and merge any adjacent pair separated by
+    exactly the word "or".
+    """
+    import difflib
+    words = re.findall(r"[a-z0-9]+", text.lower())
+
+    def span(p: str) -> Optional[tuple]:
+        pw = re.findall(r"[a-z0-9]+", p.lower())
+        if not pw or len(pw) > len(words):
+            return None
+        best, at = 0.0, None
+        for i in range(len(words) - len(pw) + 1):
+            r = difflib.SequenceMatcher(None, pw, words[i:i + len(pw)]).ratio()
+            if r > best:
+                best, at = r, i
+        return (at, at + len(pw)) if best >= 0.7 and at is not None else None
+
+    out: List[Dict[str, Any]] = []
+    for p in parts:
+        s = span(str(p.get("part") or ""))
+        prev = out[-1] if out else None
+        if prev and s and prev.get("_span") and words[prev["_span"][1]:s[0]] == ["or"]:
+            prev["part"] = f'{prev["part"]} or {p["part"]}'[:120]
+            prev["appears_as"] = (prev.get("appears_as") or [])[:4] + (p.get("appears_as") or [])[:4]
+            # A near miss for one alternative may be satisfied by the other, so
+            # the merged part cannot inherit either half's disqualifiers.
+            prev["not_satisfied_by"] = []
+            prev["_span"] = (prev["_span"][0], s[1])
+            continue
+        q = dict(p)
+        q["_span"] = s
+        out.append(q)
+    for q in out:
+        q.pop("_span", None)
+    return out
+
+
+def _decompose_element(text: str, model_name: str) -> List[Dict[str, Any]]:
+    """Split an eligibility element into the separate things a paper must have.
+
+    Returns [{"part": <short noun phrase>, "appears_as": [<wording>, ...]}, ...].
+
+    ``appears_as`` is how that part could plausibly surface in an abstract, and
+    it is generated FOR THE REVIEW BEING RUN rather than hardcoded, because an
+    abstract almost never echoes an element's wording back and the vocabulary
+    that bridges the gap is different in every field. Nothing domain-specific
+    belongs in this prompt: the worked example is deliberately drawn from an
+    unrelated field so the model learns the shape and not the content.
+
+    Alternatives ("A or B") stay inside ONE part: either satisfies the element.
+    Returns a single entry when it cannot decompose, which disables per-part
+    checking and leaves the one-shot vote in place.
+    """
+    from langchain_core.messages import HumanMessage
+    key = (text.strip(), model_name)
+    if key in _ELEMENT_PARTS_CACHE:
+        return _ELEMENT_PARTS_CACHE[key]
+
+    model = AIService.get_model(model_name)
+    parts: List[Dict[str, Any]] = []
+    if model:
+        prompt = f"""Break this eligibility requirement into the separate things a paper
+must ALL have to satisfy it, and say how each one could appear in an abstract.
+
+Splitting rules:
+  • Split on "and", "using", "containing", "that contain" — these join things that
+    must ALL be true.
+  • NEVER split on "or". Alternatives stay inside ONE entry, because either one
+    satisfies the requirement. Splitting them would force a paper to have both.
+  • A phrase like "both X and Y" describes ONE combined requirement — keep it as a
+    single entry rather than two, so the combination is checked as a combination.
+  • 2 to 4 entries, each under 10 words.
+  • Each entry must be a STANDALONE NOUN PHRASE that reads correctly in the
+    sentence "Does this study involve ___ ?". Drop the connective you split on:
+    write "electronic health records", never "using electronic health records";
+    write "records holding both A and B", never "that contain both A and B".
+    A fragment starting with using / that / with / to / for is malformed.
+
+For each entry give TWO lists:
+  "appears_as": 3 to 8 ways THAT ENTRY could be worded in a real abstract —
+    synonyms, abbreviations and expansions, and specific instances.
+    Stay strictly inside the entry. Do NOT list anything that merely sits in the
+    same broad field, because that would make every paper in the field match.
+    For a combined "both X and Y" entry, every wording must show BOTH halves
+    together; a wording showing only X is not a way this entry appears.
+  "not_satisfied_by": 2 to 5 NEAR MISSES — things close enough to be confused with
+    the entry that nonetheless do NOT satisfy it. For a combination, name each
+    half on its own. These are the cases that must be answered no.
+    If the entry itself contains "or", NEVER list a near miss that has one of the
+    alternatives but not the other: either alternative alone satisfies the entry,
+    so "A without B" is a match, not a miss.
+
+WORKED EXAMPLE (an unrelated field, shown only to fix the format)
+REQUIREMENT: "satellite or drone imagery combined with both soil and weather
+measurements to estimate crop yield"
+CORRECT:
+[{{"part": "satellite or drone imagery",
+   "appears_as": ["remote sensing imagery", "Sentinel-2 scenes", "UAV aerial photographs",
+                  "multispectral overflight data"],
+   "not_satisfied_by": ["ground photographs only", "hand-drawn field maps"]}},
+ {{"part": "both soil and weather measurements",
+   "appears_as": ["soil moisture together with rainfall records",
+                  "agronomic soil samples paired with local climate data",
+                  "combined edaphic and meteorological variables"],
+   "not_satisfied_by": ["soil samples with no weather data",
+                        "rainfall records with no soil data",
+                        "a generic mention of environmental conditions"]}},
+ {{"part": "crop yield estimation",
+   "appears_as": ["predicted harvest tonnage", "yield forecasting", "productivity per hectare"],
+   "not_satisfied_by": ["mapping land cover without any yield outcome"]}}]
+WRONG: splitting "satellite or drone imagery" into two entries — the requirement
+says either one is enough, so splitting it would demand both. Equally wrong:
+writing the second entry as "with both soil and weather measurements", which is a
+fragment and not a standalone noun phrase.
+
+REQUIREMENT: {text}
+
+Return ONLY a JSON array of objects with keys "part", "appears_as" and
+"not_satisfied_by"."""
+        try:
+            r = model.invoke([HumanMessage(content=prompt)])
+            data = AIService._extract_json(r.content)
+            def _strings(v: Any, n: int) -> List[str]:
+                if not isinstance(v, list):
+                    return []
+                return [s for s in (str(x).strip()[:80] for x in v[:n]) if s]
+
+            if isinstance(data, list):
+                for item in data[:5]:
+                    if isinstance(item, dict):
+                        p = str(item.get("part") or "").strip().strip('"').strip("'")[:80]
+                        syns = _strings(item.get("appears_as"), 8)
+                        anti = _strings(item.get("not_satisfied_by"), 5)
+                    else:
+                        # Tolerate a bare array of strings from a model that
+                        # ignored the object shape.
+                        p, syns, anti = str(item).strip().strip('"').strip("'")[:80], [], []
+                    # A part is interpolated into "Does this study involve ___?",
+                    # so a leading connective the model failed to drop would make
+                    # that question ungrammatical and reliably answered "yes".
+                    p = _LEADING_CONNECTIVE.sub("", p).strip()
+                    # For an "A or B" part either alternative is enough, so a near
+                    # miss phrased as "A without B" is really a match. The prompt
+                    # says so and the model still writes them, so drop them.
+                    if re.search(r"\bor\b", p, re.I):
+                        anti = [s for s in anti if not re.search(r"\bwithout\b", s, re.I)]
+                    if p:
+                        parts.append({"part": p, "appears_as": syns,
+                                      "not_satisfied_by": anti})
+        except Exception as e:
+            print(f"[decompose_element] failed: {e}")
+
+    if not parts:
+        parts = [{"part": text.strip(), "appears_as": [], "not_satisfied_by": []}]
+    else:
+        parts = _merge_or_alternatives(parts, text)
+    _ELEMENT_PARTS_CACHE[key] = parts
+    return parts
+
+
+def _part_present(part: Dict[str, Any], title: str, abstract: str, model_name: str) -> str:
+    """Ask ONE focused question: is this single requirement present in the paper?
+
+    ``part`` is one entry from :func:`_decompose_element`, carrying the required
+    thing plus the wordings that review generated for it. The synonyms are
+    interpolated per review rather than written into this prompt: a fixed
+    glossary here would inject one review's subject matter into every other
+    review, and would hand the model the answer for the review it was written
+    for.
+
+    Returns "yes" | "no" | "unclear". Defaults to "unclear" on any failure, so a
+    broken call can never exclude a paper.
+    """
+    from langchain_core.messages import HumanMessage
+    model = AIService.get_model(model_name)
+    if not model:
+        return "unclear"
+
+    req = str(part.get("part") or "").strip()
+    syns = [s for s in (part.get("appears_as") or []) if str(s).strip()]
+    anti = [s for s in (part.get("not_satisfied_by") or []) if str(s).strip()]
+
+    syn_block = (
+        "\nCOUNTS AS YES, however the abstract words it: "
+        + "; ".join(str(s) for s in syns[:8]) + "."
+        if syns else
+        "\nCount genuine synonyms and specific instances as yes: an abstract rarely"
+        "\nechoes the requirement's own wording."
+    )
+    # The mirror of the synonym list. Without it the prompt says what a yes looks
+    # like and nothing about what a no looks like, and that asymmetry alone drives
+    # the answer toward yes on any paper in the neighbouring subject area.
+    anti_block = (
+        "\nCOUNTS AS NO, even though it is close: "
+        + "; ".join(str(s) for s in anti[:5]) + "."
+        if anti else ""
+    )
+
+    body = (abstract or "").strip()[:6000] or "(no abstract — judge from the title alone)"
+    prompt = f"""TITLE: {title}
+
+ABSTRACT: {body}
+
+Judge ONLY the data this study actually analysed, or the intervention it actually
+applied. Background, motivation, related work and future plans do NOT count.
+
+QUESTION: Did this study use {req}?
+{syn_block}{anti_block}
+
+Being in the same broad field as the requirement is NOT enough on its own, and if
+the requirement names a COMBINATION, having only one side of it is a no.
+
+Answer with EXACTLY ONE WORD:
+  yes      — present, or a specific instance of it is present
+  no       — the study used something else, or only part of what is required,
+             so the requirement is genuinely not met
+  unclear  — the abstract truly does not say either way"""
+    try:
+        r = model.invoke([HumanMessage(content=prompt)])
+        txt = str(getattr(r, "content", "") or "").lower()
+        m = re.search(r"\b(yes|no|unclear)\b", txt)
+        return m.group(1) if m else "unclear"
+    except Exception as e:
+        print(f"[part_present] failed: {e}")
+        return "unclear"
+
+
+def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str, protocol: str = "",
+                 inclusion: Optional[List[str]] = None,
+                 exclusion: Optional[List[str]] = None) -> Dict[str, Any]:
     """Run a single LLM call that returns per-PICO appraisal with evidence quotes.
 
     Output shape:
@@ -1514,6 +1779,8 @@ def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any
     elem_vals = {e["id"]: (getattr(pico, e["id"], "") or "") for e in elem_defs}
     empty: Dict[str, Any] = {e["id"]: {"vote": "NA", "evidence": "", "reasoning": ""} for e in elem_defs}
     empty["overall_reasoning"] = ""
+    empty["bucket"] = ""
+    empty["failed_criteria"] = []
     if not model:
         return empty
 
@@ -1524,32 +1791,97 @@ def _pico_assess(paper: PaperIn, pico: PicoIn, model_name: str) -> Dict[str, Any
         "fabricate quotes, and explain your best-effort judgement.)"
     )
 
-    elem_block = "\n".join(f"  {lbl}: {elem_vals.get(eid) or '(unspecified)'}"
-                           for eid, lbl in [(e["id"], e["label"]) for e in elem_defs])
+    disc_ids = set(frameworks.discriminating_ids(fw))
+    elem_block = "\n".join(
+        f"  {lbl}{' [DISCRIMINATING]' if eid in disc_ids else ''}: {elem_vals.get(eid) or '(unspecified)'}"
+        for eid, lbl in [(e["id"], e["label"]) for e in elem_defs])
     json_shape = "\n".join(f'  "{e["id"]}":    {{ "vote": "...", "evidence": "...", "reasoning": "..." }},'
                            for e in elem_defs)
+
+    proto_block = (
+        f"\nFULL REVIEW QUESTION / PROTOCOL (authoritative — the element summaries\n"
+        f"below may be abbreviated, so resolve any ambiguity against this):\n"
+        f"{(protocol or '').strip()[:2500]}\n"
+        if (protocol or "").strip() else ""
+    )
+
+    # Eligibility criteria are checked in THIS call rather than a second one.
+    # Only the failures are requested back (as ids), because the exclusion-bucket
+    # UI reads only the FAIL entries — asking for a verdict on all 14 criteria
+    # would triple the output tokens for information nothing consumes.
+    inc_list = [c for c in (inclusion or []) if str(c).strip()]
+    exc_list = [c for c in (exclusion or []) if str(c).strip()]
+    crit_ids: Dict[str, str] = {}
+    crit_lines: List[str] = []
+    for n, c in enumerate(inc_list, 1):
+        crit_ids[f"I{n}"] = c
+        crit_lines.append(f"  I{n}. {c}")
+    for n, c in enumerate(exc_list, 1):
+        crit_ids[f"E{n}"] = c
+        crit_lines.append(f"  E{n}. {c}")
+    crit_block = (
+        "\nELIGIBILITY CRITERIA (I = inclusion, must be met; E = exclusion, must NOT apply):\n"
+        + "\n".join(crit_lines)
+        + "\n\nAlso return \"failed_criteria\": a list of the ids that count AGAINST this\n"
+          "paper — an I-id the paper fails to meet, or an E-id that applies to it.\n"
+          "Return [] when none. Ids only (e.g. [\"I2\",\"E1\"]), no prose.\n"
+        if crit_lines else ""
+    )
 
     prompt = f"""You are screening a paper against a {frame_label} frame for a systematic review.
 For EACH of the {frame_label} elements below, decide a vote of PASS, PARTIAL, or FAIL.
 Never use "NA" or "UNCERTAIN" — pick the closest of the three labels:
 
-  • PASS    — the title/abstract clearly satisfies this element (explicit match).
-  • PARTIAL — it relates to this element but the match is implicit, broader,
-              narrower, or otherwise "on par but not explicit" (e.g. broader
-              population, surrogate outcome, related setting). USE THIS
-              GENEROUSLY when the text touches the concept at all, and when you
-              are inferring from a title alone.
-  • FAIL    — the text addresses this element AND the match is clearly wrong, OR
-              makes no mention whatsoever of anything relevant to this element.
+Work through this test IN ORDER for each element and stop at the first step that
+matches. Do NOT skip to a verdict.
+
+  STEP 1 — Does the paper's subject matter contain what the element asks for?
+    Decide this by MEANING, never by wording. An abstract almost never quotes an
+    element back: the same thing routinely appears under a different name, as a
+    named instance of a general category, or as a field-specific abbreviation.
+    Read for the underlying thing, not the label. Equally, a paper that shares
+    the element's vocabulary while studying something else does not contain it.
+
+  STEP 2 — If the answer to step 1 is NO, and the paper is plainly ABOUT A
+    DIFFERENT SUBJECT so the missing part could not show up in the full text
+    either  ->  FAIL.
+    This is also the verdict when the element requires a COMBINATION and the
+    paper has only one side of it, with nothing in its subject matter that the
+    full text could supply for the other side.
+
+  STEP 3 — If the answer to step 1 is YES and the abstract states it explicitly
+    and completely  ->  PASS.
+
+  STEP 4 — If the answer to step 1 is YES but the abstract is implicit, partial,
+    broader or narrower  ->  PARTIAL. Send it to full text rather than discarding
+    it. This is a high-sensitivity FIRST PASS: genuine uncertainty is resolved at
+    full text, never here.
+
+Never FAIL a paper merely because it does not echo the element's wording, and
+never PASS one merely because it sits in the same broad field.
+
+Elements marked [DISCRIMINATING] define what this review is actually about, and a
+FAIL there will exclude the paper outright — so reserve FAIL there for papers that
+are genuinely about a different subject (step 2), not for papers that are on topic
+but vague. Unmarked elements are descriptive scope: judge them generously and
+prefer PARTIAL over FAIL, because they never exclude anything on their own.
+
+For a [DISCRIMINATING] element, do not agonise over the whole conjunction here.
+Each of its required parts is verified separately afterwards, one focused question
+per part, and that separate check is what decides the element's outcome.{proto_block}
 
 For every vote also return:
   • evidence: a SHORT verbatim phrase or sentence copied directly from the
     abstract (≤ 200 characters) that best supports your vote. If there is no
     abstract, return an empty string for evidence — never invent a quote.
+    A FAIL that rests on ABSENCE is the one case where empty evidence is correct
+    and expected: you cannot quote a thing the abstract never mentions. Return ""
+    rather than quoting an unrelated sentence to fill the field.
   • reasoning: one sentence, SPECIFIC to THIS paper — name what the paper
     actually studied (its real population/intervention/outcome as stated in the
-    title or abstract) and why that earns the vote. Never leave it blank and
-    never write a generic template sentence.
+    title or abstract) and why that earns the vote. For a FAIL, name the exact
+    component that is missing. Never leave it blank and never write a generic
+    template sentence.
 
 ALWAYS write a 2-3 sentence "overall_reasoning" that (a) names in one clause what
 THIS paper is actually about (use the title when there's no abstract), then
@@ -1562,16 +1894,22 @@ implies and flag what remains uncertain pending full text.
 
 {frame_label}:
 {elem_block}
-
+{crit_block}
 PAPER TITLE: {title}
 
 PAPER ABSTRACT:
 {abstract_block}
 
+Also return "bucket": a 3-5 word label naming the single most decisive factor
+(e.g. "Wrong study design", "Population out of scope", "All elements met"). It is
+shown to the reviewer as the at-a-glance reason, so make it specific to this paper.
+
 Return ONLY a JSON object with EXACTLY this shape:
 {{
 {json_shape}
-  "overall_reasoning": "..."
+  "overall_reasoning": "...",
+  "bucket": "...",
+  "failed_criteria": []
 }}
 
 NEVER fabricate a quote that does not appear in the abstract.
@@ -1603,7 +1941,7 @@ NEVER fabricate a quote that does not appear in the abstract.
                 best, best_score = sentence, score
         return best if best_score >= min_overlap else ""
 
-    def _clean_field(raw: Any, pico_seed: str) -> Dict[str, str]:
+    def _clean_field(raw: Any, pico_seed: str) -> Dict[str, Any]:
         if not isinstance(raw, dict):
             # Abstract present but model returned nothing — try a PICO-keyword
             # rescue. If even that finds something, mark PARTIAL; otherwise NA.
@@ -1629,6 +1967,12 @@ NEVER fabricate a quote that does not appear in the abstract.
         elif vote not in {"PASS", "FAIL"}:
             vote = "NA"
 
+        # For a discriminating element the per-part checklist is AUTHORITATIVE and
+        # overrides the model's own one-shot verdict. Judging a four-part
+        # conjunction in a single pass is where small models fail: qwen2.5:7b
+        # called a Random Forest study "does not use AI/ML" and FAILed every paper
+        # it was shown. Asking each part separately and combining them here is both
+        # more accurate and reproducible from what the reviewer can see.
         raw_evidence = str(raw.get("evidence") or "").strip().strip('"').strip("'")
         evidence = ""
 
@@ -1644,8 +1988,14 @@ NEVER fabricate a quote that does not appear in the abstract.
         # element text itself. Catches the case where the model emitted no
         # quote OR an unusable quote, but the abstract clearly addresses the
         # element through related vocabulary.
-        if not evidence:
-            evidence = _best_sentence(pico_seed, min_overlap=1)[:240]
+        #
+        # Deliberately NOT run for FAIL. A FAIL usually rests on ABSENCE, and a
+        # single shared token ("data", "clinical") is enough to drag back some
+        # unrelated sentence, which then reads as evidence FOR the element it is
+        # supposed to refute. Requiring 2 tokens elsewhere keeps the rescue from
+        # firing on one generic word.
+        if not evidence and vote != "FAIL":
+            evidence = _best_sentence(pico_seed, min_overlap=2)[:240]
 
         reasoning = str(raw.get("reasoning") or "").strip()[:300]
 
@@ -1654,22 +2004,62 @@ NEVER fabricate a quote that does not appear in the abstract.
         #     This is the "on par but not explicit" case.
         #   • If the model said NA and we anchored nothing → keep NA.
         #     (Abstract genuinely doesn't address this element.)
-        #   • If the model said PASS/PARTIAL/FAIL but we couldn't anchor a
-        #     quote at all → downgrade to NA (we promised the user that every
-        #     non-NA chip has a quote).
+        #   • If the model said PASS or PARTIAL but we couldn't anchor a quote at
+        #     all → downgrade to NA (we promised the user that every positive chip
+        #     has a quote). FAIL is EXEMPT: "the abstract never mentions the
+        #     required thing" is unquotable by construction, and downgrading was
+        #     silently discarding exactly the votes that should exclude a paper.
         if vote == "NA" and evidence:
             vote = "PARTIAL"
             if not reasoning:
                 reasoning = "Abstract content relates to this PICO element but does not match explicitly."
         elif vote == "NA":
             reasoning = ""
-        if vote != "NA" and not evidence:
+        if vote in {"PASS", "PARTIAL"} and not evidence:
             vote = "NA"
             reasoning = ""
+        if vote == "FAIL" and not reasoning:
+            reasoning = "The title/abstract does not provide what this element requires."
 
         return {"vote": vote, "evidence": evidence, "reasoning": reasoning}
 
     assessed = {eid: _clean_field(data.get(eid), elem_vals.get(eid) or "") for eid in elem_vals}
+
+    # ---- Per-part verification of the discriminating element(s) --------------
+    # One focused yes/no/unclear question per required part, each its own call.
+    # A 7b model that gets a four-part conjunction wrong in a single pass answers
+    # the same four parts correctly when asked one at a time; the cost is N small
+    # calls whose prompts are short and whose output is a single word.
+    for eid in elem_vals:
+        if eid not in disc_ids or not (elem_vals.get(eid) or "").strip():
+            continue
+        parts = _decompose_element(elem_vals[eid], model_name)
+        if len(parts) < 2:
+            continue  # nothing to decompose; leave the one-shot vote alone
+        components = [{"part": p.get("part", ""),
+                       "present": _part_present(p, title, abstract, model_name)}
+                      for p in parts]
+        if any(c["present"] == "no" for c in components):
+            derived = "FAIL"
+        elif all(c["present"] == "yes" for c in components):
+            derived = "PASS"
+        else:
+            derived = "PARTIAL"
+        assessed[eid]["vote"] = derived
+        assessed[eid]["components"] = components
+        # The vote now comes from the per-part checks, so the reasoning has to as
+        # well. Leaving the one-shot sentence in place next to a derived vote
+        # produced panels that argued against their own verdict.
+        missing = [c["part"] for c in components if c["present"] == "no"]
+        unknown = [c["part"] for c in components if c["present"] == "unclear"]
+        if missing:
+            note = "Required part not present: " + "; ".join(missing[:3])
+        elif unknown:
+            note = "Abstract does not establish: " + "; ".join(unknown[:3])
+        else:
+            note = "All required parts present: " + "; ".join(
+                c["part"] for c in components[:3])
+        assessed[eid]["reasoning"] = note[:300]
 
     # Never leave the reason blank — fall back to a record-specific, best-effort
     # sentence grounded in the title (the PICO chips may still be NA when no
@@ -1685,7 +2075,51 @@ NEVER fabricate a quote that does not appear in the abstract.
             f"confidence — assess at full text."
         )
 
-    return {**assessed, "overall_reasoning": overall_reasoning}
+    bucket = str(data.get("bucket") or "").strip()[:60]
+
+    # Map the returned ids back onto the criterion strings the UI knows about.
+    # Unknown ids are dropped rather than guessed at.
+    raw_failed = data.get("failed_criteria")
+    failed_criteria: List[str] = []
+    if isinstance(raw_failed, list):
+        for item in raw_failed:
+            key = str(item).strip().upper()
+            if key in crit_ids and crit_ids[key] not in failed_criteria:
+                failed_criteria.append(crit_ids[key])
+
+    return {**assessed, "overall_reasoning": overall_reasoning,
+            "bucket": bucket, "failed_criteria": failed_criteria}
+
+
+def _decide_from_votes(assessment: Dict[str, Any], framework: str) -> tuple[str, str]:
+    """Derive INCLUDE/EXCLUDE from the per-element votes, in code.
+
+    Previously the decision came from a SEPARATE llm call that never saw these
+    votes, so the same evidence could yield either answer (in one 906-record
+    export, the pattern FAIL/PASS/PASS produced INCLUDE 394 times and EXCLUDE 86
+    times). Deriving it here makes the decision reproducible from, and auditable
+    against, the evidence the reviewer is shown.
+
+    The rule, sensitivity-first as a first-pass abstract screen should be:
+      • FAIL on any DISCRIMINATING element            -> EXCLUDE
+      • no element assessable at all (every vote NA)  -> EXCLUDE (nothing to go on)
+      • otherwise                                     -> INCLUDE
+    PARTIAL and NA never exclude: an abstract that is merely vague belongs at
+    full text, not in the discard pile.
+    """
+    disc = frameworks.discriminating_ids(framework)
+    votes = {eid: str((assessment.get(eid) or {}).get("vote") or "NA").upper()
+             for eid in frameworks.element_ids(framework)}
+
+    failed = [eid for eid in disc if votes.get(eid) == "FAIL"]
+    if failed:
+        labels = ", ".join(frameworks.label_for(framework, eid) for eid in failed)
+        return "EXCLUDE", f"Fails {labels}"
+
+    if votes and all(v == "NA" for v in votes.values()):
+        return "EXCLUDE", "No assessable evidence"
+
+    return "INCLUDE", ""
 
 
 def _normalize_abstract_decision(
@@ -1695,6 +2129,8 @@ def _normalize_abstract_decision(
     paper: PaperIn,
     pico: Optional[PicoIn] = None,
     model_name: Optional[str] = None,
+    protocol: str = "",
+    derive_decision: bool = True,
 ) -> Dict[str, Any]:
     decision = str(raw.get("decision", "Exclude")).strip().lower()
     decision_upper = "INCLUDE" if decision.startswith("inc") else "EXCLUDE"
@@ -1715,14 +2151,48 @@ def _normalize_abstract_decision(
                 best, best_score = s, score
         return best or abstract[:200]
 
-    all_criteria = list(inclusion) + list(exclusion)
-    for crit in all_criteria:
-        v = raw.get(crit)
-        if isinstance(v, str):
-            vu = v.strip().upper()
-            vote = "PASS" if vu in {"INCLUDE", "PASS", "YES", "TRUE"} else (
-                "FAIL" if vu in {"EXCLUDE", "FAIL", "NO", "FALSE"} else "N/A"
+    # Per-element structured assessment with evidence quotes. This single call
+    # now also checks the eligibility criteria and supplies the bucket, so the
+    # generic path no longer needs a second screening call.
+    fw = frameworks.normalize(getattr(pico, "framework", "pico") if pico is not None else "pico")
+    pico_assessment: Dict[str, Any] = {
+        eid: {"vote": "NA", "evidence": "", "reasoning": ""} for eid in frameworks.element_ids(fw)
+    }
+    pico_assessment.update({"overall_reasoning": "", "bucket": "", "failed_criteria": []})
+    if pico is not None and model_name:
+        try:
+            pico_assessment = _pico_assess(
+                paper, pico, model_name, protocol=protocol,
+                inclusion=inclusion, exclusion=exclusion,
             )
+        except Exception as e:
+            print(f"[normalize_abstract] pico_assess failed: {e}")
+
+    # The decision is DERIVED from the votes above (see _decide_from_votes), so
+    # what the reviewer reads is what drove the call. A model that makes its own
+    # verdict — LEADS is fine-tuned to do exactly that — keeps it via
+    # derive_decision=False, which also preserves its benchmark behaviour.
+    if derive_decision:
+        decision_upper, derived_bucket = _decide_from_votes(pico_assessment, fw)
+    else:
+        derived_bucket = ""
+
+    # Criterion-level trace, consumed by the exclusion-bucketing UI. The model
+    # returns only the criteria that count against the paper; everything else is
+    # a pass. When no assessment ran, leave every criterion unjudged.
+    failed = set(pico_assessment.get("failed_criteria") or [])
+    assessed_criteria = bool(pico_assessment.get("overall_reasoning"))
+    for crit in list(inclusion) + list(exclusion):
+        legacy = raw.get(crit)
+        if isinstance(legacy, str):
+            lv = legacy.strip().upper()
+            vote = "PASS" if lv in {"INCLUDE", "PASS", "YES", "TRUE"} else (
+                "FAIL" if lv in {"EXCLUDE", "FAIL", "NO", "FALSE"} else "N/A"
+            )
+        elif crit in failed:
+            vote = "FAIL"
+        elif assessed_criteria:
+            vote = "PASS"
         else:
             vote = "N/A"
         agent_trace[crit] = {
@@ -1730,22 +2200,6 @@ def _normalize_abstract_decision(
             "reasoning": f"Criterion evaluation: {vote}",
             "evidence": _evidence_for(crit),
         }
-
-    # Per-PICO structured assessment with evidence quotes. The "overall_reasoning"
-    # synthesises across population/intervention/comparator/outcome and becomes
-    # the new Reason string shown in the screening table.
-    pico_assessment: Dict[str, Any] = {
-        "population":   {"vote": "NA", "evidence": "", "reasoning": ""},
-        "intervention": {"vote": "NA", "evidence": "", "reasoning": ""},
-        "comparator":   {"vote": "NA", "evidence": "", "reasoning": ""},
-        "outcome":      {"vote": "NA", "evidence": "", "reasoning": ""},
-        "overall_reasoning": "",
-    }
-    if pico is not None and model_name:
-        try:
-            pico_assessment = _pico_assess(paper, pico, model_name)
-        except Exception as e:
-            print(f"[normalize_abstract] pico_assess failed: {e}")
 
     # _pico_assess always returns a record-specific, non-blank overall_reasoning
     # (it judges from the title when no abstract is present), so use it directly.
@@ -1755,8 +2209,14 @@ def _normalize_abstract_decision(
         or reason.strip()
         or ("Meets inclusion criteria" if decision_upper == "INCLUDE" else "Excluded")
     )
+    bucket = (
+        derived_bucket
+        or str(pico_assessment.get("bucket") or "").strip()
+        or str(raw.get("bucket") or "").strip()
+    )
 
     return {
+        "Bucket": bucket,
         "paper_id": paper.id,
         "Source": paper.source,
         "Title": paper.title,
@@ -1771,10 +2231,28 @@ def _normalize_abstract_decision(
 
 def _screen_one(paper: BackendPaper, pico: PICOCriteria, model_name: str,
                 inclusion: List[str], exclusion: List[str], protocol: str = "") -> Dict[str, Any]:
-    """Route a single paper to LEADS or to the generic screener depending on model."""
+    """Run the model's OWN verdict pass.
+
+    Only LEADS needs this: it is fine-tuned to emit a screening verdict, and its
+    benchmark numbers depend on that verdict being used as-is. For every other
+    model the verdict is derived from the per-element votes instead, so calling
+    the generic screener here would be a second LLM round-trip whose answer we
+    then throw away.
+    """
     if is_leads_model(model_name):
         return screen_paper_leads(paper, pico)
     return AIService.screen_paper(paper, pico, model_name, inclusion, exclusion, protocol)
+
+
+def _screening_workers(model_name: str, n_papers: int) -> int:
+    """Worker count sized to the backend actually serving the model.
+
+    Ollama exposes a handful of inference slots per instance, so 16 workers at a
+    local model just queue behind each other. Cloud APIs have no such ceiling.
+    """
+    local = not any(k in (model_name or "").lower() for k in ("gpt", "claude", "gemini"))
+    cap = Config.PARALLEL_SCREENING_WORKERS_LOCAL if local else Config.PARALLEL_SCREENING_WORKERS
+    return max(1, min(cap, n_papers or 1))
 
 
 @app.post("/api/screen/abstract")
@@ -1782,15 +2260,16 @@ def screen_abstract(req: ScreenAbstractRequest):
     paper = _to_backend_paper(req.paper)
     pico = _to_pico(req.pico)
     # Make criteria available to legacy functions that read session_state
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
-    raw = _screen_one(paper, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+    leads = is_leads_model(model_name)
+    raw = (_screen_one(paper, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+           if leads else {})
     # Per-PICO assessment uses the reasoning-tier model regardless of screening
     # model, because structured JSON output is its strength.
     pico_model = resolve_for_thinking(req.model)
     return _normalize_abstract_decision(
         raw, req.inclusion, req.exclusion, req.paper, pico=req.pico, model_name=pico_model,
+        protocol=req.protocol or "", derive_decision=not leads,
     )
 
 
@@ -1805,22 +2284,23 @@ class ScreenAbstractBatchRequest(BaseModel):
 
 @app.post("/api/screen/abstract-batch")
 def screen_abstract_batch(req: ScreenAbstractBatchRequest):
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
 
     pico_model = resolve_for_thinking(req.model)
+    leads = is_leads_model(model_name)
 
     def _one(p_in: PaperIn) -> Dict[str, Any]:
         bp = _to_backend_paper(p_in)
-        raw = _screen_one(bp, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+        raw = (_screen_one(bp, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
+               if leads else {})
         return _normalize_abstract_decision(
             raw, req.inclusion, req.exclusion, p_in, pico=req.pico, model_name=pico_model,
+            protocol=req.protocol or "", derive_decision=not leads,
         )
 
     results: List[Dict[str, Any]] = []
-    workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, len(req.papers) or 1))
+    workers = _screening_workers(pico_model, len(req.papers))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         for fut in as_completed([ex.submit(_one, p) for p in req.papers]):
             try:
@@ -1982,8 +2462,6 @@ def papers_rerank(req: RerankRequest):
     with per-paper LEADS scores. Use LEADS unconditionally (this is its
     trained task) regardless of which model the user selected for thinking
     tasks elsewhere."""
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
     # Route to LEADS specifically: this is exactly the per-PICO relevance task
     # the model was fine-tuned for. Override whatever the caller asked for.
@@ -2069,8 +2547,6 @@ def papers_rerank_stream(req: RerankRequest):
     """Same scoring as /papers/rerank, but streamed: emit a `progress` event as
     each paper finishes so the caller can show which article is being scored,
     then a final `done` event carrying the full ranked payload."""
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
     model_name = resolve_model_name(req.model) or LEADS_MODEL_NAME
     _score_one = _rerank_score_one_factory(req, pico, model_name)
@@ -2217,8 +2693,6 @@ Return ONLY the justification prose — no JSON, no headings, no bullet points."
 
 @app.post("/api/screen/fulltext")
 def screen_fulltext(req: ScreenFullTextRequest):
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
 
     paper_dict = {
@@ -2228,7 +2702,11 @@ def screen_fulltext(req: ScreenFullTextRequest):
         "URL": req.paper.url,
         "paper_id": req.paper.id,
     }
-    raw = AIService.screen_full_text(paper_dict, pico, resolve_model_name(req.model) or resolve_model_name(_default_model()))
+    raw = AIService.screen_full_text(
+        paper_dict, pico,
+        resolve_model_name(req.model) or resolve_model_name(_default_model()),
+        inclusion=req.inclusion, exclusion=req.exclusion,
+    )
 
     decision_raw = str(raw.get("decision", "Exclude")).strip().lower()
     decision = "Include" if decision_raw.startswith("inc") else "Exclude"
@@ -2493,14 +2971,14 @@ def _openalex_resolve_work(title: str, paper_id: str) -> Optional[Dict[str, Any]
         if paper_id and "/" in paper_id and paper_id.startswith("10."):
             r = requests.get(
                 f"https://api.openalex.org/works/doi:{paper_id}",
-                params={"mailto": Config.ENTREZ_EMAIL}, timeout=10,
+                timeout=10,
             )
             if r.status_code == 200:
                 return r.json()
         # Title search
         r = requests.get(
             "https://api.openalex.org/works",
-            params={"search": title, "per_page": 1, "mailto": Config.ENTREZ_EMAIL}, timeout=10,
+            params={"search": title, "per_page": 1}, timeout=10,
         )
         if r.status_code == 200:
             results = r.json().get("results", [])
@@ -2613,7 +3091,7 @@ def _openalex_links(work: Dict[str, Any], direction: str, max_per: int) -> List[
             if ref_ids:
                 rr = requests.get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"openalex_id:{'|'.join(ref_ids)}", "per_page": max_per, "mailto": Config.ENTREZ_EMAIL},
+                    params={"filter": f"openalex_id:{'|'.join(ref_ids)}", "per_page": max_per},
                     timeout=12,
                 )
                 if rr.status_code == 200:
@@ -2626,7 +3104,7 @@ def _openalex_links(work: Dict[str, Any], direction: str, max_per: int) -> List[
             if wid:
                 rr = requests.get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"cites:{wid}", "per_page": max_per, "mailto": Config.ENTREZ_EMAIL},
+                    params={"filter": f"cites:{wid}", "per_page": max_per},
                     timeout=12,
                 )
                 if rr.status_code == 200:
@@ -2740,7 +3218,7 @@ def _crossref_retraction(doi: str) -> Optional[Dict[str, Any]]:
     try:
         r = requests.get(
             f"https://api.crossref.org/works/{doi}",
-            headers={"User-Agent": "EvidenceEngine/1.0 (mailto:research@evidence-engine.local)"},
+            headers={"User-Agent": "EvidenceEngine/1.0"},
             timeout=15,
         )
         if not r.ok:
@@ -2868,16 +3346,194 @@ def _fetch_pmc_pdf(pmcid: str) -> Optional[bytes]:
     return None
 
 
+_OA_UA = {"User-Agent": "EvidenceEngine/1.0"}
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+# Addresses these APIs reject or that indicate a placeholder rather than a real
+# person. Sending one of these is worse than sending nothing.
+_PLACEHOLDER_EMAIL_DOMAINS = ("example.com", "example.org", "localhost", "test.com")
+
+
+def _contact_email() -> str:
+    """The user's OWN contact address for scholarly APIs that require one.
+
+    Supplied per request from the browser profile. Returns "" when absent or
+    obviously a placeholder, and every caller must degrade to an anonymous
+    request in that case rather than inventing an address.
+    """
+    from request_creds import get_cred
+    email = (get_cred("contact_email") or "").strip()
+    if not email or not _EMAIL_RE.match(email):
+        return ""
+    if email.lower().rsplit("@", 1)[-1] in _PLACEHOLDER_EMAIL_DOMAINS:
+        return ""
+    return email
+
+
+def _polite_params(extra: Optional[dict] = None) -> dict:
+    """Query params for OpenAlex/Crossref, adding `mailto` only if the user gave
+    an address (it buys their requests the faster 'polite pool')."""
+    p = dict(extra or {})
+    email = _contact_email()
+    if email:
+        p["mailto"] = email
+    return p
+
+# OpenAlex asks for <= 3 requests/second from anonymous callers.
+_OPENALEX_MIN_GAP = 0.35
+_openalex_last = 0.0
+
+
+def _openalex_oa_locations(doi: str, title: str = "") -> Tuple[List[str], str]:
+    """Resolve a work to its open-access locations WITHOUT an API key or email.
+
+    Returns ``(candidate_urls, oa_status)`` where oa_status is one of
+    "pdf" (a direct PDF url exists), "landing" (open access but only a landing
+    page), "closed" (not open access) or "unknown" (could not resolve).
+
+    OpenAlex carries the same open-access index Unpaywall does but, unlike
+    Unpaywall, does not require a contact email — Unpaywall rejects any call
+    without a real address (HTTP 422), which silently disabled this whole tier.
+    """
+    global _openalex_last
+    if not doi and not title:
+        return [], "unknown"
+    gap = time.time() - _openalex_last
+    if gap < _OPENALEX_MIN_GAP:
+        time.sleep(_OPENALEX_MIN_GAP - gap)
+    try:
+        if doi:
+            url = f"https://api.openalex.org/works/doi:{quote(doi, safe='')}"
+            r = requests.get(url, timeout=20, headers=_OA_UA, params=_polite_params())
+        else:
+            r = requests.get("https://api.openalex.org/works", timeout=20, headers=_OA_UA,
+                             params=_polite_params({"filter": f"title.search:{title[:200]}",
+                                                    "per_page": 1}))
+        _openalex_last = time.time()
+        if r.status_code != 200:
+            print(f"[openalex_oa] {doi or title[:40]}: HTTP {r.status_code}")
+            return [], "unknown"
+        data = r.json() or {}
+        if "results" in data:
+            results = data.get("results") or []
+            if not results:
+                return [], "unknown"
+            data = results[0]
+    except Exception as e:
+        print(f"[openalex_oa] {doi or title[:40]}: {e}")
+        return [], "unknown"
+
+    oa = data.get("open_access") or {}
+    locs = [l for l in ([data.get("best_oa_location")] + (data.get("locations") or []))
+            if isinstance(l, dict)]
+    pdfs = [l["pdf_url"] for l in locs if l.get("pdf_url")]
+    pages = [l["landing_page_url"] for l in locs
+             if l.get("landing_page_url") and l.get("is_oa")]
+    if oa.get("oa_url"):
+        pages.append(oa["oa_url"])
+
+    # De-duplicate while keeping PDFs ahead of landing pages.
+    seen, ordered = set(), []
+    for u in pdfs + pages:
+        if u and u not in seen:
+            seen.add(u)
+            ordered.append(u)
+    if pdfs:
+        return ordered, "pdf"
+    if not oa.get("is_oa"):
+        return ordered, "closed"
+    return ordered, "landing" if ordered else "closed"
+
+
+_PDF_LINK_RE = re.compile(
+    r'(?:citation_pdf_url"\s*content="([^"]+)")'
+    r'|(?:content="([^"]+)"\s*name="citation_pdf_url")'
+    r'|(?:href="([^"]+\.pdf(?:\?[^"]*)?)")',
+    re.I,
+)
+
+
+def _pdf_from_landing_page(page_url: str) -> Optional[bytes]:
+    """Follow an open-access landing page to the PDF it advertises.
+
+    Publishers routinely expose the file through the ``citation_pdf_url`` meta
+    tag rather than a direct link in the OA index, which is why a record can be
+    open access and still come back with no downloadable PDF.
+    """
+    if not page_url or not page_url.startswith("http"):
+        return None
+    try:
+        r = requests.get(page_url, timeout=25, allow_redirects=True, headers=_OA_UA)
+        if r.status_code != 200:
+            return None
+        # The landing page may itself already be the PDF.
+        if r.content[:5] == b"%PDF-":
+            return r.content
+        html = r.text[:400_000]
+    except Exception as e:
+        print(f"[landing_page] {page_url[:60]}: {e}")
+        return None
+
+    for m in _PDF_LINK_RE.finditer(html):
+        href = m.group(1) or m.group(2) or m.group(3)
+        if not href:
+            continue
+        target = urljoin(r.url, html_unescape(href))
+        try:
+            rr = requests.get(target, timeout=25, allow_redirects=True, headers=_OA_UA)
+            ct = (rr.headers.get("content-type") or "").lower()
+            if rr.status_code == 200 and ("pdf" in ct or rr.content[:5] == b"%PDF-"):
+                return rr.content
+        except Exception:
+            continue
+    return None
+
+
+def _fetch_oa_pdf(doi: str, title: str = "") -> Tuple[Optional[bytes], str, str]:
+    """Open-access PDF for a DOI. Returns (pdf_bytes, source_url, oa_status).
+
+    OpenAlex first because it needs no credentials at all. Unpaywall is then
+    tried as a SECOND, independent index, but only when the user has put their
+    own contact address in their profile — without one Unpaywall returns 422,
+    which is exactly how this tier came to be silently dead.
+    """
+    urls, status = _openalex_oa_locations(doi, title)
+
+    if doi and _contact_email():
+        found = _fetch_unpaywall_pdf(doi)
+        if found:
+            pdf, src = found
+            return pdf, src, "pdf"
+
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=30, allow_redirects=True, headers=_OA_UA)
+            ct = (r.headers.get("content-type") or "").lower()
+            if r.status_code == 200 and ("pdf" in ct or r.content[:5] == b"%PDF-"):
+                return r.content, u, status
+        except Exception as e:
+            print(f"[oa_pdf] {u[:60]}: {e}")
+        # Not a PDF: it is probably the landing page, so follow it.
+        pdf = _pdf_from_landing_page(u)
+        if pdf:
+            return pdf, u, status
+    return None, "", status
+
+
 def _fetch_unpaywall_pdf(doi: str) -> Optional[Tuple[bytes, str]]:
     """Resolve a DOI to an open-access PDF via the Unpaywall API and download
     the bytes. Returns (pdf_bytes, source_url) on success."""
-    if not doi:
+    email = _contact_email()
+    if not doi or not email:
         return None
     try:
-        email = getattr(Config, "ENTREZ_EMAIL", None) or "research@example.com"
-        api = f"https://api.unpaywall.org/v2/{doi}?email={email}"
-        r = requests.get(api, timeout=15, headers={"User-Agent": "EvidenceEngine/1.0"})
+        api = f"https://api.unpaywall.org/v2/{quote(doi, safe='')}"
+        r = requests.get(api, timeout=15, params={"email": email},
+                         headers={"User-Agent": "EvidenceEngine/1.0"})
         if r.status_code != 200:
+            # 422 means the address was rejected. Say so, rather than letting a
+            # config problem look exactly like a paywalled paper.
+            print(f"[unpaywall {doi}] HTTP {r.status_code}: {r.text[:120]}")
             return None
         data = r.json() or {}
         if not data.get("is_oa"):
@@ -3053,18 +3709,18 @@ def fulltext_fetch(req: FullTextRequest):
                 print(f"[fulltext_fetch] {debug_label} tier2 PMC PDF ({pmcid}) -> {len(text)} chars")
                 return _found(text, f"PMC PDF ({pmcid})", req.paper_id, req.URL, pdf)
 
-    # Tier 3 — Unpaywall via DOI. Prefer the caller-supplied DOI, then the
-    # one mined from URL, then the one returned by the EuPMC metadata lookup.
+    # Tier 3 — open-access PDF via the OpenAlex OA index, including a
+    # landing-page follow for records that advertise no direct PDF url.
     doi = (req.doi or "").strip() or _extract_doi(req.URL, req.Title) or (lookup_doi or "")
-    if doi:
-        unpaywall = _fetch_unpaywall_pdf(doi)
-        if unpaywall:
-            pdf, src_url = unpaywall
+    oa_status = "unknown"
+    if doi or req.Title:
+        pdf, src_url, oa_status = _fetch_oa_pdf(doi, req.Title or "")
+        if pdf:
             text = _extract_text_from_pdf(pdf)
             if text:
                 host = src_url.split("/", 3)[2] if "://" in src_url else src_url
-                print(f"[fulltext_fetch] {debug_label} tier3 Unpaywall PDF ({host}) -> {len(text)} chars")
-                return _found(text, f"Unpaywall PDF ({host})", req.paper_id, req.URL, pdf)
+                print(f"[fulltext_fetch] {debug_label} tier3 OA PDF ({host}) -> {len(text)} chars")
+                return _found(text, f"Open access ({host})", req.paper_id, req.URL, pdf)
 
     # Tier 4 — arXiv PDF.
     if (req.Source or "").lower() == "arxiv" or "arxiv.org" in (req.URL or "").lower():
@@ -3081,7 +3737,7 @@ def fulltext_fetch(req: FullTextRequest):
     if req.URL and req.URL.startswith("http") and req.URL.lower().split("?", 1)[0].rstrip("/").endswith(".pdf"):
         host = req.URL.split("/", 3)[2].lower() if "://" in req.URL else ""
         try:
-            ua = f"EvidenceEngine/1.0 (mailto:{Config.ENTREZ_EMAIL})" if getattr(Config, "ENTREZ_EMAIL", "") else "EvidenceEngine/1.0"
+            ua = "EvidenceEngine/1.0"
             r = requests.get(req.URL, timeout=25, allow_redirects=True, headers={"User-Agent": ua})
             ct = (r.headers.get("content-type") or "").lower()
             if r.status_code == 200 and ("pdf" in ct or r.content[:5] == b"%PDF-"):
@@ -3093,9 +3749,42 @@ def fulltext_fetch(req: FullTextRequest):
             print(f"[fulltext_fetch pdf] {e}")
 
     print(f"[fulltext_fetch] {debug_label} -> no full text "
-          f"(pid={pid or '-'}, doi={doi or '-'}, source={req.Source}, url_host="
+          f"(pid={pid or '-'}, doi={doi or '-'}, oa={oa_status}, source={req.Source}, url_host="
           f"{req.URL.split('/', 3)[2] if req.URL and '://' in req.URL else '-'})")
-    return {"status": "missing", "reason": "Full text not retrievable from open-access sources."}
+
+    # A specific reason plus the exact links a human needs, so the reviewer can
+    # finish the job by hand instead of being told only that it did not work.
+    if not doi:
+        code, reason = "no_doi", "No DOI found, so no open-access index could be searched."
+    elif oa_status == "closed":
+        code, reason = "paywalled", "Paywalled. Needs library or interlibrary loan access."
+    elif oa_status in ("pdf", "landing"):
+        code, reason = "oa_blocked", "Listed as open access but the publisher blocked the download."
+    else:
+        code, reason = "unresolved", "Could not resolve this record in the open-access index."
+
+    links: Dict[str, str] = {}
+    if doi:
+        links["doi"] = f"https://doi.org/{doi}"
+        links["scholar"] = ("https://scholar.google.com/scholar?q="
+                            + quote(f'"{doi}"', safe=""))
+    if pid and pid.isdigit():
+        links["pubmed"] = f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
+    if req.Title:
+        links["search"] = ("https://scholar.google.com/scholar?q="
+                           + quote(req.Title[:250], safe=""))
+    if req.URL:
+        links["record"] = req.URL
+
+    return {
+        "status": "missing",
+        "reason": reason,
+        "reason_code": code,
+        "oa_status": oa_status,
+        "doi": doi or "",
+        "pmid": pid if pid and pid.isdigit() else "",
+        "links": links,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -5188,13 +5877,27 @@ Rules:
 - Do NOT name commercial software or companies other than the AI system named above and the named bibliographic databases.
 - Output only the prose paragraphs — no title, no preamble, no closing remarks."""
 
+    # A model failure here used to escape the ThreadPoolExecutor as a 500 with a
+    # traceback. The reviewer has already done the work this paragraph
+    # describes; the right answer to a dead model is to say so, not to lose the
+    # page. Each half is independent, so one failing does not sink the other.
+    def _run(p: str) -> str:
+        try:
+            return (model.invoke([HumanMessage(content=p)]).content or "").strip()
+        except Exception as e:
+            print(f"[writing_summary] {e}")
+            return ""
+
     with ThreadPoolExecutor(max_workers=2) as ex:
-        fut_main = ex.submit(lambda: model.invoke([HumanMessage(content=main_prompt)]))
-        fut_app = ex.submit(lambda: model.invoke([HumanMessage(content=prompt)]))
-        main_text = (fut_main.result().content or "").strip()
-        appendix = (fut_app.result().content or "").strip()
-    # `summary` kept for back-compat with older clients.
-    return {"main_text": main_text, "appendix": appendix, "summary": appendix}
+        fut_main = ex.submit(_run, main_prompt)
+        fut_app = ex.submit(_run, prompt)
+        main_text = fut_main.result()
+        appendix = fut_app.result()
+
+    out = {"main_text": main_text, "appendix": appendix, "summary": appendix}
+    if not main_text and not appendix:
+        out["error"] = "The model did not return a summary. Check that it is running."
+    return out
 
 
 class CharItem(BaseModel):
@@ -5389,7 +6092,7 @@ def _openalex_retracted(doi: str, title: Optional[str]) -> Optional[dict]:
     try:
         if doi:
             r = requests.get(f"https://api.openalex.org/works/doi:{doi}",
-                             params={"mailto": Config.ENTREZ_EMAIL, "select": "id,is_retracted,doi"}, timeout=8)
+                             params={"select": "id,is_retracted,doi"}, timeout=8)
             if r.status_code == 200:
                 w = r.json()
                 return {"status": "retracted" if w.get("is_retracted") else "ok",
@@ -5397,8 +6100,7 @@ def _openalex_retracted(doi: str, title: Optional[str]) -> Optional[dict]:
                         "doi": doi, "source": "OpenAlex"}
         elif title:
             r = requests.get("https://api.openalex.org/works",
-                             params={"search": title, "per_page": 1, "select": "id,is_retracted,doi,title",
-                                     "mailto": Config.ENTREZ_EMAIL}, timeout=8)
+                             params={"search": title, "per_page": 1, "select": "id,is_retracted,doi,title"}, timeout=8)
             if r.status_code == 200:
                 res = (r.json().get("results") or [])
                 if res:
@@ -5417,7 +6119,7 @@ def _crossref_update(doi: str) -> Optional[dict]:
     if not doi:
         return None
     try:
-        r = requests.get(f"https://api.crossref.org/works/{doi}", params={"mailto": Config.ENTREZ_EMAIL}, timeout=8)
+        r = requests.get(f"https://api.crossref.org/works/{doi}", timeout=8)
         if r.status_code != 200:
             return None
         updates = r.json().get("message", {}).get("update-to") or []

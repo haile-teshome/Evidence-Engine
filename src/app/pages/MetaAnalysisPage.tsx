@@ -562,7 +562,7 @@ export function MetaAnalysisPage() {
   const candidatePapers: Paper[] = useMemo(() => {
     if (s.results && s.results.length > 0) {
       return s.results
-        .filter(r => r.Decision.toUpperCase().includes("INCLUDE"))
+        .filter(r => String(r.Decision ?? "").toUpperCase().includes("INCLUDE"))
         .map(r => ({ id: r.paper_id, source: r.Source, title: r.Title, abstract: r.Abstract || "", url: r.URL }));
     }
     if (s.uniquePapers && s.uniquePapers.length > 0) return s.uniquePapers;

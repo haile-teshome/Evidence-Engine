@@ -78,7 +78,10 @@ export function compileAuditLog(opts: {
   }
 
   return {
-    generated_at: opts.generatedAt || "",
+    // Default to now. This is a compliance artifact: a RAISE / PRISMA-AI
+    // disclosure has to state when the AI-assisted decisions were made, and
+    // the only caller does not pass a timestamp, so every export carried "".
+    generated_at: opts.generatedAt || new Date().toISOString(),
     manifest: { ...(opts.manifest || {}), model: opts.model },
     decisions,
     note: "Each decision was produced by the model and run settings in the manifest. "

@@ -30,10 +30,20 @@ export type FullTextRecord = {
    *  when the full text came from a real PDF source. Absent for XML/HTML tiers. */
   pdf_url?: string;
   /** Where the full text was retrieved from on this fetch: e.g.
-   *  "Europe PMC (XML)", "PMC PDF (PMC1234567)", "Unpaywall PDF (nature.com)",
+   *  "Europe PMC (XML)", "PMC PDF (PMC1234567)", "Open access (nature.com)",
    *  "arXiv PDF (2304.12345)", "HTML scrape (publisher.com)". Different from
    *  `source` (which is the paper's database). */
   retrieved_via?: string;
+  /** Why a fetch came back missing, as a machine-readable class so the UI can
+   *  tell "paywalled, go to the library" apart from "we could not resolve it".
+   *  One of: no_doi | paywalled | oa_blocked | unresolved. */
+  reason_code?: string;
+  /** Open-access state from the OA index: pdf | landing | closed | unknown. */
+  oa_status?: string;
+  doi?: string;
+  pmid?: string;
+  /** Ready-made places a human can go to get this paper by hand. */
+  links?: Record<string, string>;
 };
 export type TextEvidenceItem = {
   quote: string;
@@ -244,6 +254,11 @@ type Ctx = {
   // Results
   results: ScreenResult[] | null; setResults: (v: ScreenResult[] | null) => void;
   screeningDuration: number; setScreeningDuration: (v: number) => void;
+  // Provenance for the corpus that abstract screening actually retrieved: the
+  // per-database query and planned yield used for each source. PRISMA requires
+  // the search to be reported per database, and without this the link between
+  // the planning run and the screened corpus is not recorded anywhere.
+  screeningPlan: ScreeningPlan | null; setScreeningPlan: (v: ScreeningPlan | null) => void;
   // Archive of every title/abstract screening pass (for compare / restore).
   screeningArchive: ScreeningPass[]; setScreeningArchive: React.Dispatch<React.SetStateAction<ScreeningPass[]>>;
   fullTextResults: FullTextResult[] | null; setFullTextResults: (v: FullTextResult[] | null) => void;
@@ -302,6 +317,18 @@ type Ctx = {
   appendTaskLog: (kind: TaskRecord["kind"], line: string) => void;
   cancelTask: (kind: TaskRecord["kind"]) => void;
   clearTask: (kind: TaskRecord["kind"]) => void;
+};
+
+export type ScreeningPlan = {
+  /** Sources actually searched, after filtering out non-API entries. */
+  sources: string[];
+  /** The exact query sent to each source. */
+  perDbQueries: Record<string, string>;
+  /** Planned yield per source at the time of the run (null if never simulated). */
+  counts: Record<string, number> | null;
+  /** How many records each source actually returned. */
+  retrieved: Record<string, number>;
+  ranAt: string;
 };
 
 export type PrismaCounts = {
@@ -448,6 +475,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const [results, setResults] = useState<ScreenResult[] | null>(null);
   const [screeningDuration, setScreeningDuration] = useState(0);
+  const [screeningPlan, setScreeningPlan] = useState<ScreeningPlan | null>(null);
   const [screeningArchive, setScreeningArchive] = useState<ScreeningPass[]>([]);
   const [fullTextResults, setFullTextResults] = useState<FullTextResult[] | null>(null);
   const [ftDuration, setFtDuration] = useState(0);
@@ -555,7 +583,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     abstractOverrides,
     fullTextOverrides,
     rerankThreshold, rerankResults,
-    results, screeningArchive, screeningDuration, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, extractedPapers, prisma,
+    results, screeningArchive, screeningDuration, screeningPlan, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, extractedPapers, prisma,
     // Planning (search-design) outputs + per-tab run results so a session keeps
     // everything that's been run, including acquired full texts. The local
     // autosave drops fullTexts only as a fallback if it would exceed the
@@ -627,6 +655,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // so take its value (0 if the session predates this field). On a
     // reconciliation, a positive incoming duration fills in a missing one but a
     // 0/absent value must not overwrite a real measurement the store already has.
+    setScreeningPlan(pick(d.screeningPlan, screeningPlan, null) ?? null);
     if (authoritative) setScreeningDuration(typeof d.screeningDuration === "number" ? d.screeningDuration : 0);
     else if (typeof d.screeningDuration === "number" && d.screeningDuration > 0) setScreeningDuration(d.screeningDuration);
     setFullTextResults(prev => pick(d.fullTextResults, prev));
@@ -768,7 +797,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     metaOutcome, setMetaOutcome, metaMeasure, setMetaMeasure,
     metaTau2Method, setMetaTau2Method, metaUseKnappHartung, setMetaUseKnappHartung,
     metaExtractions, setMetaExtractions, metaRun, setMetaRun,
-    results, setResults, screeningArchive, setScreeningArchive, screeningDuration, setScreeningDuration, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
+    results, setResults, screeningArchive, setScreeningArchive, screeningDuration, setScreeningDuration, screeningPlan, setScreeningPlan, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened, snowballChosen, setSnowballChosen, snowballSeeds, setSnowballSeeds,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,

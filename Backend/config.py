@@ -21,7 +21,11 @@ class Config:
     BIORXIV_BATCH_SIZE = 100
     PDF_MAX_PAGES = 3
     PDF_MAX_CHARS = 3000
-    DEFAULT_MODEL = "llama3"
+    # Qwen is the house default for local work: it follows the structured-JSON
+    # screening prompts more reliably than the llama tags and matches
+    # NON_SCREENING_FALLBACK_MODEL, so one model serves both paths and Ollama
+    # never has to swap weights mid-run.
+    DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "qwen2.5:7b")
     # Local embedding model for the semantic-similarity layer (find-similar, seed
     # anchoring, deep-scan). Runs on the same Ollama by default (nothing leaves the
     # machine); set EMBED_MODEL=text-embedding-3-small to use OpenAI instead.
@@ -46,6 +50,17 @@ class Config:
     # Recommended: 4-8 for local Ollama, 8-16 for cloud APIs
     PARALLEL_SCREENING_WORKERS = int(os.getenv("PARALLEL_SCREENING_WORKERS", "16"))
     PARALLEL_AGENT_WORKERS = int(os.getenv("PARALLEL_AGENT_WORKERS", "16"))
+
+    # Ollama serves a small number of inference slots per instance, so fanning
+    # 16 workers at a local model just queues them: you pay the scheduling cost
+    # without gaining throughput. Cloud APIs have no such limit, hence two knobs.
+    PARALLEL_SCREENING_WORKERS_LOCAL = int(os.getenv("PARALLEL_SCREENING_WORKERS_LOCAL", "4"))
+
+    # Ollama's default context window (2048 on most models) silently TRUNCATES
+    # prompts that exceed it — the request still succeeds, it just loses the tail
+    # of the abstract. The screening prompt (criteria + protocol + a 6000-char
+    # abstract) routinely overflows 2048, so set this explicitly.
+    OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
 
     # Reproducibility. A fixed decoding seed plus temperature=0 make LOCAL (Ollama)
     # and OpenAI runs deterministic, so a review can be re-run to identical output.

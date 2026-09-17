@@ -140,7 +140,8 @@ export function Sidebar() {
         setLocalModels(models);
         setOllamaRunning(!!d.running);
         // Pick a sensible installed model. LEADS-mistral wins by benchmark
-        // (recall=1.0, spec=0.68); fall back to medical-tuned > qwen2.5 > llama.
+        // (recall=1.0, spec=0.68); otherwise prefer Qwen, which is the house
+        // default for local work. Llama tags are never auto-selected.
         const leadsTag = models.find(m => /leads.*mistral/i.test(m));
         const isLeadsAlias = s.model === "leads";
         if (isLeadsAlias && leadsTag) {
@@ -151,7 +152,7 @@ export function Sidebar() {
           const preferred = leadsTag
             || models.find(m => /medgemma/i.test(m))
             || models.find(m => /qwen2\.5/i.test(m))
-            || models.find(m => /llama3\.1/i.test(m))
+            || models.find(m => /qwen/i.test(m))
             || models[0];
           s.setModel(preferred);
         }
@@ -164,10 +165,12 @@ export function Sidebar() {
     s.setSources(s.sources.includes(src) ? s.sources.filter(x => x !== src) : [...s.sources, src]);
   };
 
-  // Only open-access sources are offered, so every listed database works without
-  // any institutional login or subscription. "Local PDFs" is not a searchable
-  // database (attaching your own PDFs is done from the chat's + button, which
-  // records them automatically), so it isn't shown as a togglable source here.
+  // Most listed databases are open access and work with no login. The
+  // "Subscription" group (Scopus, Web of Science) and the keyed Bibliographic
+  // entries need an API key, which is why each carries `key: "required"` and a
+  // 🔑 status indicator. "Local PDFs" is not a searchable database (attaching
+  // your own PDFs is done from the chat's + button, which records them
+  // automatically), so it isn't shown as a togglable source here.
   const visibleSources = ALL_SOURCES.filter(src => src !== "Local PDFs");
 
   return (
