@@ -1240,3 +1240,57 @@ export function formatDuration(seconds: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
 }
+
+// ---------------------------------------------------------------------------
+// Screening prioritisation (active-learning mode)
+//
+// The ranker lives in the backend because the benchmarked configuration is a
+// BGE-large embedding model, which is far too heavy to run in a browser tab.
+// `tier` is carried through every response on purpose: it names which ranker
+// produced the ordering so the UI can say so, rather than presenting a lighter
+// fallback as though it were the benchmarked one.
+// ---------------------------------------------------------------------------
+
+export type RankTier = "bge+tfidf" | "tfidf" | "nb" | "cold";
+
+export type RankStatus = {
+  benchmarked_tier_available: boolean;
+  sklearn: boolean;
+  torch: boolean;
+  model_downloaded: boolean;
+  model: string;
+  device: string;
+  tier: RankTier;
+  download_mb: number;
+};
+
+export type RankResult = {
+  order: string[];
+  scores: Record<string, number>;
+  tier: RankTier;
+  trained: boolean;
+  reviewed: number;
+  includes_found: number;
+  predicted_remaining: number;
+  est_recall: number | null;
+  batch: number;
+  detail: string;
+};
+
+export async function rankStatus(signal?: AbortSignal): Promise<RankStatus> {
+  return getJSON<RankStatus>("/rank/status", signal);
+}
+
+/** Download the BGE weights. Explicit, because it is roughly 1.3 GB. */
+export async function warmRanker(signal?: AbortSignal): Promise<{ ok: boolean; device: string }> {
+  return postJSON("/rank/warm", {}, signal);
+}
+
+export async function rankRemote(
+  records: { id: string; title?: string; text?: string }[],
+  labels: Record<string, 0 | 1>,
+  tier: "auto" | "bge" | "tfidf" = "auto",
+  signal?: AbortSignal,
+): Promise<RankResult> {
+  return postJSON<RankResult>("/rank", { records, labels, tier }, signal);
+}

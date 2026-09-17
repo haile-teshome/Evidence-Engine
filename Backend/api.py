@@ -67,7 +67,12 @@ app = FastAPI(title="Evidence Engine API", version="0.1.0")
 # Replaces the former Supabase edge function so the app stays fully local.
 from store import router as store_router  # noqa: E402
 
+# Screening prioritisation. Kept in its own module because it is the one
+# component whose algorithm is pinned to a published benchmark figure.
+from ranking import router as ranking_router  # noqa: E402
+
 app.include_router(store_router)
+app.include_router(ranking_router)
 
 
 # ---------------------------------------------------------------------------
