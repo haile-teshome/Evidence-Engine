@@ -20,7 +20,7 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import {
   FileDown, CheckCircle2, AlertTriangle, ExternalLink, RefreshCcw, Upload, FileUp, FileText, X, Search,
-  BookOpen, Code2, FileType2, FileSearch, Clock,
+  BookOpen, Code2, FileType2, FileSearch, Clock, Copy,
 } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
@@ -237,6 +237,8 @@ export function AcquisitionPage() {
               paper_id: p.paper_id, title: p.Title, url: p.URL, source: p.Source,
               status: res.status, text: res.text, reason: res.reason,
               retrieved_via: res.source,
+              reason_code: res.reason_code, oa_status: res.oa_status,
+              doi: res.doi, pmid: res.pmid, links: res.links,
               pdf_url: res.pdf_key ? `${apiConfig.baseUrl}/fulltext/pdf/${encodeURIComponent(res.pdf_key)}` : undefined,
             },
           }));
@@ -332,6 +334,41 @@ export function AcquisitionPage() {
   const missing = records.filter(r => r.status === "missing").length;
   const pending = records.filter(r => r.status === "pending").length;
 
+  /** Everything a request form or a librarian needs, for every paper we could
+   *  not download. Most of a clinical corpus is paywalled, so finishing the
+   *  acquisition step is a manual job and this is the handoff for it. */
+  function exportMissing() {
+    const rows = records.filter(r => r.status === "missing");
+    if (!rows.length) { toast.info("Nothing missing."); return; }
+    const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const csv = [
+      ["Title", "DOI", "PMID", "Why missing", "DOI link", "PubMed link"].join(","),
+      ...rows.map(r => [
+        esc(r.title), esc(r.doi || ""), esc(r.pmid || ""), esc(r.reason || ""),
+        esc(r.links?.doi || (r.doi ? `https://doi.org/${r.doi}` : "")),
+        esc(r.links?.pubmed || ""),
+      ].join(",")),
+    ].join("\n");
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    a.download = `missing-full-texts-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast.success(`Exported ${rows.length} missing records`);
+  }
+
+  async function copyMissingIds() {
+    const rows = records.filter(r => r.status === "missing");
+    const ids = rows.map(r => r.doi || (r.pmid ? `PMID:${r.pmid}` : "")).filter(Boolean);
+    if (!ids.length) { toast.info("No DOIs or PMIDs to copy."); return; }
+    try {
+      await navigator.clipboard.writeText(ids.join("\n"));
+      toast.success(`Copied ${ids.length} identifiers`);
+    } catch {
+      toast.error("Could not access the clipboard.");
+    }
+  }
+
   const selected = records.find(r => r.paper_id === selectedId) ?? records[0];
   const selectedPaper = included.find(p => p.paper_id === selected?.paper_id);
   const filtered = q.trim()
@@ -366,6 +403,18 @@ export function AcquisitionPage() {
             </>
           )}
           <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />
+          {missing > 0 && (
+            <>
+              <Button size="sm" variant="outline" className="h-8" onClick={copyMissingIds}
+                title="Copy every missing DOI / PMID, one per line, to paste into an interlibrary loan request">
+                <Copy className="size-3.5 mr-1.5" />Copy IDs
+              </Button>
+              <Button size="sm" variant="outline" className="h-8" onClick={exportMissing}
+                title="Download the missing list as CSV, with links and the reason each one failed">
+                <FileDown className="size-3.5 mr-1.5" />Export missing
+              </Button>
+            </>
+          )}
           <Button size="sm" variant="outline" className="h-8" onClick={() => setBulkOpen(true)}>
             <Upload className="size-3.5 mr-1.5" />Bulk upload
           </Button>
@@ -429,6 +478,41 @@ export function AcquisitionPage() {
                     </div>
                   </div>
                 </div>
+                {selected.status === "missing" && (
+                  <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2.5 space-y-2">
+                    <div className="text-xs text-amber-900">
+                      {selected.reason || "Could not be retrieved automatically."}
+                      {selected.reason_code === "paywalled" && " Your library or an interlibrary loan request is the way in."}
+                      {selected.reason_code === "oa_blocked" && " The file is free, so opening the publisher page by hand usually works."}
+                    </div>
+                    <div className="flex items-center gap-3 flex-wrap text-xs">
+                      <span className="text-amber-900/70">Get it from:</span>
+                      {selected.links?.doi && (
+                        <a href={selected.links.doi} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
+                          <ExternalLink className="size-3" />Publisher
+                        </a>
+                      )}
+                      {selected.links?.pubmed && (
+                        <a href={selected.links.pubmed} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
+                          <ExternalLink className="size-3" />PubMed
+                        </a>
+                      )}
+                      {(selected.links?.scholar || selected.links?.search) && (
+                        <a href={selected.links.scholar || selected.links.search} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
+                          <Search className="size-3" />Google Scholar
+                        </a>
+                      )}
+                      {selected.doi && (
+                        <button
+                          onClick={() => { navigator.clipboard?.writeText(selected.doi!); toast.success("DOI copied"); }}
+                          className="inline-flex items-center gap-1 text-primary hover:underline"
+                        >
+                          <Copy className="size-3" />Copy DOI
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {(selected.url || (selected.status === "found" && selectedPaper)) && (
                   <div className="flex items-center gap-2 flex-wrap">
                     {selected.url && (

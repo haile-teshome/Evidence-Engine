@@ -81,13 +81,21 @@ export function AbstractPage() {
     //   2. Otherwise fetch + deduplicate inline, so screening doesn't require
     //      the QA step.
     let queue: Paper[] = [];
+
+    // The cached corpus is only reusable while it still reflects the CURRENT plan.
+    const planDrift = planDriftForCorpus();
+    const corpusIsCurrent = planDrift.length === 0;
+    if (!corpusIsCurrent) {
+      toast.info(`Planning changed (${planDrift.join("; ")}). Re-fetching so screening matches the current plan.`);
+    }
+
     try {
       // Reuse the existing deduplicated set only if it still has something to
-      // screen. If it's empty or every paper was excluded by the Quality step,
-      // fall through and re-fetch with the in-use planning run's query instead
-      // of dead-ending (an empty array is truthy, which caused the misleading
-      // "all excluded" error).
-      if (s.uniquePapers && s.uniquePapers.some(p => !s.excludedByQuality.has(p.id))) {
+      // screen AND still matches the current plan. If it's empty or every paper
+      // was excluded by the Quality step, fall through and re-fetch with the
+      // in-use planning run's query instead of dead-ending (an empty array is
+      // truthy, which caused the misleading "all excluded" error).
+      if (corpusIsCurrent && s.uniquePapers && s.uniquePapers.some(p => !s.excludedByQuality.has(p.id))) {
         queue = s.uniquePapers.filter(p => !s.excludedByQuality.has(p.id));
         s.updateTask("abstract-screen", {
           stages: [
@@ -108,10 +116,37 @@ export function AbstractPage() {
             { id: "screen", label: "Screening articles", status: "pending" },
           ],
         });
+        // Search exactly the sources the Planning tab curated. Planning works on
+        // `sources` minus "Local PDFs" (it has no query to simulate), so screening
+        // must apply the same filter or it would fetch a source that was never
+        // planned or counted.
+        const planSources = s.sources.filter(x => x !== "Local PDFs");
+
+        // A missing simulation is not a harmless default: fetchForScreening then
+        // falls back to a fixed per-source budget and the curated yields are
+        // silently ignored. Stop and say so instead.
+        if (!s.simulation || !Object.keys(s.simulation).length) {
+          s.updateTask("abstract-screen", {
+            status: "error",
+            detail: "No planning yields — run the simulation on the Planning tab first.",
+          });
+          toast.error(
+            "Run the simulation on the Planning tab first, so screening uses your curated per-database queries and yields.",
+          );
+          return;
+        }
+        const unplanned = planSources.filter(src => !(src in (s.simulation || {})));
+        if (unplanned.length) {
+          toast.warning(
+            `${unplanned.join(", ")} ${unplanned.length === 1 ? "was" : "were"} never simulated on the Planning tab. ` +
+            `Re-run the simulation so ${unplanned.length === 1 ? "its" : "their"} yield is curated too.`,
+          );
+        }
+
         // Pull the FULL planning corpus: every source's own query, up to its
         // planning yield, so all found papers are screened, not a small sample.
-        const { papers: all, truncated } = await DataAggregator.fetchForScreening(
-          s.sources,
+        const { papers: all, truncated, sourceCounts } = await DataAggregator.fetchForScreening(
+          planSources,
           s.perDbQueries,
           s.unifiedSearchQuery || s.query,
           s.simulation,
@@ -119,8 +154,30 @@ export function AbstractPage() {
           { signal },
         );
         if (signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
+
+        // Record which plan produced this corpus. PRISMA has to report the search
+        // per database, and without this the link between the planning run and
+        // the screened set exists nowhere.
+        s.setScreeningPlan({
+          sources: planSources,
+          perDbQueries: Object.fromEntries(
+            planSources.map(src => [src, s.perDbQueries[src] || s.unifiedSearchQuery || s.query || ""]),
+          ),
+          counts: s.simulation ? { ...s.simulation } : null,
+          retrieved: { ...sourceCounts },
+          ranAt: new Date().toISOString(),
+        });
         if (truncated.length > 0) {
           toast.info(`Large result set: capped ${truncated.join(", ")} for screening.`);
+        }
+        // Screening is uncapped, so a broad query can legitimately queue tens of
+        // thousands of records. Say so up front rather than letting the reviewer
+        // discover it from a progress bar that barely moves.
+        if (all.length > 1000) {
+          toast.info(
+            `Screening ${all.length.toLocaleString()} articles. This is a large run — ` +
+            `progress is shown above and you can cancel at any time without losing prior results.`,
+          );
         }
         const { unique, duplicates } = Deduplicator.run(all);
         // Persist so a later QA run can reuse this set, and so the PRISMA flow
@@ -284,16 +341,61 @@ export function AbstractPage() {
   // every record as not-yet-included, then open the rapid reviewer so AI is
   // never required to use the platform. Reviewer include/exclude decisions carry
   // downstream exactly like AI ones.
+
+  // Is the cached corpus still the one the CURRENT plan describes? Removing a
+  // database or editing a per-database query makes uniquePapers stale, and
+  // screening it would contradict the search actually documented. Returns the
+  // list of drifts (empty = still current).
+  function planDriftForCorpus(): string[] {
+    if (!s.uniquePapers?.length) return [];
+    const now = s.sources.filter(x => x !== "Local PDFs");
+    const drift: string[] = [];
+    const plan = s.screeningPlan;
+    if (plan) {
+      const gone = plan.sources.filter(src => !now.includes(src));
+      const added = now.filter(src => !plan.sources.includes(src));
+      if (gone.length) drift.push(`${gone.join(", ")} removed`);
+      if (added.length) drift.push(`${added.join(", ")} added`);
+      const edited = now.filter(
+        src => plan.perDbQueries[src] !== undefined &&
+               plan.perDbQueries[src] !== (s.perDbQueries[src] || s.unifiedSearchQuery || s.query || ""),
+      );
+      if (edited.length) drift.push(`${edited.join(", ")} query changed`);
+    } else {
+      const orphans = Array.from(
+        new Set(s.uniquePapers.map(p => p.source).filter(src => src && !now.includes(src))),
+      );
+      if (orphans.length) drift.push(`${orphans.join(", ")} no longer in the plan`);
+    }
+    return drift;
+  }
+
   async function startManual() {
-    let corpus = (s.uniquePapers || []).filter(p => !s.excludedByQuality.has(p.id));
+    const manualDrift = planDriftForCorpus();
+    if (manualDrift.length) {
+      toast.info(`Planning changed (${manualDrift.join("; ")}). Re-fetching so screening matches the current plan.`);
+    }
+    let corpus = manualDrift.length ? [] : (s.uniquePapers || []).filter(p => !s.excludedByQuality.has(p.id));
     if (!corpus.length) {
       if (!s.query) { toast.error("Define a research goal on the Home page first."); return; }
       const { abort } = s.startTask("abstract-screen", [{ id: "fetch", label: "Fetching papers", status: "running" }]);
       try {
-        const { papers: all } = await DataAggregator.fetchForScreening(
-          s.sources, s.perDbQueries, s.unifiedSearchQuery || s.query, s.simulation, s.pico, { signal: abort.signal },
+        // Same source filter and provenance as the AI path, so a manually
+        // screened corpus is traceable to its planning run too.
+        const planSources = s.sources.filter(x => x !== "Local PDFs");
+        const { papers: all, sourceCounts } = await DataAggregator.fetchForScreening(
+          planSources, s.perDbQueries, s.unifiedSearchQuery || s.query, s.simulation, s.pico, { signal: abort.signal },
         );
         if (abort.signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
+        s.setScreeningPlan({
+          sources: planSources,
+          perDbQueries: Object.fromEntries(
+            planSources.map(src => [src, s.perDbQueries[src] || s.unifiedSearchQuery || s.query || ""]),
+          ),
+          counts: s.simulation ? { ...s.simulation } : null,
+          retrieved: { ...sourceCounts },
+          ranAt: new Date().toISOString(),
+        });
         const { unique, duplicates } = Deduplicator.run(all);
         s.setRawPapers(all); s.setUniquePapers(unique); s.setDuplicatesCount(duplicates.length);
         corpus = unique.filter(p => !s.excludedByQuality.has(p.id));
@@ -423,6 +525,69 @@ export function AbstractPage() {
             {s.uniquePapers.length - s.excludedByQuality.size} of {s.uniquePapers.length} unique articles ready for screening{s.excludedByQuality.size > 0 ? ` (${s.excludedByQuality.size} excluded in Quality Assessment)` : ""}.
           </AlertDescription>
         </Alert>
+      )}
+
+      {/* Provenance: what the Planning tab curated versus what screening actually
+          retrieved, per database. A planned/retrieved mismatch is the signal that
+          the curation did not track over — a source erroring out, or a query the
+          target database silently interpreted differently. */}
+      {s.screeningPlan && (
+        <div className="rounded-xl border overflow-hidden">
+          <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/30">
+            <span className="text-xs font-medium">Search per database</span>
+            <span className="text-[11px] text-muted-foreground">
+              from the planning run of {new Date(s.screeningPlan.ranAt).toLocaleString()}
+            </span>
+          </div>
+          <div className="divide-y">
+            {s.screeningPlan.sources.map(src => {
+              const planned = s.screeningPlan!.counts?.[src];
+              const got = s.screeningPlan!.retrieved?.[src] ?? 0;
+              const short = planned != null && got < planned;
+              const q = s.screeningPlan!.perDbQueries[src] || "";
+              const custom = q !== (s.unifiedSearchQuery || s.query);
+              return (
+                <div key={src} className="px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="font-medium">
+                      {src}
+                      {custom && <span className="ml-1.5 text-[10px] text-muted-foreground">(custom query)</span>}
+                    </span>
+                    <span className="tabular-nums text-muted-foreground">
+                      planned {planned != null ? planned.toLocaleString() : "—"} · retrieved{" "}
+                      <span className={short ? "text-amber-600 font-medium" : ""}>{got.toLocaleString()}</span>
+                    </span>
+                  </div>
+                  {short && (
+                    <div className="mt-1 text-[11px] text-amber-600">
+                      Retrieved fewer than planned. The source may have errored, or it interprets this query
+                      differently from the database the plan was counted against.
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {/* Reconcile retrieved -> unique on screen. Without this the panel sums
+              to one number while the header shows another, and the reader is left
+              to work out that the gap is deduplication. */}
+          {(() => {
+            const totalRetrieved = Object.values(s.screeningPlan!.retrieved || {}).reduce((a, b) => a + b, 0);
+            const dupes = s.duplicatesCount ?? 0;
+            const uniq = s.uniquePapers?.length ?? Math.max(0, totalRetrieved - dupes);
+            return (
+              <div className="flex items-center justify-between gap-2 px-3 py-2 border-t bg-muted/20 text-xs">
+                <span className="text-muted-foreground">Total retrieved</span>
+                <span className="tabular-nums">
+                  <span className="font-medium">{totalRetrieved.toLocaleString()}</span>
+                  <span className="text-muted-foreground"> − {dupes.toLocaleString()} duplicates = </span>
+                  <span className="font-medium">{uniq.toLocaleString()}</span>
+                  <span className="text-muted-foreground"> unique</span>
+                </span>
+              </div>
+            );
+          })()}
+        </div>
       )}
 
       {r && (
@@ -904,7 +1069,10 @@ function PicoCell({ label, field, criterion }: { label: string; field?: PicoFiel
 
 
 function DecisionCell({ value, overridden, aiValue }: { value: string; overridden?: boolean; aiValue?: string }) {
-  const inc = value.toUpperCase().includes("INCLUDE");
+  // A result restored from an older session, or written by an interrupted run,
+  // can be missing Decision entirely. An unguarded read here took the whole
+  // screening table down rather than showing one incomplete row.
+  const inc = String(value ?? "").toUpperCase().includes("INCLUDE");
   return (
     <div className="space-y-1">
       <span className={`inline-flex items-center gap-1 px-2 py-1 rounded font-medium text-xs ${inc ? "bg-green-100 text-green-800 dark:bg-emerald-950/50 dark:text-emerald-300" : "bg-red-100 text-red-800 dark:bg-rose-950/50 dark:text-rose-300"}`}>
@@ -912,7 +1080,7 @@ function DecisionCell({ value, overridden, aiValue }: { value: string; overridde
       </span>
       {overridden && aiValue && (
         <div className="text-[10px] text-muted-foreground leading-tight">
-          AI: {aiValue.toUpperCase().includes("INCLUDE") ? "Include" : "Exclude"} · reviewer-edited
+          AI: {String(aiValue ?? "").toUpperCase().includes("INCLUDE") ? "Include" : "Exclude"} · reviewer-edited
         </div>
       )}
     </div>

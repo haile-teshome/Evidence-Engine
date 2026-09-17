@@ -165,10 +165,12 @@ export function Sidebar() {
     s.setSources(s.sources.includes(src) ? s.sources.filter(x => x !== src) : [...s.sources, src]);
   };
 
-  // Only open-access sources are offered, so every listed database works without
-  // any institutional login or subscription. "Local PDFs" is not a searchable
-  // database (attaching your own PDFs is done from the chat's + button, which
-  // records them automatically), so it isn't shown as a togglable source here.
+  // Most listed databases are open access and work with no login. The
+  // "Subscription" group (Scopus, Web of Science) and the keyed Bibliographic
+  // entries need an API key, which is why each carries `key: "required"` and a
+  // 🔑 status indicator. "Local PDFs" is not a searchable database (attaching
+  // your own PDFs is done from the chat's + button, which records them
+  // automatically), so it isn't shown as a togglable source here.
   const visibleSources = ALL_SOURCES.filter(src => src !== "Local PDFs");
 
   return (
