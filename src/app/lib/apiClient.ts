@@ -57,6 +57,8 @@ export type PicoAssessment = {
   concept?: PicoFieldAssessment;
   context?: PicoFieldAssessment;
   overall_reasoning: string;  // 2-3 sentence synthesis across the frame
+  bucket?: string;            // 3-5 word headline reason
+  failed_criteria?: string[]; // eligibility criteria that count against the paper
 };
 
 export type ScreenResult = {
@@ -66,6 +68,9 @@ export type ScreenResult = {
   Reason: string;
   Agent_Trace: AgentTrace;
   Pico_Assessment?: PicoAssessment;
+  // Short headline reason. For an exclusion driven by a discriminating element
+  // this names it ("Fails Concept"); otherwise it is the model's own label.
+  Bucket?: string;
 };
 
 export type CriterionEvidence = { decision: "INCLUDE" | "EXCLUDE"; evidence: string; reasoning: string };
@@ -206,7 +211,7 @@ export type QualityOverride = {
 
 // Mutable global so the React store can update `model` without prop-drilling.
 export const apiConfig: { model: string; baseUrl: string } = {
-  model: "llama3.1",
+  model: "qwen2.5:7b",
   baseUrl: (import.meta as any)?.env?.VITE_API_BASE_URL || "/api",
 };
 
@@ -632,7 +637,12 @@ export const AIService = {
     }));
   },
 
-  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{ status: "found" | "missing"; text?: string; reason?: string; source?: string; pdf_key?: string }> {
+  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{
+    status: "found" | "missing"; text?: string; reason?: string; source?: string; pdf_key?: string;
+    /** Present on a miss: why, and where a human can go to get it by hand. */
+    reason_code?: string; oa_status?: string; doi?: string; pmid?: string;
+    links?: Record<string, string>;
+  }> {
     return postJSON("/fulltext/fetch", {
       Title: paper.Title, URL: paper.URL, Source: paper.Source, paper_id: paper.paper_id || null,
     }, signal);
@@ -873,7 +883,14 @@ export const DataAggregator = {
     pico: Pico,
     opts: { cap?: number; signal?: AbortSignal } = {},
   ): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; truncated: string[] }> {
-    const cap = opts.cap ?? 2000;
+    // No implicit ceiling. Abstract screening must see every record the planning
+    // stage said the query yields — silently screening the first 2000 of 12,000
+    // and reporting PRISMA counts off that sample would misstate the review.
+    // `opts.cap` stays available as an EXPLICIT opt-in for callers that really
+    // do want a sample; UNPLANNED_BUDGET applies only when a source reported no
+    // planned yield at all, so we still have some number to ask for.
+    const cap = opts.cap;                  // undefined => unlimited
+    const UNPLANNED_BUDGET = 2000;
     const papers: Paper[] = [];
     const sourceCounts: Record<string, number> = {};
     const truncated: string[] = [];
@@ -882,8 +899,10 @@ export const DataAggregator = {
       const q = (perDbQueries[src] || baseQuery || "").trim();
       if (!q) continue;
       const planned = yields?.[src];
-      const budget = planned && planned > 0 ? Math.min(planned, cap) : cap;
-      if (planned && planned > cap) truncated.push(`${src} (${planned.toLocaleString()} → ${cap.toLocaleString()})`);
+      const budget = planned && planned > 0
+        ? (cap ? Math.min(planned, cap) : planned)
+        : (cap ?? UNPLANNED_BUDGET);
+      if (cap && planned && planned > cap) truncated.push(`${src} (${planned.toLocaleString()} → ${cap.toLocaleString()})`);
       const res = await DataAggregator.fetchAll(q, [src], pico, budget, opts.signal);
       papers.push(...res.papers);
       Object.assign(sourceCounts, res.sourceCounts);
@@ -1213,7 +1232,65 @@ export const ALL_SOURCES = SOURCES_POOL;
 export const AGENT_NAMES = AGENTS;
 
 export function formatDuration(seconds: number): string {
+  // NaN and undefined fall through every comparison below and render as
+  // "NaNh NaNm" in the progress bar, which is what a reviewer sees while a
+  // long screening run is going.
+  if (!Number.isFinite(seconds) || seconds < 0) return "0.0s";
   if (seconds < 60) return `${seconds.toFixed(1)}s`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
   return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+// ---------------------------------------------------------------------------
+// Screening prioritisation (active-learning mode)
+//
+// The ranker lives in the backend because the benchmarked configuration is a
+// BGE-large embedding model, which is far too heavy to run in a browser tab.
+// `tier` is carried through every response on purpose: it names which ranker
+// produced the ordering so the UI can say so, rather than presenting a lighter
+// fallback as though it were the benchmarked one.
+// ---------------------------------------------------------------------------
+
+export type RankTier = "bge+tfidf" | "tfidf" | "nb" | "cold";
+
+export type RankStatus = {
+  benchmarked_tier_available: boolean;
+  sklearn: boolean;
+  torch: boolean;
+  model_downloaded: boolean;
+  model: string;
+  device: string;
+  tier: RankTier;
+  download_mb: number;
+};
+
+export type RankResult = {
+  order: string[];
+  scores: Record<string, number>;
+  tier: RankTier;
+  trained: boolean;
+  reviewed: number;
+  includes_found: number;
+  predicted_remaining: number;
+  est_recall: number | null;
+  batch: number;
+  detail: string;
+};
+
+export async function rankStatus(signal?: AbortSignal): Promise<RankStatus> {
+  return getJSON<RankStatus>("/rank/status", signal);
+}
+
+/** Download the BGE weights. Explicit, because it is roughly 1.3 GB. */
+export async function warmRanker(signal?: AbortSignal): Promise<{ ok: boolean; device: string }> {
+  return postJSON("/rank/warm", {}, signal);
+}
+
+export async function rankRemote(
+  records: { id: string; title?: string; text?: string }[],
+  labels: Record<string, 0 | 1>,
+  tier: "auto" | "bge" | "tfidf" = "auto",
+  signal?: AbortSignal,
+): Promise<RankResult> {
+  return postJSON<RankResult>("/rank", { records, labels, tier }, signal);
 }

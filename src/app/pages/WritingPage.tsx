@@ -11,7 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
-import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, CheckCircle2 } from "lucide-react";
+import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, CheckCircle2, AlertTriangle } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { ScreenResult, FullTextResult } from "../lib/apiClient";
@@ -53,11 +53,16 @@ function extractDoi(url: string): string | null {
 }
 
 function makeCiteKey(meta: PaperMeta): string {
+  // Every field here can be absent: an imported PDF may have no author, a
+  // record restored from an older session may have no source. An unguarded
+  // read took the whole Writing tab down instead of producing one weak key.
   const authorPart = meta.authors
     ? meta.authors.split(/[,;]/)[0].trim().split(" ").pop()?.toLowerCase() ?? "unknown"
-    : meta.source.toLowerCase().replace(/\s/g, "");
+    : String(meta.source ?? "unknown").toLowerCase().replace(/\s/g, "") || "unknown";
   const yearPart = meta.year ?? "nd";
-  const titleWord = meta.title.split(/\s+/).find(w => w.length > 3)?.toLowerCase().replace(/\W/g, "") ?? "paper";
+  const titleWord =
+    String(meta.title ?? "").split(/\s+/).find(w => w.length > 3)?.toLowerCase().replace(/\W/g, "")
+    ?? "paper";
   return `${authorPart}${yearPart}_${titleWord}`;
 }
 
@@ -346,24 +351,9 @@ export function WritingPage() {
     if (abIncluded.length)
       return { includedPapers: abIncluded.map(fromScreenResult), stage: "abstract screening" };
 
-    // Stage 3: LEADS relevance rerank kept set
-    const reranked = s.rerankResults?.kept ?? [];
-    if (reranked.length)
-      return {
-        includedPapers: reranked.map(item => ({
-          paper_id: item.paper.id,
-          title: item.paper.title,
-          url: item.paper.url,
-          source: item.paper.source,
-          abstract: item.paper.abstract,
-          year: item.paper.year,
-          authors: item.paper.authors,
-          doi: extractDoi(item.paper.url) ?? undefined,
-        } as PaperMeta)),
-        stage: "relevance rerank",
-      };
-
-    // Stage 4: deduplicated retrieval pool
+    // Stage 3: deduplicated retrieval pool. (The LEADS relevance-rerank kept set
+    // is intentionally NOT used as a source here: the Writing Assistant sources
+    // from screening decisions, then the retrieval pool.)
     const unique = s.uniquePapers ?? [];
     if (unique.length)
       return {
@@ -380,7 +370,7 @@ export function WritingPage() {
         stage: "retrieval (all)",
       };
 
-    // Stage 5: raw retrieved papers
+    // Stage 4: raw retrieved papers
     const raw = s.rawPapers ?? [];
     return {
       includedPapers: raw.map(p => ({
@@ -395,7 +385,7 @@ export function WritingPage() {
       } as PaperMeta)),
       stage: "retrieval (all)",
     };
-  }, [s.fullTextResults, s.results, s.abstractOverrides, s.rerankResults, s.uniquePapers, s.rawPapers]);
+  }, [s.fullTextResults, s.results, s.abstractOverrides, s.uniquePapers, s.rawPapers]);
 
   // Enrichment cache + generated summary live in the store so switching tabs
   // (which unmounts this page) doesn't re-fetch metadata every time.
@@ -469,10 +459,10 @@ export function WritingPage() {
     let done = 0;
     for (const p of todo) {
       const data = await fetchMetadata(p);
-      if (Object.keys(data).length) {
-        setEnriched(prev => ({ ...prev, [p.paper_id]: data }));
-        done++;
-      }
+      // Cache the attempt even when no metadata was found, so a paper without a
+      // resolvable identifier is not re-fetched every time the tab is opened.
+      setEnriched(prev => ({ ...prev, [p.paper_id]: data }));
+      if (Object.keys(data).length) done++;
     }
     if (done) toast.success(`Enriched ${done} of ${todo.length} articles`);
     setEnriching(false);
@@ -701,7 +691,11 @@ export function WritingPage() {
     );
   }
 
-  const enrichedCount = Object.keys(enriched).length;
+  // A paper counts as enriched only if its lookup actually returned metadata
+  // (a cached empty {} means "attempted, none found" -> still needs attention).
+  const isEnriched = (id: string) => !!enriched[id] && Object.keys(enriched[id]).length > 0;
+  const enrichedCount = includedPapers.filter(p => isEnriched(p.paper_id)).length;
+  const missingCount = includedPapers.length - enrichedCount;
 
   return (
     <div className="space-y-3">
@@ -710,6 +704,7 @@ export function WritingPage() {
         stats={<>
           <InlineStat icon={BookOpen} value={merged.length} label="Articles" hint={stage} />
           {enrichedCount > 0 && <><PaneDivider /><InlineStat icon={CheckCircle2} tone="success" value={enrichedCount} label="Enriched" /></>}
+          {missingCount > 0 && !enriching && <><PaneDivider /><InlineStat icon={AlertTriangle} tone="amber" value={missingCount} label="Missing metadata" /></>}
         </>}
         actions={<>
           <Button variant="outline" size="sm" className="h-8" onClick={() => enrichAll(includedPapers, true)} disabled={enriching} title="Re-fetch full metadata (authors, journal, year) for every article">
@@ -812,16 +807,30 @@ export function WritingPage() {
               <div className="overflow-auto flex-1 flex flex-col items-stretch">
                 {filtered.map(({ p, n }) => {
                   const active = p.paper_id === selectedRow?.p.paper_id;
+                  // Flag papers whose metadata lookup returned nothing (once
+                  // enrichment has finished) so they can be reviewed / fixed.
+                  const missing = !isEnriched(p.paper_id) && !enriching;
                   return (
                     <button
                       key={p.paper_id}
                       onClick={() => setSelectedId(p.paper_id)}
-                      className={`w-full shrink-0 text-left px-3 py-2.5 border-b transition-colors ${active ? "bg-primary/10 border-l-2 border-l-primary" : "border-l-2 border-l-transparent hover:bg-muted/50"}`}
+                      className={`w-full shrink-0 text-left px-3 py-2.5 border-b border-l-2 transition-colors ${
+                        active
+                          ? "bg-primary/10 border-l-primary"
+                          : missing
+                            ? "bg-amber-50/70 dark:bg-amber-950/20 border-l-amber-400 hover:bg-amber-50"
+                            : "border-l-transparent hover:bg-muted/50"
+                      }`}
                     >
                       <div className="flex items-center gap-2 mb-1 text-[10px] text-muted-foreground">
                         <span className="tabular-nums">[{n}]</span>
                         <Badge variant="outline" className="text-[10px]">{p.source}</Badge>
                         {p.year && <span className="tabular-nums">{p.year}</span>}
+                        {missing && (
+                          <span className="inline-flex items-center gap-1 text-amber-600 font-medium">
+                            <AlertTriangle className="size-3" />no metadata
+                          </span>
+                        )}
                       </div>
                       <div className="text-sm leading-snug line-clamp-2">{p.title}</div>
                     </button>

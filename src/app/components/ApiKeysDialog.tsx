@@ -11,7 +11,7 @@ import {
   keychainIsAvailable, keychainStatus, keychainSet, keychainDelete,
   hasEncrypted, isUnlocked, unlock, lock, saveEncrypted, clearEncrypted, unlockedKeys,
 } from "../lib/keystore";
-import { getDbKey, setDbKey, hasDbKey, type DbSource } from "../lib/dbKeys";
+import { getDbKey, setDbKey, hasDbKey, getContactEmail, setContactEmail, isValidContactEmail, type DbSource } from "../lib/dbKeys";
 
 const META: Record<LlmProvider, { label: string; placeholder: string }> = {
   anthropic: { label: "Anthropic (Claude)", placeholder: "sk-ant-..." },
@@ -59,6 +59,7 @@ export function ApiKeysDialog({ open, onOpenChange, highlight }: {
   const [pass2, setPass2] = useState("");
   const [unlockPass, setUnlockPass] = useState("");
   const [busy, setBusy] = useState(false);
+  const [email, setEmail] = useState(getContactEmail());
 
   useEffect(() => {
     if (!open) return;
@@ -256,7 +257,37 @@ export function ApiKeysDialog({ open, onOpenChange, highlight }: {
 
             {tab === "databases" && (
               <div className="space-y-5">
-                <section className="space-y-3">
+                <section className="space-y-2">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Contact email</span>
+                      <span className="text-[10px] rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 px-1.5 py-0.5">recommended</span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Not an account. Unpaywall and NCBI ask who is calling: Unpaywall refuses requests without a
+                      real address, and NCBI raises your rate limit when you give one. Adding yours finds more full texts.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="contact-email" className="text-sm">Your email</Label>
+                    <Input
+                      id="contact-email" type="email" value={email} placeholder="you@university.edu"
+                      onChange={e => { setEmail(e.target.value); setContactEmail(e.target.value); }}
+                    />
+                    {email.trim() && !isValidContactEmail(email) && (
+                      <p className="text-[11px] text-amber-600 dark:text-amber-400">
+                        These APIs reject placeholder addresses. Use a real one you can receive mail at.
+                      </p>
+                    )}
+                    {email.trim() && isValidContactEmail(email) && (
+                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1">
+                        <Check className="size-3" />Sent only to Unpaywall, NCBI, OpenAlex and Crossref, with each request.
+                      </p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="space-y-3 border-t pt-4">
                   <div className="space-y-0.5">
                     <div className="flex items-center gap-2">
                       <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Free</span>

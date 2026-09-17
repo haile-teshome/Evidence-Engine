@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Dialog, DialogContent } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { Check, X, SkipForward, Undo2, Sparkles, CheckCircle2, ExternalLink, ScanLine, Eye, EyeOff, Star, Search } from "lucide-react";
-import { activeRank } from "../lib/activeLearning";
+import { rankRecords, type RankedState } from "../lib/activeLearning";
 
 // One record to review, normalized so the same rapid reviewer drives both
 // abstract and full-text screening (which use different decision casings).
@@ -60,31 +60,76 @@ export function RapidScreen({
   const [search, setSearch] = useState("");
   const [onlyStarred, setOnlyStarred] = useState(false);
 
-  const al = useMemo(() => activeRank(items), [items]);
+  const COLD: RankedState = {
+    order: [], scores: {}, includesFound: 0, reviewed: 0,
+    predictedRemaining: 0, estRecall: null, trained: false, tier: "cold", detail: "",
+  };
+  const [al, setAl] = useState<RankedState>(COLD);
+  const [ranking, setRanking] = useState(false);
   const byId = useMemo(() => new Map(items.map(it => [it.id, it])), [items]);
 
-  // Freeze the review order so the list doesn't reshuffle under the reviewer as
-  // they label (which otherwise makes the index skip cards and get stuck at the
-  // end). Recomputed only when the dialog opens or the mode changes.
   const [order, setOrder] = useState<string[]>([]);
   const [i, setI] = useState(0);
+  const iRef = useRef(0); iRef.current = i;
+  const itemsRef = useRef(items); itemsRef.current = items;
+
+  // Start from the AI decision order in both modes. In active-learning mode
+  // this is the cold start, and the effect below replaces it as soon as there
+  // are labels to fit on.
   useEffect(() => {
     if (!open) return;
-    const ids = learn
-      ? al.order
-      : [...items].sort((a, b) => {
-          const aRev = a.override ? 1 : 0, bRev = b.override ? 1 : 0;
-          if (aRev !== bRev) return aRev - bRev;
-          return (a.aiInclude ? 0 : 1) - (b.aiInclude ? 0 : 1);
-        }).map(it => it.id);
+    const ids = [...items].sort((a, b) => {
+      const aRev = a.override ? 1 : 0, bRev = b.override ? 1 : 0;
+      if (aRev !== bRev) return aRev - bRev;
+      return (a.aiInclude ? 0 : 1) - (b.aiInclude ? 0 : 1);
+    }).map(it => it.id);
     setOrder(ids);
     // Resume: jump to the last card viewed, else the first unreviewed one.
     const saved = readStore().lastId;
     let start = saved ? ids.indexOf(saved) : -1;
     if (start < 0) start = ids.findIndex(id => !byId.get(id)?.override);
     setI(start < 0 ? 0 : start);
+    rankedAt.current = -1;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, learn]);
+
+  // Re-rank every N/100 labels, which is the batch size the published WSS@95
+  // was measured at. Re-ranking on every single decision would hammer the
+  // backend and reshuffle the queue mid-decision; never re-ranking at all is
+  // what made the shipped behaviour diverge from the benchmark in the first
+  // place, since a frozen queue is single-pass screening wearing the
+  // active-learning label.
+  const rankedAt = useRef(-1);
+  const batchSize = Math.max(1, Math.floor(items.length / 100));
+  const reviewedNow = items.filter(x => x.override).length;
+
+  useEffect(() => {
+    if (!open || !learn) return;
+    if (rankedAt.current >= 0 && reviewedNow - rankedAt.current < batchSize) return;
+    const ac = new AbortController();
+    setRanking(true);
+    rankRecords(itemsRef.current, ac.signal)
+      .then(r => {
+        rankedAt.current = reviewedNow;
+        setAl(r);
+        if (!r.order.length) return;
+        // Splice the refreshed ranking in AFTER the current card, so the record
+        // under the reviewer's cursor never changes identity mid-decision.
+        setOrder(prev => {
+          const kept = prev.slice(0, iRef.current + 1);
+          const keptSet = new Set(kept);
+          const rest = r.order.filter(id => !keptSet.has(id));
+          const restSet = new Set(rest);
+          const leftover = prev.slice(iRef.current + 1)
+            .filter(id => !keptSet.has(id) && !restSet.has(id));
+          return [...kept, ...rest, ...leftover];
+        });
+      })
+      .catch(() => { /* aborted, or already surfaced as the nb tier */ })
+      .finally(() => setRanking(false));
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, learn, reviewedNow, batchSize]);
 
   const queue = useMemo(
     () => order.map(id => byId.get(id)).filter(Boolean) as typeof items,
@@ -213,7 +258,18 @@ export function RapidScreen({
               <span>~{al.predictedRemaining} predicted relevant remaining</span>
               {al.estRecall != null && <span>est. recall {Math.round(al.estRecall * 100)}%</span>}
               {!al.trained && <span className="text-amber-600">learning: label a few includes and excludes</span>}
+              {ranking && <span className="text-muted-foreground/70">re-ranking...</span>}
               {safeToStop && <span className="inline-flex items-center gap-1 text-emerald-600 font-medium"><CheckCircle2 className="size-3.5" />safe to stop</span>}
+              {/* Name the ranker. The stop suggestion above rests on a recall
+                  estimate, and only the validated ranker has a WSS@95 behind
+                  it, so a reviewer must be able to tell which one is running. */}
+              {al.trained && (
+                al.tier === "bge+tfidf"
+                  ? <span className="text-muted-foreground/70" title={al.detail}>validated ranker</span>
+                  : <span className="text-amber-600" title={al.detail}>
+                      {al.tier === "tfidf" ? "reduced ranker (no embeddings)" : "offline ranker"} - not validated
+                    </span>
+              )}
             </div>
           )}
         </div>

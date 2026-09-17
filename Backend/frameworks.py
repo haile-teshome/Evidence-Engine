@@ -30,6 +30,10 @@ FRAMEWORKS: Dict[str, dict] = {
         # context elements become optional filter blocks.
         "anchor_ids": ["intervention", "outcome"],
         "context_ids": ["population"],
+        # Screening roles: a FAIL on a DISCRIMINATING element excludes the paper.
+        # Everything else is advisory — abstracts routinely omit the comparator and
+        # report surrogate outcomes, so failing on those would exclude eligible work.
+        "discriminating_ids": ["population", "intervention"],
         "formal_template": "In [population], does [intervention] compared to [comparator] affect [outcome]?",
     },
     "pcc": {
@@ -46,6 +50,11 @@ FRAMEWORKS: Dict[str, dict] = {
         ],
         "anchor_ids": ["concept"],
         "context_ids": ["population", "context"],
+        # JBI scoping reviews are deliberately BROAD on population and context —
+        # "adults 18-65" is a description of scope, not a gate, and excluding a
+        # paper for studying "CKD patients" instead would be wrong. Only the
+        # Concept (the thing being mapped) discriminates.
+        "discriminating_ids": ["concept"],
         "formal_template": "This scoping review maps [concept] among [population] in [context].",
     },
 }
@@ -68,6 +77,17 @@ def element_ids(name: str | None) -> List[str]:
 
 def element_defs(name: str | None) -> List[dict]:
     return framework_of(name)["elements"]
+
+
+def discriminating_ids(name: str | None) -> List[str]:
+    """Element ids whose FAIL vote is sufficient to exclude a paper at screening.
+
+    Non-discriminating elements still get a vote (the reviewer sees it), but a
+    FAIL there never drives the decision on its own — it flags, it does not cut.
+    Falls back to the search anchors when a frame omits the key.
+    """
+    fw = framework_of(name)
+    return list(fw.get("discriminating_ids") or fw.get("anchor_ids") or [])
 
 
 def label_for(name: str | None, element_id: str) -> str:

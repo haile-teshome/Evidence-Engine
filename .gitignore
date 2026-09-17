@@ -74,3 +74,16 @@ dist-bundle/
 .build-cache/
 runtime/
 Backend/wheels/
+
+# Never commit env backups or variants
+.env.*
+!.env.example
+
+# Cached BGE embeddings for the screening-prioritisation ranker. Derived data,
+# regenerated on demand, and hundreds of MB on a full SYNERGY-sized corpus.
+Backend/.rank_cache/
+*.npy
+
+# Coverage artifacts
+.coverage
+coverage.json
