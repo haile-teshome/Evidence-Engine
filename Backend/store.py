@@ -560,11 +560,19 @@ class InviteCreate(BaseModel):
 def create_invite(pid: str, body: InviteCreate, request: Request):
     uid = current_user(request.headers.get("x-reviewer-id"))
     _require_role(pid, uid, ["lead"])
+    # Validate here, as set_member_role does. An unvalidated role produced an
+    # invite that accepted cleanly and then failed every role check afterwards:
+    # the invitee became a project member who could not perform a single action,
+    # and the 403 blamed their role rather than the malformed invite.
+    role = body.role or "reviewer"
+    if role not in ROLES:
+        raise HTTPException(status_code=400,
+                            detail=f"Invalid role '{role}'. Must be one of: {', '.join(ROLES)}")
     token = _new_id("inv").split("_", 1)[1]
     invite = {
         "token": token,
         "project_id": pid,
-        "role": body.role or "reviewer",
+        "role": role,
         "created_by": uid,
         "created_at": _now(),
         "expires_at": body.expires_at or None,

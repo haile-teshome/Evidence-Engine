@@ -6,7 +6,6 @@ import urllib.parse
 from pypdf import PdfReader
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple
-import streamlit as st
 from config import Config, DataSource
 from models import Paper
 import time
@@ -46,6 +45,47 @@ def throttled_request(url: str, params: dict = None, headers: dict = None, metho
     _last_request_time = time.time()
     return response
 
+def contact_email() -> str:
+    """The user's own contact address from their profile, or the configured
+    fallback. NCBI asks for a real address so it can warn before blocking."""
+    try:
+        from request_creds import get_cred
+        e = (get_cred("contact_email") or "").strip()
+        if e and "@" in e and not e.lower().endswith(("example.com", "example.org")):
+            return e
+    except Exception:
+        pass
+    return Config.ENTREZ_EMAIL
+
+
+def entrez_abstract(article: dict) -> str:
+    """Join every section of a PubMed abstract into one string.
+
+    Entrez returns ``AbstractText`` as a LIST, one entry per labelled section of
+    a structured abstract (BACKGROUND / METHODS / RESULTS / CONCLUSIONS). Taking
+    only ``[0]`` handed the screener the background paragraph alone, which is
+    precisely the section that never states what data or methods a study used:
+    measured against PubMed, that dropped 1981 characters to 158 on a typical
+    structured abstract and about half the corpus was affected.
+    """
+    parts = (article.get("Abstract") or {}).get("AbstractText") or []
+    if isinstance(parts, str):
+        return parts.strip()
+    out: List[str] = []
+    for p in parts:
+        text = str(p).strip()
+        if not text:
+            continue
+        # Biopython attaches the section label as an XML attribute.
+        label = ""
+        try:
+            label = str((p.attributes or {}).get("Label", "")).strip()
+        except AttributeError:
+            pass
+        out.append(f"{label}: {text}" if label else text)
+    return " ".join(out).strip()
+
+
 class PubMedService:
     """Handles PubMed data fetching."""
 
@@ -67,7 +107,7 @@ class PubMedService:
         key = term.lower()
         if key in PubMedService._mesh_cache:
             return PubMedService._mesh_cache[key]
-        Entrez.email = Config.ENTREZ_EMAIL
+        Entrez.email = contact_email()
         try:
             from request_creds import get_cred
             _k = get_cred("ncbi") or getattr(Config, "NCBI_API_KEY", "")
@@ -101,7 +141,7 @@ class PubMedService:
         pmids = [str(p).strip() for p in pmids if str(p).strip().isdigit()]
         if not pmids:
             return {}
-        Entrez.email = Config.ENTREZ_EMAIL
+        Entrez.email = contact_email()
         try:
             from request_creds import get_cred
             _k = get_cred("ncbi") or getattr(Config, "NCBI_API_KEY", "")
@@ -138,7 +178,7 @@ class PubMedService:
 
         ``year_from`` / ``year_to`` restrict by publication year (inclusive) via
         the esearch date filter, so the limit is applied to a date-scoped pool."""
-        Entrez.email = Config.ENTREZ_EMAIL
+        Entrez.email = contact_email()
         # An optional free NCBI key raises the rate limit from 3 to 10 req/s.
         from request_creds import get_cred
         _ncbi_key = get_cred("ncbi") or getattr(Config, "NCBI_API_KEY", "")
@@ -187,22 +227,20 @@ class PubMedService:
                 citation = article['MedlineCitation']
                 pmid = str(citation['PMID']) 
                 
-                abstract_text = citation['Article'].get('Abstract', {}).get(
-                    'AbstractText', ["N/A"]
-                )[0]
-                
+                abstract_text = entrez_abstract(citation['Article'])
+
                 papers.append(Paper(
                     source=DataSource.PUBMED.value,
                     id=pmid,
                     title=citation['Article']['ArticleTitle'],
-                    abstract=str(abstract_text),
+                    abstract=abstract_text,
                     url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                 ))
             
             return papers
             
         except Exception as e:
-            st.error(f"PubMed fetch error: {e}")
+            print(f"PubMed fetch error: {e}")
             return []
 
 
@@ -220,7 +258,7 @@ class TopJournalsService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         """Fetch from AJE, IJE, and EJE."""
-        Entrez.email = Config.ENTREZ_EMAIL
+        Entrez.email = contact_email()
         
         journal_filter = ' OR '.join(TopJournalsService.JOURNALS)
         full_query = f"({query}) AND ({journal_filter})"
@@ -251,13 +289,13 @@ class TopJournalsService:
                     source=DataSource.PUBMED.value,
                     id=str(citation['PMID']),
                     title=citation['ArticleTitle'],
-                    abstract=str(citation['Abstract']['AbstractText'])
+                    abstract=entrez_abstract(citation)
                 ))
             
             return papers
             
         except Exception as e:
-            st.error(f"PubMed fetch error: {e}")
+            print(f"PubMed fetch error: {e}")
             return []
 
 
@@ -281,7 +319,7 @@ class ArXivService:
             # Check if response is valid XML before parsing
             content_type = response.headers.get('content-type', '').lower()
             if 'xml' not in content_type and not response.content.strip().startswith(b'<'):
-                st.error(f"ArXiv API returned non-XML response (content-type: {content_type})")
+                print(f"ArXiv API returned non-XML response (content-type: {content_type})")
                 return []
             
             # Check for HTTP error status
@@ -346,7 +384,7 @@ class BioRxivService:
                     
             return papers
         except Exception as e:
-            st.error(f"BioRxiv fetch error: {e}")
+            print(f"BioRxiv fetch error: {e}")
             return []
 
 
@@ -377,7 +415,7 @@ class PDFService:
                 ))
                 
             except Exception as e:
-                st.warning(f"Failed to process {file.name}: {e}")
+                print(f"Failed to process {file.name}: {e}")
                 continue
         
         return papers
@@ -417,7 +455,7 @@ class SemanticScholarService:
                 ))
             return papers
         except Exception as e:
-            st.error(f"Semantic Scholar Error: {e}")
+            print(f"Semantic Scholar Error: {e}")
             return []
 
 class COREService:
@@ -448,8 +486,48 @@ class COREService:
                 ))
             return papers
         except Exception as e:
-            st.error(f"CORE API Error: {e}")
+            print(f"CORE API Error: {e}")
             return []
+
+def to_europepmc_query(query: str) -> str:
+    """Translate a PubMed-syntax query into Europe PMC syntax.
+
+    Deleting the field tags (the previous behaviour) does NOT preserve the query:
+    an unqualified term in Europe PMC matches FULL TEXT, so `"machine learning"`
+    hits any paper that mentions the phrase anywhere. Measured on one 4-block
+    query: PubMed 5 hits, tags-deleted 1311, this translation 2. That ~260x
+    inflation is why a single source could dominate a corpus with records that
+    never matched the question.
+
+    MeSH clauses are dropped rather than mapped. Europe PMC's MESH: field is not
+    OR-safe — `MESH:"Dentistry" OR MESH:"Chronic Disease"` returns 12190, FEWER
+    than `MESH:"Dentistry"` alone at 18624 — so those clauses cannot be trusted.
+    Its MeSH coverage is partial anyway (preprints and non-MEDLINE records carry
+    none), and the [tiab] synonyms alongside them carry the same concepts.
+
+    A query already in Europe PMC syntax has no bracket tags, so this is a no-op.
+    """
+    q = query or ""
+    # MeSH clauses, plus an adjacent OR so the boolean stays well-formed.
+    q = re.sub(r'(?:"[^"]*"|[^\s()]+)\s*\[(?:mesh|mesh terms|mh)(?::noexp)?\]\s*(?:OR\s+)?', "", q, flags=re.I)
+    # Title/abstract tags -> Europe PMC's field prefix.
+    q = re.sub(r'("[^"]+"|[^\s()]+?)\s*\[(?:tiab|title/abstract|tw|text ?word|ti|title)\]',
+               r"TITLE_ABS:\1", q, flags=re.I)
+    # Any remaining tags (date, language, publication type) and their terms.
+    q = re.sub(r'(?:"[^"]*"|[^\s()]+)\s*\[[^\]]+\]\s*(?:OR\s+)?', "", q)
+    q = re.sub(r"\[[^\]]+\]", "", q)
+    # Tidy the boolean wreckage the removals leave behind (empty groups, dangling
+    # operators). Repeated because collapsing one group can expose another.
+    for _ in range(3):
+        q = re.sub(r"\(\s*(?:AND|OR)\s+", "(", q, flags=re.I)
+        q = re.sub(r"\s*(?:AND|OR)\s*\)", ")", q, flags=re.I)
+        q = re.sub(r"\(\s*\)", "", q)
+        q = re.sub(r"\b(AND|OR)\s+(AND|OR)\b", r"\1", q, flags=re.I)
+        q = re.sub(r"^\s*(?:AND|OR)\s+", "", q, flags=re.I)
+        q = re.sub(r"\s+(?:AND|OR)\s*$", "", q, flags=re.I)
+        q = re.sub(r"\s+", " ", q).strip()
+    return q
+
 
 class EuropePMCService:
     """Handles Europe PMC data fetching."""
@@ -458,41 +536,59 @@ class EuropePMCService:
     def fetch(query: str, max_results: int, sort: str = "relevance",
               year_from: int = None, year_to: int = None) -> List[Paper]:
         try:
-            epmc_query = re.sub(r"\[[^\]]+\]", "", query)
-            epmc_query = re.sub(r"\s+", " ", epmc_query).strip()
+            epmc_query = to_europepmc_query(query)
             # Optional publication-year window.
             if year_from or year_to:
                 yf = int(year_from) if year_from else 1800
                 yt = int(year_to) if year_to else 3000
                 epmc_query = f"({epmc_query}) AND (PUB_YEAR:[{yf} TO {yt}])"
             url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
-            params = {
-                "query": epmc_query or query,
-                "format": "json",
-                "pageSize": max_results,
-                # "core" returns the abstract text; "lite" omits it. Without
-                # abstracts the downstream PICO appraisal has nothing to
-                # anchor quotes against and every cell collapses to NA.
-                "resultType": "core",
-            }
-            # Europe PMC ranks by relevance by default; for "recent" ask it to
-            # sort by publication date descending so the kept N are the newest.
-            if str(sort).lower() in ("recent", "pub_date", "date"):
-                params["sort"] = "P_PDATE_D desc"
-            resp = throttled_request(url, params=params).json()
+            # Europe PMC caps pageSize at 1000 and, above that, returns HTTP 200
+            # with an EMPTY result list rather than an error. A single request for
+            # more than 1000 therefore yields zero papers silently, which is why
+            # this source contributed nothing whenever its planned yield was
+            # large. Page with cursorMark instead.
+            PAGE = 1000
+            MAX_PAGES = 60                      # ~60k ceiling; guards runaway loops
             papers: List[Paper] = []
-            for r in resp.get("resultList", {}).get("result", []):
-                pid = r.get("id") or r.get("pmid") or r.get("doi") or ""
-                src_code = r.get("source", "MED")
-                paper_url = f"https://europepmc.org/article/{src_code}/{pid}" if pid else ""
-                papers.append(Paper(
-                    source="Europe PMC",
-                    id=str(pid),
-                    title=r.get("title", "") or "",
-                    abstract=r.get("abstractText", "") or "",
-                    url=paper_url,
-                ))
-            return papers
+            cursor = "*"
+            for _ in range(MAX_PAGES):
+                if len(papers) >= max_results:
+                    break
+                params = {
+                    "query": epmc_query or query,
+                    "format": "json",
+                    "pageSize": min(PAGE, max_results - len(papers)),
+                    "cursorMark": cursor,
+                    # "core" returns the abstract text; "lite" omits it. Without
+                    # abstracts the downstream PICO appraisal has nothing to
+                    # anchor quotes against and every cell collapses to NA.
+                    "resultType": "core",
+                }
+                # Europe PMC ranks by relevance by default; for "recent" ask it to
+                # sort by publication date descending so the kept N are the newest.
+                if str(sort).lower() in ("recent", "pub_date", "date"):
+                    params["sort"] = "P_PDATE_D desc"
+                resp = throttled_request(url, params=params).json()
+                batch = resp.get("resultList", {}).get("result", []) or []
+                for r in batch:
+                    pid = r.get("id") or r.get("pmid") or r.get("doi") or ""
+                    src_code = r.get("source", "MED")
+                    paper_url = f"https://europepmc.org/article/{src_code}/{pid}" if pid else ""
+                    papers.append(Paper(
+                        source="Europe PMC",
+                        id=str(pid),
+                        title=r.get("title", "") or "",
+                        abstract=r.get("abstractText", "") or "",
+                        url=paper_url,
+                    ))
+                nxt = resp.get("nextCursorMark") or ""
+                # Stop on an empty page, an exhausted cursor, or a cursor that
+                # stops advancing (the documented end-of-results signal).
+                if not batch or not nxt or nxt == cursor:
+                    break
+                cursor = nxt
+            return papers[:max_results]
         except Exception as e:
             print(f"Europe PMC fetch error: {e}")
             return []
@@ -522,7 +618,6 @@ class OpenAlexService:
                 "search": clean or query,
                 "per_page": min(max(max_results, 1), 200),
                 "select": "id,title,abstract_inverted_index,doi,open_access,publication_year",
-                "mailto": Config.ENTREZ_EMAIL,
             }
             resp = throttled_request(url, params=params).json()
             papers: List[Paper] = []
@@ -551,7 +646,7 @@ class OpenAlexService:
         similarity (shared concepts), NOT citations. Complements citation
         snowballing by surfacing same-topic papers that have no citation link."""
         try:
-            mail = {"mailto": Config.ENTREZ_EMAIL}
+            mail = {}  # no contact email is sent to third-party APIs
             # 1. resolve the seed to an OpenAlex work and read its related_works
             if seed_doi:
                 doi = seed_doi.replace("https://doi.org/", "")
@@ -602,7 +697,7 @@ class CrossRefService:
                 "rows": min(max_results, 100),
                 "select": "DOI,title,abstract,URL,author",
             }
-            headers = {"User-Agent": f"EvidenceEngine/1.0 (mailto:{Config.ENTREZ_EMAIL})"}
+            headers = {"User-Agent": "EvidenceEngine/1.0"}
             resp = throttled_request(url, params=params, headers=headers).json()
             papers: List[Paper] = []
             for it in resp.get("message", {}).get("items", []):
@@ -931,8 +1026,6 @@ class DataAggregator:
 
         for source in active_sources:
             papers = []
-            status_text = st.empty()
-
             try:
                 if source == DataSource.LOCAL_PDF.value:
                     if uploaded_files:
@@ -949,8 +1042,7 @@ class DataAggregator:
                 source_counts[source] = count
 
             except Exception as e:
-                status_text.write(f"❌ {source}: Error occurred")
-                st.error(f"Error fetching from {source}: {str(e)}")
+                print(f"Error fetching from {source}: {str(e)}")
                 source_counts[source] = 0
 
         if limit is not None:
@@ -974,7 +1066,7 @@ class DataAggregator:
                 
                 # 1. PubMed & Top Journals
                 if source == DataSource.PUBMED.value:
-                    Entrez.email = Config.ENTREZ_EMAIL
+                    Entrez.email = contact_email()
                     
                     # Construct search term for PubMed
                     search_term = query
@@ -1060,8 +1152,10 @@ class DataAggregator:
                     try:
                         # Europe PMC accepts free-text + a subset of fielded operators.
                         # Strip PubMed-only tags ([Mesh], [tiab]) before sending.
-                        epmc_query = re.sub(r"\[[^\]]+\]", "", query)
-                        epmc_query = re.sub(r"\s+", " ", epmc_query).strip()
+                        # Must use the SAME translation as the fetch, or the
+                        # planned yield describes a different query from the one
+                        # screening actually runs.
+                        epmc_query = to_europepmc_query(query)
                         url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
                         params = {
                             "query": epmc_query or query,
@@ -1094,7 +1188,7 @@ class DataAggregator:
                     try:
                         oa_query = re.sub(r"\[[^\]]+\]", "", query).strip()
                         url = "https://api.openalex.org/works"
-                        params = {"search": oa_query or query, "per_page": 1, "select": "id", "mailto": Config.ENTREZ_EMAIL}
+                        params = {"search": oa_query or query, "per_page": 1, "select": "id"}
                         resp = throttled_request(url, params=params).json()
                         count = (resp.get("meta") or {}).get("count", 0)
                         results[source] = int(count) if str(count).isdigit() else 0
@@ -1108,7 +1202,7 @@ class DataAggregator:
                         cr_query = re.sub(r"\[[^\]]+\]", "", query).strip()
                         url = "https://api.crossref.org/works"
                         params = {"query": cr_query or query, "rows": 0}
-                        headers = {"User-Agent": f"EvidenceEngine/1.0 (mailto:{Config.ENTREZ_EMAIL})"}
+                        headers = {"User-Agent": "EvidenceEngine/1.0"}
                         resp = throttled_request(url, params=params, headers=headers).json()
                         total = (resp.get("message") or {}).get("total-results", 0)
                         results[source] = int(total) if str(total).isdigit() else 0
@@ -1157,14 +1251,11 @@ class DataAggregator:
                         print(f"CORE search error for {source}: {e}")
                         results[source] = 0
 
-                # 6. Local PDFs (Current count in session)
+                # 6. Local PDFs. This is a yield ESTIMATE for remote databases and
+                # runs with no upload context, so it cannot know how many local
+                # files the user has staged. The caller supplies that count.
                 elif source == DataSource.LOCAL_PDF.value:
-                    try:
-                        # Accessing papers already loaded in the aggregator if available
-                        results[source] = len(st.session_state.get('uploaded_files', []))
-                    except Exception as e:
-                        print(f"Local PDFs error for {source}: {e}")
-                        results[source] = 0
+                    results[source] = 0
 
                 else:
                     print(f"Unknown source: {source}")
@@ -1190,7 +1281,7 @@ class DataAggregator:
             try:
                 # PubMed: Use esearch with retmax=0
                 if source == DataSource.PUBMED.value:
-                    Entrez.email = Config.ENTREZ_EMAIL
+                    Entrez.email = contact_email()
                     handle = Entrez.esearch(db="pubmed", term=query, retmax=0)
                     record = Entrez.read(handle)
                     results[source] = int(record.get('Count', 0))
@@ -1227,7 +1318,7 @@ class DataAggregator:
                     results[source] = int(resp.get('messages', [{}])[0].get('count', 0))
 
             except Exception as e:
-                st.warning(f"Could not fetch count for {source}: {e}")
+                print(f"Could not fetch count for {source}: {e}")
                 results[source] = 0
                 
         return results
@@ -1246,7 +1337,7 @@ class DataAggregator:
         # PubMed Count
         if "PubMed" in selected_sources:
             try:
-                Entrez.email = Config.ENTREZ_EMAIL
+                Entrez.email = contact_email()
                 
                 # Use modern Entrez API (esearch instead of deprecated egquery)
                 handle = Entrez.esearch(db="pubmed", term=query, retmax=0)
@@ -1256,7 +1347,7 @@ class DataAggregator:
                 count = int(record["Count"]) if record.get("Count", "0").isdigit() else 0
                 results["PubMed"] = count
             except Exception as e:
-                st.error(f"❌ PubMed count error: {e}")
+                print(f"❌ PubMed count error: {e}")
                 results["PubMed"] = 0
         
         # arXiv Count
@@ -1269,17 +1360,17 @@ class DataAggregator:
                 
                 # Validate response before parsing
                 if resp.status_code != 200:
-                    st.warning(f"⚠️ arXiv count unavailable (status {resp.status_code})")
+                    print(f"⚠️ arXiv count unavailable (status {resp.status_code})")
                     results["arXiv"] = 0
                 elif not resp.content.strip().startswith(b'<'):
-                    st.warning("⚠️ arXiv returned non-XML response")
+                    print("⚠️ arXiv returned non-XML response")
                     results["arXiv"] = 0
                 else:
                     root = ET.fromstring(resp.content)
                     total_results = root.find('{http://a9.com/-/spec/opensearch/1.1/}totalResults').text
                     results["arXiv"] = int(total_results) if total_results and total_results.isdigit() else 0
             except Exception as e:
-                st.error(f"❌ arXiv count error: {e}")
+                print(f"❌ arXiv count error: {e}")
                 results["arXiv"] = 0
 
         # Semantic Scholar Count
@@ -1290,7 +1381,7 @@ class DataAggregator:
                 resp = throttled_request(url, params=params).json()
                 results["Semantic Scholar"] = int(resp.get('total', 0))
             except Exception as e:
-                st.error(f"❌ Semantic Scholar count error: {e}")
+                print(f"❌ Semantic Scholar count error: {e}")
                 results["Semantic Scholar"] = 0
         
         return results
