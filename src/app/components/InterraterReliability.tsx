@@ -23,6 +23,11 @@ import {
 } from "../lib/projects";
 
 // ---- Statistics --------------------------------------------------------
+//
+// The four functions below are exported so they can be unit-tested directly
+// against worked examples. They produce the interrater-agreement figures that
+// go into a published review, and verifying them through a rendered component
+// would test the formatting rather than the arithmetic.
 
 const CATEGORIES: DecisionValue[] = ["include", "exclude", "maybe"];
 
@@ -31,7 +36,7 @@ function isFullDecision(d: Decision | DecisionSummary): d is Decision {
 }
 
 /** Build the per-paper × per-reviewer decision matrix. Missing cells = null. */
-function buildMatrix(
+export function buildMatrix(
   decisions: (Decision | DecisionSummary)[],
   paperIds: string[],
   reviewerIds: string[],
@@ -50,7 +55,7 @@ function buildMatrix(
 
 /** Cohen's κ between two raters on n papers. Missing cells (either rater
  *  hasn't decided) are dropped. */
-function cohenKappa(
+export function cohenKappa(
   a: (DecisionValue | null)[],
   b: (DecisionValue | null)[],
 ): { k: number; n: number; agree: number } {
@@ -76,7 +81,7 @@ function cohenKappa(
 }
 
 /** Fleiss' κ across N raters. Subjects with < 2 raters who decided are dropped. */
-function fleissKappa(
+export function fleissKappa(
   matrix: Record<string, Record<string, DecisionValue | null>>,
   paperIds: string[],
   reviewerIds: string[],
@@ -126,7 +131,7 @@ function fleissKappa(
 
 /** Krippendorff's α (nominal) across all rater-paper pairs. Robust to
  *  missing data. Returns α and the count of valued units. */
-function krippendorffAlphaNominal(
+export function krippendorffAlphaNominal(
   matrix: Record<string, Record<string, DecisionValue | null>>,
   paperIds: string[],
   reviewerIds: string[],
@@ -183,7 +188,7 @@ function krippendorffAlphaNominal(
   return { alpha, n_pairable: nPairable };
 }
 
-function landisKochLabel(k: number): { label: string; cls: string } {
+export function landisKochLabel(k: number): { label: string; cls: string } {
   if (Number.isNaN(k))   return { label: "n/a",           cls: "bg-slate-50 text-slate-500 border-slate-200" };
   if (k < 0)             return { label: "Poor",          cls: "bg-rose-50 text-rose-700 border-rose-200" };
   if (k < 0.2)           return { label: "Slight",        cls: "bg-rose-50 text-rose-700 border-rose-200" };
