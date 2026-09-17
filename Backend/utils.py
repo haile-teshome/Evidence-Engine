@@ -1,7 +1,6 @@
 import re
 import os
 import json
-import streamlit as st
 from typing import List, Dict, Any, Tuple, Optional, Callable
 from dataclasses import dataclass
 
@@ -184,7 +183,7 @@ class AIService:
             
     #         return json.loads(clean_text)
     #     except Exception as e:
-    #         st.warning(f"⚠️ JSON Parsing Error: AI returned invalid format.")
+    #         log a JSON parsing error here if one is ever needed
     #         return None
             
     @staticmethod
@@ -267,8 +266,8 @@ Extract these elements into a JSON object. RULES:
    that clause is part of the intervention and must survive into the phrase.
    Dropping it turns a specific question into a generic one that thousands of
    irrelevant papers satisfy, which makes screening useless.
-     ✓ "Clinical decision support driven by EHRs holding BOTH medical and dental data"
-     ✗ "Clinical decision support tools"
+     ✓ "Peer tutoring delivered through BOTH classroom and online sessions"
+     ✗ "Peer tutoring programmes"
 
 2. UNSTATED elements — supply a BROAD, INCLUSIVE default that does not conflict
    with the stated topic. Prefer breadth over specificity.
@@ -418,11 +417,11 @@ Extract these elements for a scoping review into a JSON object. RULES:
    thousands of irrelevant papers satisfy, and screening collapses.
    Keep clauses that specify: the required DATA SOURCE, a REQUIRED COMBINATION of
    things ("both X and Y"), the modality, or the setting the concept must operate in.
-     ✓ RIGHT: "AI/ML prediction models or clinical decision support tools using EHRs
-               that contain BOTH medical and dental data"
-     ✗ WRONG: "AI/ML prediction models or clinical decision support tools"
-               (the "both medical and dental EHR data" requirement was dropped, so
-                every clinical-decision-support paper now matches)
+     ✓ RIGHT: "Machine-learning models or statistical scores built on registries
+               that link BOTH employment and education records"
+     ✗ WRONG: "Machine-learning models or statistical scores"
+               (the "both employment and education records" requirement was
+                dropped, so every modelling paper now matches)
      ✓ RIGHT: "Wearable-derived continuous glucose data used for insulin dose adjustment"
      ✗ WRONG: "Wearable devices in diabetes"
    If the user's question contains the words "both", "that use", "utilizing",
@@ -557,8 +556,8 @@ JSON shape:
         ("adults", "patients", "humans"), study-design facets ("RCT",
         "observational"), and pure context facets (setting, country, year) are
         dropped, since requiring them mostly deletes true hits without narrowing
-        scope. Compound facets ("records with BOTH medical AND dental data") are
-        split into separate blocks so the discriminating part (dental) stays
+        scope. Compound facets ("registries linking BOTH employment AND education
+        records") are split into separate blocks so each discriminating part stays
         required instead of being merged into one over-broad OR list.
 
         When ``ground_mesh`` is set, each kept concept's MeSH headings are
@@ -600,9 +599,10 @@ Review elements:
 
 Rules:
 - Identify 2 to 5 ORTHOGONAL concepts (distinct ideas that do not overlap).
-- Split any compound facet into SEPARATE concepts. For example "records containing
-  both medical and dental data" is TWO concepts: an "electronic health records"
-  concept AND a "dental" concept. Never merge two distinct ideas into one list.
+- Split any compound facet into SEPARATE concepts. For example "registries linking
+  both employment and education records" is THREE concepts: a "registry" concept,
+  an "employment" concept AND an "education" concept. Never merge two distinct
+  ideas into one list.
 - Give each SPECIFIC / discriminating idea (a named domain, condition, test, data
   type, or intervention) its own concept. Include a broad population concept
   (e.g. "adults", "patients") only if the review truly restricts to it, and keep it
@@ -617,11 +617,13 @@ Rules:
 Return ONLY a JSON object of exactly this shape:
 {{"concepts": [{{"name": "<short concept label>", "terms": ["...", "..."], "mesh": ["...", "..."]}}, "..."]}}
 
-EXAMPLE for "AI/ML prediction models using electronic health records with both medical and dental data":
+EXAMPLE (an unrelated field, shown only to fix the format) for "machine-learning
+models using administrative registries that link both employment and education records":
 {{"concepts": [
-  {{"name": "Artificial intelligence", "terms": ["artificial intelligence", "AI", "machine learning", "deep learning", "predictive model", "prediction model", "clinical decision support", "decision support system", "neural network"], "mesh": ["Artificial Intelligence", "Machine Learning", "Decision Support Systems, Clinical"]}},
-  {{"name": "Electronic health records", "terms": ["electronic health record", "electronic health records", "EHR", "electronic medical record", "EMR", "electronic dental record", "health record"], "mesh": ["Electronic Health Records"]}},
-  {{"name": "Dental", "terms": ["dental", "dentistry", "oral health", "odontology", "dental record", "periodontal", "oral medicine"], "mesh": ["Dentistry", "Oral Health", "Dental Records"]}}
+  {{"name": "Machine learning", "terms": ["machine learning", "artificial intelligence", "AI", "deep learning", "predictive model", "prediction model", "supervised learning", "neural network"], "mesh": ["Machine Learning", "Artificial Intelligence"]}},
+  {{"name": "Administrative registries", "terms": ["administrative data", "administrative registry", "linked registry", "record linkage", "population register", "administrative records"], "mesh": ["Registries", "Medical Record Linkage"]}},
+  {{"name": "Employment", "terms": ["employment", "labour market", "labor market", "earnings", "occupational status", "wages", "unemployment"], "mesh": ["Employment", "Unemployment"]}},
+  {{"name": "Education", "terms": ["education", "educational attainment", "schooling", "school records", "academic achievement", "qualifications"], "mesh": ["Educational Status", "Schools"]}}
 ]}}
 
 Output ONLY the JSON object. No explanation, no markdown, no code fences."""
@@ -945,7 +947,9 @@ Return ONLY JSON in this shape:
     def _split_concept_blocks(query: str) -> List[str]:
         """Split a query of shape `(A) AND (B) AND (C)` into the top-level
         AND-joined concept blocks (preserving their outer parentheses)."""
-        if not query:
+        # A whitespace-only query used to fall past this guard and produce the
+        # malformed block "()", which is an empty group in any database's syntax.
+        if not query or not query.strip():
             return []
         parts = re.split(r"\)\s*AND\s*\(", query.strip())
         # Re-add the outer parens that were eaten by the split.
@@ -2290,7 +2294,14 @@ OUTPUT FORMAT:
             # Robust JSON extraction (Old logic that worked)
             raw_content = response.content
             json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-            
+
+            # A response with no JSON object at all raises nothing, so without
+            # this the function fell off the end of the try and returned None,
+            # and every caller then crashed on result.get(...). Route it into
+            # the keyword fallback below like any other unusable response.
+            if not json_match:
+                raise ValueError("model returned no JSON object")
+
             if json_match:
                 data = json.loads(json_match.group())
                 result = {
@@ -2328,10 +2339,9 @@ OUTPUT FORMAT:
             
             # Add criteria evaluations with ERROR values for fallback
             try:
-                import streamlit as st
-                inclusion_criteria = st.session_state.get('inclusion_list', [])
-                exclusion_criteria = st.session_state.get('exclusion_list', [])
-                
+                inclusion_criteria = list(inclusion or [])
+                exclusion_criteria = list(exclusion or [])
+
                 # Check if paper has basic content
                 paper_text = f"{paper.title} {paper.abstract}".lower()
                 if not paper_text or paper_text == 'n/a':
@@ -2351,7 +2361,8 @@ OUTPUT FORMAT:
             return result
             
     @staticmethod
-    def screen_full_text(paper: Dict[str, Any], pico: PICOCriteria, model_name: str) -> Dict[str, Any]:
+    def screen_full_text(paper: Dict[str, Any], pico: PICOCriteria, model_name: str,
+                         inclusion: List[str] = None, exclusion: List[str] = None) -> Dict[str, Any]:
         """Performs deeper eligibility screening on full-text or detailed abstracts using all paper information."""
         model = AIService.get_model(model_name)
         
@@ -2382,14 +2393,8 @@ OUTPUT FORMAT:
             else:
                 return {"decision": "Exclude", "reason": f"Only {matches} PICO terms found in full text", "citation": "N/A"}
 
-        # Get current criteria from session state
-        try:
-            import streamlit as st
-            inclusion_criteria = st.session_state.get('inclusion_list', [])
-            exclusion_criteria = st.session_state.get('exclusion_list', [])
-        except:
-            inclusion_criteria = []
-            exclusion_criteria = []
+        inclusion_criteria = list(inclusion or [])
+        exclusion_criteria = list(exclusion or [])
 
         inc_text = "\n".join(f"        - {c}" for c in inclusion_criteria) if inclusion_criteria else "        (none specified)"
         excl_text = "\n".join(f"        - {c}" for c in exclusion_criteria) if exclusion_criteria else "        (none specified)"
@@ -3494,7 +3499,9 @@ JSON OBJECT:"""
                 print(f"Agent {self.name}: No JSON object found in response for paper {paper.id}")
         except Exception as e:
             print(f"Agent {self.name} parse error for paper {paper.id}: {e}")
-            print(f"Raw content: {content[:500]}")
+            # str() first: a None response made the ERROR HANDLER itself raise,
+            # so the permissive fallback below never ran and the whole batch died.
+            print(f"Raw content: {str(content)[:500]}")
         
         # Fallback: return permissive vote
         return AgentVote(
@@ -3605,7 +3612,9 @@ JSON ARRAY:"""
                 print(f"Agent {self.name}: No JSON array found in response")
         except Exception as e:
             print(f"Agent {self.name} parse error: {e}")
-            print(f"Raw content: {content[:500]}")
+            # str() first: a None response made the ERROR HANDLER itself raise,
+            # so the permissive fallback below never ran and the whole batch died.
+            print(f"Raw content: {str(content)[:500]}")
         
         # Fallback: return permissive votes instead of errors
         print(f"Agent {self.name}: Using fallback permissive votes")
@@ -3870,11 +3879,20 @@ class ScreeningOrchestrator:
                     "evidence": vote.evidence,
                     "reasoning": vote.reasoning
                 }
-                if not vote.met:
+                # `met` has OPPOSITE polarity for an exclusion agent: met=True
+                # means the exclusion criterion MATCHED, i.e. the paper is
+                # disqualified. Treating that as "passed" let this override
+                # resurrect a paper that violated an explicit exclusion and
+                # label it "All criteria passed".
+                if vote.agent_type == "EXCLUSION":
+                    if vote.met:
+                        all_agents_passed = False
+                elif not vote.met:
                     all_agents_passed = False
-            
-            # If all agents passed, definitely include
-            if all_agents_passed and len(paper_votes) > 0:
+
+            # If all agents passed, definitely include. Never override a
+            # decision that was already made to exclude.
+            if all_agents_passed and len(paper_votes) > 0 and not should_exclude:
                 decision = "INCLUDE"
                 decision_reason = "All criteria passed"
             
@@ -4044,7 +4062,9 @@ JSON OBJECT:"""
                 print(f"Agent {self.name}: No JSON object found in response")
         except Exception as e:
             print(f"Agent {self.name} parse error: {e}")
-            print(f"Raw content: {content[:500]}")
+            # str() first: a None response made the ERROR HANDLER itself raise,
+            # so the permissive fallback below never ran and the whole batch died.
+            print(f"Raw content: {str(content)[:500]}")
         
         return self._fallback_vote(paper)
     

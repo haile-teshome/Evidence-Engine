@@ -43,4 +43,9 @@ HEADER_TO_CRED = {
     "x-db-springer-key": "springer",
     "x-db-ieee-key": "ieee",
     "x-db-wos-key": "wos",
+    # Not a key: the user's OWN contact address. Several scholarly APIs require
+    # a real, working email as their politeness policy — Unpaywall hard-rejects
+    # calls without one (HTTP 422). Supplied per user from the browser like any
+    # other credential, so no address is ever baked into the codebase.
+    "x-user-contact-email": "contact_email",
 }

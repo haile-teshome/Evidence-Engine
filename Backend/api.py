@@ -23,9 +23,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # IMPORTANT: install the headless shim BEFORE importing utils / data_services
-from streamlit_shim import install as _install_shim, session_state as _ss
 
-_install_shim()
 
 import hashlib
 import base64
@@ -52,8 +50,11 @@ from leads_screening import (
 )
 import instruments as _inst
 
+import time
 import requests
 from bs4 import BeautifulSoup
+from html import unescape as html_unescape
+from urllib.parse import quote, urljoin
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +497,7 @@ def search_build(req: SearchBuildRequest):
         print(f"[search_build] {e}")
         raise HTTPException(status_code=500, detail=str(e))
     # generate_mesh_query returns the kept concept blocks as a list of
-    # {name, tiab, mesh} (variable-N: real concept names like "Dental").
+    # {name, tiab, mesh} (variable-N: whatever concept names the review yields).
     blocks: List[ConceptBlock] = []
     concept_list = concepts if isinstance(concepts, list) else []
     for c in concept_list:
@@ -1364,8 +1365,17 @@ class SimulateYieldRequest(BaseModel):
 
 @app.post("/api/simulation/yield")
 def simulation_yield(req: SimulateYieldRequest):
-    counts = DataAggregator.simulate_yield(req.query, req.sources)
-    return {"counts": counts}
+    # simulate_yield guards each source individually, but a failure in the
+    # surrounding code (a bad query, an import error) used to surface as a 500
+    # traceback in the browser. Report zeros and say so instead: the Planning
+    # tab can render "0 for every source", it cannot render a stack trace.
+    try:
+        counts = DataAggregator.simulate_yield(req.query, req.sources)
+        return {"counts": counts}
+    except Exception as e:
+        print(f"[simulation_yield] {e}")
+        return {"counts": {s: 0 for s in (req.sources or [])},
+                "error": "Could not estimate yield for this query."}
 
 
 # ── Per-database syntax adaptation ──────────────────────────────────────────────
@@ -1487,19 +1497,76 @@ _PICO_ASSESS_VOTES = {"PASS", "PARTIAL", "FAIL", "NA"}
 # Decomposition depends only on the element text, not on the paper, so it is
 # computed once per review rather than once per record. A duplicate call under
 # threading is harmless, so no lock.
-_ELEMENT_PARTS_CACHE: Dict[tuple, List[str]] = {}
+_ELEMENT_PARTS_CACHE: Dict[tuple, List[Dict[str, Any]]] = {}
+
+# Connectives a decomposed part may keep from the sentence it was cut out of.
+# Left in place they turn "Does this study involve X?" into a malformed question.
+_LEADING_CONNECTIVE = re.compile(
+    r"^(?:that\s+(?:contain|contains|include|includes|use|uses|hold|holds)?|"
+    r"which\s+\w+|using|containing|include|including|involving|based\s+on|"
+    r"with|for|to|in|on|of|and|or)\s+",
+    re.I,
+)
 
 
-def _decompose_element(text: str, model_name: str) -> List[str]:
+def _merge_or_alternatives(parts: List[Dict[str, Any]], text: str) -> List[Dict[str, Any]]:
+    """Rejoin parts the model split across an "or", against instruction.
+
+    "A or B" means either satisfies the element, so splitting it into two required
+    parts silently demands both and drops every paper that has only one. The
+    prompt forbids the split and the model still does it, so enforce it here:
+    locate each part in the source text and merge any adjacent pair separated by
+    exactly the word "or".
+    """
+    import difflib
+    words = re.findall(r"[a-z0-9]+", text.lower())
+
+    def span(p: str) -> Optional[tuple]:
+        pw = re.findall(r"[a-z0-9]+", p.lower())
+        if not pw or len(pw) > len(words):
+            return None
+        best, at = 0.0, None
+        for i in range(len(words) - len(pw) + 1):
+            r = difflib.SequenceMatcher(None, pw, words[i:i + len(pw)]).ratio()
+            if r > best:
+                best, at = r, i
+        return (at, at + len(pw)) if best >= 0.7 and at is not None else None
+
+    out: List[Dict[str, Any]] = []
+    for p in parts:
+        s = span(str(p.get("part") or ""))
+        prev = out[-1] if out else None
+        if prev and s and prev.get("_span") and words[prev["_span"][1]:s[0]] == ["or"]:
+            prev["part"] = f'{prev["part"]} or {p["part"]}'[:120]
+            prev["appears_as"] = (prev.get("appears_as") or [])[:4] + (p.get("appears_as") or [])[:4]
+            # A near miss for one alternative may be satisfied by the other, so
+            # the merged part cannot inherit either half's disqualifiers.
+            prev["not_satisfied_by"] = []
+            prev["_span"] = (prev["_span"][0], s[1])
+            continue
+        q = dict(p)
+        q["_span"] = s
+        out.append(q)
+    for q in out:
+        q.pop("_span", None)
+    return out
+
+
+def _decompose_element(text: str, model_name: str) -> List[Dict[str, Any]]:
     """Split an eligibility element into the separate things a paper must have.
 
-    "AI/ML prediction models or clinical decision support tools using electronic
-    health records that contain BOTH medical and dental data" becomes roughly
-    ["AI/ML prediction model or clinical decision support tool",
-     "electronic health records", "medical data", "dental data"].
+    Returns [{"part": <short noun phrase>, "appears_as": [<wording>, ...]}, ...].
+
+    ``appears_as`` is how that part could plausibly surface in an abstract, and
+    it is generated FOR THE REVIEW BEING RUN rather than hardcoded, because an
+    abstract almost never echoes an element's wording back and the vocabulary
+    that bridges the gap is different in every field. Nothing domain-specific
+    belongs in this prompt: the worked example is deliberately drawn from an
+    unrelated field so the model learns the shape and not the content.
 
     Alternatives ("A or B") stay inside ONE part: either satisfies the element.
-    Returns [text] when it cannot decompose, which disables per-part checking.
+    Returns a single entry when it cannot decompose, which disables per-part
+    checking and leaves the one-shot vote in place.
     """
     from langchain_core.messages import HumanMessage
     key = (text.strip(), model_name)
@@ -1507,53 +1574,116 @@ def _decompose_element(text: str, model_name: str) -> List[str]:
         return _ELEMENT_PARTS_CACHE[key]
 
     model = AIService.get_model(model_name)
-    parts: List[str] = []
+    parts: List[Dict[str, Any]] = []
     if model:
         prompt = f"""Break this eligibility requirement into the separate things a paper
-must ALL have to satisfy it.
+must ALL have to satisfy it, and say how each one could appear in an abstract.
 
-Rules:
+Splitting rules:
   • Split on "and", "using", "containing", "that contain" — these join things that
     must ALL be true.
   • NEVER split on "or". Alternatives stay inside ONE entry, because either one
     satisfies the requirement. Splitting them would force a paper to have both.
   • A phrase like "both X and Y" describes ONE combined requirement — keep it as a
     single entry rather than two, so the combination is checked as a combination.
-  • 2 to 4 entries, each a short noun phrase under 10 words.
+  • 2 to 4 entries, each under 10 words.
+  • Each entry must be a STANDALONE NOUN PHRASE that reads correctly in the
+    sentence "Does this study involve ___ ?". Drop the connective you split on:
+    write "electronic health records", never "using electronic health records";
+    write "records holding both A and B", never "that contain both A and B".
+    A fragment starting with using / that / with / to / for is malformed.
 
-WORKED EXAMPLE
-REQUIREMENT: "AI/ML prediction models or clinical decision support tools using
-electronic health records that contain both medical and dental data"
-CORRECT: ["AI/ML prediction model or clinical decision support tool",
-          "electronic health records",
-          "both medical and dental data in the same records"]
-WRONG:   ["AI/ML prediction models", "clinical decision support tools", ...]
-  — that splits an "or" into two required things, so a paper would have to have
-    BOTH a prediction model AND a decision-support tool. The requirement says
-    either one is enough.
+For each entry give TWO lists:
+  "appears_as": 3 to 8 ways THAT ENTRY could be worded in a real abstract —
+    synonyms, abbreviations and expansions, and specific instances.
+    Stay strictly inside the entry. Do NOT list anything that merely sits in the
+    same broad field, because that would make every paper in the field match.
+    For a combined "both X and Y" entry, every wording must show BOTH halves
+    together; a wording showing only X is not a way this entry appears.
+  "not_satisfied_by": 2 to 5 NEAR MISSES — things close enough to be confused with
+    the entry that nonetheless do NOT satisfy it. For a combination, name each
+    half on its own. These are the cases that must be answered no.
+    If the entry itself contains "or", NEVER list a near miss that has one of the
+    alternatives but not the other: either alternative alone satisfies the entry,
+    so "A without B" is a match, not a miss.
+
+WORKED EXAMPLE (an unrelated field, shown only to fix the format)
+REQUIREMENT: "satellite or drone imagery combined with both soil and weather
+measurements to estimate crop yield"
+CORRECT:
+[{{"part": "satellite or drone imagery",
+   "appears_as": ["remote sensing imagery", "Sentinel-2 scenes", "UAV aerial photographs",
+                  "multispectral overflight data"],
+   "not_satisfied_by": ["ground photographs only", "hand-drawn field maps"]}},
+ {{"part": "both soil and weather measurements",
+   "appears_as": ["soil moisture together with rainfall records",
+                  "agronomic soil samples paired with local climate data",
+                  "combined edaphic and meteorological variables"],
+   "not_satisfied_by": ["soil samples with no weather data",
+                        "rainfall records with no soil data",
+                        "a generic mention of environmental conditions"]}},
+ {{"part": "crop yield estimation",
+   "appears_as": ["predicted harvest tonnage", "yield forecasting", "productivity per hectare"],
+   "not_satisfied_by": ["mapping land cover without any yield outcome"]}}]
+WRONG: splitting "satellite or drone imagery" into two entries — the requirement
+says either one is enough, so splitting it would demand both. Equally wrong:
+writing the second entry as "with both soil and weather measurements", which is a
+fragment and not a standalone noun phrase.
 
 REQUIREMENT: {text}
 
-Return ONLY a JSON array of strings."""
+Return ONLY a JSON array of objects with keys "part", "appears_as" and
+"not_satisfied_by"."""
         try:
             r = model.invoke([HumanMessage(content=prompt)])
             data = AIService._extract_json(r.content)
+            def _strings(v: Any, n: int) -> List[str]:
+                if not isinstance(v, list):
+                    return []
+                return [s for s in (str(x).strip()[:80] for x in v[:n]) if s]
+
             if isinstance(data, list):
                 for item in data[:5]:
-                    p = str(item).strip().strip('"').strip("'")[:80]
+                    if isinstance(item, dict):
+                        p = str(item.get("part") or "").strip().strip('"').strip("'")[:80]
+                        syns = _strings(item.get("appears_as"), 8)
+                        anti = _strings(item.get("not_satisfied_by"), 5)
+                    else:
+                        # Tolerate a bare array of strings from a model that
+                        # ignored the object shape.
+                        p, syns, anti = str(item).strip().strip('"').strip("'")[:80], [], []
+                    # A part is interpolated into "Does this study involve ___?",
+                    # so a leading connective the model failed to drop would make
+                    # that question ungrammatical and reliably answered "yes".
+                    p = _LEADING_CONNECTIVE.sub("", p).strip()
+                    # For an "A or B" part either alternative is enough, so a near
+                    # miss phrased as "A without B" is really a match. The prompt
+                    # says so and the model still writes them, so drop them.
+                    if re.search(r"\bor\b", p, re.I):
+                        anti = [s for s in anti if not re.search(r"\bwithout\b", s, re.I)]
                     if p:
-                        parts.append(p)
+                        parts.append({"part": p, "appears_as": syns,
+                                      "not_satisfied_by": anti})
         except Exception as e:
             print(f"[decompose_element] failed: {e}")
 
     if not parts:
-        parts = [text.strip()]
+        parts = [{"part": text.strip(), "appears_as": [], "not_satisfied_by": []}]
+    else:
+        parts = _merge_or_alternatives(parts, text)
     _ELEMENT_PARTS_CACHE[key] = parts
     return parts
 
 
-def _part_present(part: str, title: str, abstract: str, model_name: str) -> str:
+def _part_present(part: Dict[str, Any], title: str, abstract: str, model_name: str) -> str:
     """Ask ONE focused question: is this single requirement present in the paper?
+
+    ``part`` is one entry from :func:`_decompose_element`, carrying the required
+    thing plus the wordings that review generated for it. The synonyms are
+    interpolated per review rather than written into this prompt: a fixed
+    glossary here would inject one review's subject matter into every other
+    review, and would hand the model the answer for the review it was written
+    for.
 
     Returns "yes" | "no" | "unclear". Defaults to "unclear" on any failure, so a
     broken call can never exclude a paper.
@@ -1563,24 +1693,45 @@ def _part_present(part: str, title: str, abstract: str, model_name: str) -> str:
     if not model:
         return "unclear"
 
+    req = str(part.get("part") or "").strip()
+    syns = [s for s in (part.get("appears_as") or []) if str(s).strip()]
+    anti = [s for s in (part.get("not_satisfied_by") or []) if str(s).strip()]
+
+    syn_block = (
+        "\nCOUNTS AS YES, however the abstract words it: "
+        + "; ".join(str(s) for s in syns[:8]) + "."
+        if syns else
+        "\nCount genuine synonyms and specific instances as yes: an abstract rarely"
+        "\nechoes the requirement's own wording."
+    )
+    # The mirror of the synonym list. Without it the prompt says what a yes looks
+    # like and nothing about what a no looks like, and that asymmetry alone drives
+    # the answer toward yes on any paper in the neighbouring subject area.
+    anti_block = (
+        "\nCOUNTS AS NO, even though it is close: "
+        + "; ".join(str(s) for s in anti[:5]) + "."
+        if anti else ""
+    )
+
     body = (abstract or "").strip()[:6000] or "(no abstract — judge from the title alone)"
     prompt = f"""TITLE: {title}
 
 ABSTRACT: {body}
 
-QUESTION: Does this study involve {part}?
+Judge ONLY the data this study actually analysed, or the intervention it actually
+applied. Background, motivation, related work and future plans do NOT count.
 
-Count synonyms, related terminology and specific instances as YES. For example:
-a random forest, regression, neural network or any trained "predictive model" IS a
-machine-learning model; periodontal, periodontitis, caries, oral-health or clinical
-attachment measures ARE dental data; comorbidity, multimorbidity, polypharmacy,
-medications or a named systemic disease ARE medical data; EHR, EMR, chart review,
-registry, claims or "de-identified records" ARE health records.
+QUESTION: Did this study use {req}?
+{syn_block}{anti_block}
+
+Being in the same broad field as the requirement is NOT enough on its own, and if
+the requirement names a COMBINATION, having only one side of it is a no.
 
 Answer with EXACTLY ONE WORD:
   yes      — present, or a specific instance of it is present
-  no       — this study is about something else and it is genuinely absent
-  unclear  — the abstract does not say either way"""
+  no       — the study used something else, or only part of what is required,
+             so the requirement is genuinely not met
+  unclear  — the abstract truly does not say either way"""
     try:
         r = model.invoke([HumanMessage(content=prompt)])
         txt = str(getattr(r, "content", "") or "").lower()
@@ -1680,23 +1831,18 @@ Work through this test IN ORDER for each element and stop at the first step that
 matches. Do NOT skip to a verdict.
 
   STEP 1 — Does the paper's subject matter contain what the element asks for?
-    Decide this by MEANING, never by wording. The same thing routinely appears
-    under a different name, and an abstract almost never quotes the element back:
-      dental data   = "periodontal", "oral health", "caries", "dentition", "dental"
-      medical data  = "multimorbidity", "comorbidity", "polypharmacy", "diagnoses",
-                      "medications", a named disease
-      health records= "electronic health record", "EHR/EMR", "chart review",
-                      "administrative claims", "de-identified records", "registry"
-    A study relating multimorbidity to periodontal outcomes in electronic records
-    therefore HAS both a medical and a dental half, even though it never writes
-    the phrase "medical and dental data".
+    Decide this by MEANING, never by wording. An abstract almost never quotes an
+    element back: the same thing routinely appears under a different name, as a
+    named instance of a general category, or as a field-specific abbreviation.
+    Read for the underlying thing, not the label. Equally, a paper that shares
+    the element's vocabulary while studying something else does not contain it.
 
   STEP 2 — If the answer to step 1 is NO, and the paper is plainly ABOUT A
     DIFFERENT SUBJECT so the missing part could not show up in the full text
     either  ->  FAIL.
-      Example: element asks for records holding BOTH medical and dental data; the
-      paper is chronic-kidney-disease decision support with no oral or dental
-      content anywhere. The full text will not make dental data appear. FAIL.
+    This is also the verdict when the element requires a COMBINATION and the
+    paper has only one side of it, with nothing in its subject matter that the
+    full text could supply for the other side.
 
   STEP 3 — If the answer to step 1 is YES and the abstract states it explicitly
     and completely  ->  PASS.
@@ -1750,8 +1896,8 @@ PAPER ABSTRACT:
 {abstract_block}
 
 Also return "bucket": a 3-5 word label naming the single most decisive factor
-(e.g. "No dental data", "Wrong study design", "All elements met"). It is shown to
-the reviewer as the at-a-glance reason, so make it specific to this paper.
+(e.g. "Wrong study design", "Population out of scope", "All elements met"). It is
+shown to the reviewer as the at-a-glance reason, so make it specific to this paper.
 
 Return ONLY a JSON object with EXACTLY this shape:
 {{
@@ -1855,8 +2001,8 @@ NEVER fabricate a quote that does not appear in the abstract.
         #     (Abstract genuinely doesn't address this element.)
         #   • If the model said PASS or PARTIAL but we couldn't anchor a quote at
         #     all → downgrade to NA (we promised the user that every positive chip
-        #     has a quote). FAIL is EXEMPT: "the abstract never mentions dental
-        #     data" is unquotable by construction, and downgrading it to NA was
+        #     has a quote). FAIL is EXEMPT: "the abstract never mentions the
+        #     required thing" is unquotable by construction, and downgrading was
         #     silently discarding exactly the votes that should exclude a paper.
         if vote == "NA" and evidence:
             vote = "PARTIAL"
@@ -1885,7 +2031,8 @@ NEVER fabricate a quote that does not appear in the abstract.
         parts = _decompose_element(elem_vals[eid], model_name)
         if len(parts) < 2:
             continue  # nothing to decompose; leave the one-shot vote alone
-        components = [{"part": p, "present": _part_present(p, title, abstract, model_name)}
+        components = [{"part": p.get("part", ""),
+                       "present": _part_present(p, title, abstract, model_name)}
                       for p in parts]
         if any(c["present"] == "no" for c in components):
             derived = "FAIL"
@@ -1893,12 +2040,21 @@ NEVER fabricate a quote that does not appear in the abstract.
             derived = "PASS"
         else:
             derived = "PARTIAL"
-        missing = [c["part"] for c in components if c["present"] == "no"]
         assessed[eid]["vote"] = derived
         assessed[eid]["components"] = components
+        # The vote now comes from the per-part checks, so the reasoning has to as
+        # well. Leaving the one-shot sentence in place next to a derived vote
+        # produced panels that argued against their own verdict.
+        missing = [c["part"] for c in components if c["present"] == "no"]
+        unknown = [c["part"] for c in components if c["present"] == "unclear"]
         if missing:
-            assessed[eid]["reasoning"] = ("Required part not present: "
-                                          + "; ".join(missing[:3]))[:300]
+            note = "Required part not present: " + "; ".join(missing[:3])
+        elif unknown:
+            note = "Abstract does not establish: " + "; ".join(unknown[:3])
+        else:
+            note = "All required parts present: " + "; ".join(
+                c["part"] for c in components[:3])
+        assessed[eid]["reasoning"] = note[:300]
 
     # Never leave the reason blank — fall back to a record-specific, best-effort
     # sentence grounded in the title (the PICO chips may still be NA when no
@@ -2099,8 +2255,6 @@ def screen_abstract(req: ScreenAbstractRequest):
     paper = _to_backend_paper(req.paper)
     pico = _to_pico(req.pico)
     # Make criteria available to legacy functions that read session_state
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
     leads = is_leads_model(model_name)
     raw = (_screen_one(paper, pico, model_name, req.inclusion, req.exclusion, req.protocol or "")
@@ -2125,8 +2279,6 @@ class ScreenAbstractBatchRequest(BaseModel):
 
 @app.post("/api/screen/abstract-batch")
 def screen_abstract_batch(req: ScreenAbstractBatchRequest):
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
     model_name = resolve_model_name(req.model) or resolve_model_name(_default_model())
 
@@ -2305,8 +2457,6 @@ def papers_rerank(req: RerankRequest):
     with per-paper LEADS scores. Use LEADS unconditionally (this is its
     trained task) regardless of which model the user selected for thinking
     tasks elsewhere."""
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
     # Route to LEADS specifically: this is exactly the per-PICO relevance task
     # the model was fine-tuned for. Override whatever the caller asked for.
@@ -2392,8 +2542,6 @@ def papers_rerank_stream(req: RerankRequest):
     """Same scoring as /papers/rerank, but streamed: emit a `progress` event as
     each paper finishes so the caller can show which article is being scored,
     then a final `done` event carrying the full ranked payload."""
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
     model_name = resolve_model_name(req.model) or LEADS_MODEL_NAME
     _score_one = _rerank_score_one_factory(req, pico, model_name)
@@ -2540,8 +2688,6 @@ Return ONLY the justification prose — no JSON, no headings, no bullet points."
 
 @app.post("/api/screen/fulltext")
 def screen_fulltext(req: ScreenFullTextRequest):
-    _ss["inclusion_list"] = list(req.inclusion or [])
-    _ss["exclusion_list"] = list(req.exclusion or [])
     pico = _to_pico(req.pico)
 
     paper_dict = {
@@ -2551,7 +2697,11 @@ def screen_fulltext(req: ScreenFullTextRequest):
         "URL": req.paper.url,
         "paper_id": req.paper.id,
     }
-    raw = AIService.screen_full_text(paper_dict, pico, resolve_model_name(req.model) or resolve_model_name(_default_model()))
+    raw = AIService.screen_full_text(
+        paper_dict, pico,
+        resolve_model_name(req.model) or resolve_model_name(_default_model()),
+        inclusion=req.inclusion, exclusion=req.exclusion,
+    )
 
     decision_raw = str(raw.get("decision", "Exclude")).strip().lower()
     decision = "Include" if decision_raw.startswith("inc") else "Exclude"
@@ -2816,14 +2966,14 @@ def _openalex_resolve_work(title: str, paper_id: str) -> Optional[Dict[str, Any]
         if paper_id and "/" in paper_id and paper_id.startswith("10."):
             r = requests.get(
                 f"https://api.openalex.org/works/doi:{paper_id}",
-                params={"mailto": Config.ENTREZ_EMAIL}, timeout=10,
+                timeout=10,
             )
             if r.status_code == 200:
                 return r.json()
         # Title search
         r = requests.get(
             "https://api.openalex.org/works",
-            params={"search": title, "per_page": 1, "mailto": Config.ENTREZ_EMAIL}, timeout=10,
+            params={"search": title, "per_page": 1}, timeout=10,
         )
         if r.status_code == 200:
             results = r.json().get("results", [])
@@ -2936,7 +3086,7 @@ def _openalex_links(work: Dict[str, Any], direction: str, max_per: int) -> List[
             if ref_ids:
                 rr = requests.get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"openalex_id:{'|'.join(ref_ids)}", "per_page": max_per, "mailto": Config.ENTREZ_EMAIL},
+                    params={"filter": f"openalex_id:{'|'.join(ref_ids)}", "per_page": max_per},
                     timeout=12,
                 )
                 if rr.status_code == 200:
@@ -2949,7 +3099,7 @@ def _openalex_links(work: Dict[str, Any], direction: str, max_per: int) -> List[
             if wid:
                 rr = requests.get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"cites:{wid}", "per_page": max_per, "mailto": Config.ENTREZ_EMAIL},
+                    params={"filter": f"cites:{wid}", "per_page": max_per},
                     timeout=12,
                 )
                 if rr.status_code == 200:
@@ -3063,7 +3213,7 @@ def _crossref_retraction(doi: str) -> Optional[Dict[str, Any]]:
     try:
         r = requests.get(
             f"https://api.crossref.org/works/{doi}",
-            headers={"User-Agent": "EvidenceEngine/1.0 (mailto:research@evidence-engine.local)"},
+            headers={"User-Agent": "EvidenceEngine/1.0"},
             timeout=15,
         )
         if not r.ok:
@@ -3191,16 +3341,194 @@ def _fetch_pmc_pdf(pmcid: str) -> Optional[bytes]:
     return None
 
 
+_OA_UA = {"User-Agent": "EvidenceEngine/1.0"}
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+# Addresses these APIs reject or that indicate a placeholder rather than a real
+# person. Sending one of these is worse than sending nothing.
+_PLACEHOLDER_EMAIL_DOMAINS = ("example.com", "example.org", "localhost", "test.com")
+
+
+def _contact_email() -> str:
+    """The user's OWN contact address for scholarly APIs that require one.
+
+    Supplied per request from the browser profile. Returns "" when absent or
+    obviously a placeholder, and every caller must degrade to an anonymous
+    request in that case rather than inventing an address.
+    """
+    from request_creds import get_cred
+    email = (get_cred("contact_email") or "").strip()
+    if not email or not _EMAIL_RE.match(email):
+        return ""
+    if email.lower().rsplit("@", 1)[-1] in _PLACEHOLDER_EMAIL_DOMAINS:
+        return ""
+    return email
+
+
+def _polite_params(extra: Optional[dict] = None) -> dict:
+    """Query params for OpenAlex/Crossref, adding `mailto` only if the user gave
+    an address (it buys their requests the faster 'polite pool')."""
+    p = dict(extra or {})
+    email = _contact_email()
+    if email:
+        p["mailto"] = email
+    return p
+
+# OpenAlex asks for <= 3 requests/second from anonymous callers.
+_OPENALEX_MIN_GAP = 0.35
+_openalex_last = 0.0
+
+
+def _openalex_oa_locations(doi: str, title: str = "") -> Tuple[List[str], str]:
+    """Resolve a work to its open-access locations WITHOUT an API key or email.
+
+    Returns ``(candidate_urls, oa_status)`` where oa_status is one of
+    "pdf" (a direct PDF url exists), "landing" (open access but only a landing
+    page), "closed" (not open access) or "unknown" (could not resolve).
+
+    OpenAlex carries the same open-access index Unpaywall does but, unlike
+    Unpaywall, does not require a contact email — Unpaywall rejects any call
+    without a real address (HTTP 422), which silently disabled this whole tier.
+    """
+    global _openalex_last
+    if not doi and not title:
+        return [], "unknown"
+    gap = time.time() - _openalex_last
+    if gap < _OPENALEX_MIN_GAP:
+        time.sleep(_OPENALEX_MIN_GAP - gap)
+    try:
+        if doi:
+            url = f"https://api.openalex.org/works/doi:{quote(doi, safe='')}"
+            r = requests.get(url, timeout=20, headers=_OA_UA, params=_polite_params())
+        else:
+            r = requests.get("https://api.openalex.org/works", timeout=20, headers=_OA_UA,
+                             params=_polite_params({"filter": f"title.search:{title[:200]}",
+                                                    "per_page": 1}))
+        _openalex_last = time.time()
+        if r.status_code != 200:
+            print(f"[openalex_oa] {doi or title[:40]}: HTTP {r.status_code}")
+            return [], "unknown"
+        data = r.json() or {}
+        if "results" in data:
+            results = data.get("results") or []
+            if not results:
+                return [], "unknown"
+            data = results[0]
+    except Exception as e:
+        print(f"[openalex_oa] {doi or title[:40]}: {e}")
+        return [], "unknown"
+
+    oa = data.get("open_access") or {}
+    locs = [l for l in ([data.get("best_oa_location")] + (data.get("locations") or []))
+            if isinstance(l, dict)]
+    pdfs = [l["pdf_url"] for l in locs if l.get("pdf_url")]
+    pages = [l["landing_page_url"] for l in locs
+             if l.get("landing_page_url") and l.get("is_oa")]
+    if oa.get("oa_url"):
+        pages.append(oa["oa_url"])
+
+    # De-duplicate while keeping PDFs ahead of landing pages.
+    seen, ordered = set(), []
+    for u in pdfs + pages:
+        if u and u not in seen:
+            seen.add(u)
+            ordered.append(u)
+    if pdfs:
+        return ordered, "pdf"
+    if not oa.get("is_oa"):
+        return ordered, "closed"
+    return ordered, "landing" if ordered else "closed"
+
+
+_PDF_LINK_RE = re.compile(
+    r'(?:citation_pdf_url"\s*content="([^"]+)")'
+    r'|(?:content="([^"]+)"\s*name="citation_pdf_url")'
+    r'|(?:href="([^"]+\.pdf(?:\?[^"]*)?)")',
+    re.I,
+)
+
+
+def _pdf_from_landing_page(page_url: str) -> Optional[bytes]:
+    """Follow an open-access landing page to the PDF it advertises.
+
+    Publishers routinely expose the file through the ``citation_pdf_url`` meta
+    tag rather than a direct link in the OA index, which is why a record can be
+    open access and still come back with no downloadable PDF.
+    """
+    if not page_url or not page_url.startswith("http"):
+        return None
+    try:
+        r = requests.get(page_url, timeout=25, allow_redirects=True, headers=_OA_UA)
+        if r.status_code != 200:
+            return None
+        # The landing page may itself already be the PDF.
+        if r.content[:5] == b"%PDF-":
+            return r.content
+        html = r.text[:400_000]
+    except Exception as e:
+        print(f"[landing_page] {page_url[:60]}: {e}")
+        return None
+
+    for m in _PDF_LINK_RE.finditer(html):
+        href = m.group(1) or m.group(2) or m.group(3)
+        if not href:
+            continue
+        target = urljoin(r.url, html_unescape(href))
+        try:
+            rr = requests.get(target, timeout=25, allow_redirects=True, headers=_OA_UA)
+            ct = (rr.headers.get("content-type") or "").lower()
+            if rr.status_code == 200 and ("pdf" in ct or rr.content[:5] == b"%PDF-"):
+                return rr.content
+        except Exception:
+            continue
+    return None
+
+
+def _fetch_oa_pdf(doi: str, title: str = "") -> Tuple[Optional[bytes], str, str]:
+    """Open-access PDF for a DOI. Returns (pdf_bytes, source_url, oa_status).
+
+    OpenAlex first because it needs no credentials at all. Unpaywall is then
+    tried as a SECOND, independent index, but only when the user has put their
+    own contact address in their profile — without one Unpaywall returns 422,
+    which is exactly how this tier came to be silently dead.
+    """
+    urls, status = _openalex_oa_locations(doi, title)
+
+    if doi and _contact_email():
+        found = _fetch_unpaywall_pdf(doi)
+        if found:
+            pdf, src = found
+            return pdf, src, "pdf"
+
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=30, allow_redirects=True, headers=_OA_UA)
+            ct = (r.headers.get("content-type") or "").lower()
+            if r.status_code == 200 and ("pdf" in ct or r.content[:5] == b"%PDF-"):
+                return r.content, u, status
+        except Exception as e:
+            print(f"[oa_pdf] {u[:60]}: {e}")
+        # Not a PDF: it is probably the landing page, so follow it.
+        pdf = _pdf_from_landing_page(u)
+        if pdf:
+            return pdf, u, status
+    return None, "", status
+
+
 def _fetch_unpaywall_pdf(doi: str) -> Optional[Tuple[bytes, str]]:
     """Resolve a DOI to an open-access PDF via the Unpaywall API and download
     the bytes. Returns (pdf_bytes, source_url) on success."""
-    if not doi:
+    email = _contact_email()
+    if not doi or not email:
         return None
     try:
-        email = getattr(Config, "ENTREZ_EMAIL", None) or "research@example.com"
-        api = f"https://api.unpaywall.org/v2/{doi}?email={email}"
-        r = requests.get(api, timeout=15, headers={"User-Agent": "EvidenceEngine/1.0"})
+        api = f"https://api.unpaywall.org/v2/{quote(doi, safe='')}"
+        r = requests.get(api, timeout=15, params={"email": email},
+                         headers={"User-Agent": "EvidenceEngine/1.0"})
         if r.status_code != 200:
+            # 422 means the address was rejected. Say so, rather than letting a
+            # config problem look exactly like a paywalled paper.
+            print(f"[unpaywall {doi}] HTTP {r.status_code}: {r.text[:120]}")
             return None
         data = r.json() or {}
         if not data.get("is_oa"):
@@ -3376,18 +3704,18 @@ def fulltext_fetch(req: FullTextRequest):
                 print(f"[fulltext_fetch] {debug_label} tier2 PMC PDF ({pmcid}) -> {len(text)} chars")
                 return _found(text, f"PMC PDF ({pmcid})", req.paper_id, req.URL, pdf)
 
-    # Tier 3 — Unpaywall via DOI. Prefer the caller-supplied DOI, then the
-    # one mined from URL, then the one returned by the EuPMC metadata lookup.
+    # Tier 3 — open-access PDF via the OpenAlex OA index, including a
+    # landing-page follow for records that advertise no direct PDF url.
     doi = (req.doi or "").strip() or _extract_doi(req.URL, req.Title) or (lookup_doi or "")
-    if doi:
-        unpaywall = _fetch_unpaywall_pdf(doi)
-        if unpaywall:
-            pdf, src_url = unpaywall
+    oa_status = "unknown"
+    if doi or req.Title:
+        pdf, src_url, oa_status = _fetch_oa_pdf(doi, req.Title or "")
+        if pdf:
             text = _extract_text_from_pdf(pdf)
             if text:
                 host = src_url.split("/", 3)[2] if "://" in src_url else src_url
-                print(f"[fulltext_fetch] {debug_label} tier3 Unpaywall PDF ({host}) -> {len(text)} chars")
-                return _found(text, f"Unpaywall PDF ({host})", req.paper_id, req.URL, pdf)
+                print(f"[fulltext_fetch] {debug_label} tier3 OA PDF ({host}) -> {len(text)} chars")
+                return _found(text, f"Open access ({host})", req.paper_id, req.URL, pdf)
 
     # Tier 4 — arXiv PDF.
     if (req.Source or "").lower() == "arxiv" or "arxiv.org" in (req.URL or "").lower():
@@ -3404,7 +3732,7 @@ def fulltext_fetch(req: FullTextRequest):
     if req.URL and req.URL.startswith("http") and req.URL.lower().split("?", 1)[0].rstrip("/").endswith(".pdf"):
         host = req.URL.split("/", 3)[2].lower() if "://" in req.URL else ""
         try:
-            ua = f"EvidenceEngine/1.0 (mailto:{Config.ENTREZ_EMAIL})" if getattr(Config, "ENTREZ_EMAIL", "") else "EvidenceEngine/1.0"
+            ua = "EvidenceEngine/1.0"
             r = requests.get(req.URL, timeout=25, allow_redirects=True, headers={"User-Agent": ua})
             ct = (r.headers.get("content-type") or "").lower()
             if r.status_code == 200 and ("pdf" in ct or r.content[:5] == b"%PDF-"):
@@ -3416,9 +3744,42 @@ def fulltext_fetch(req: FullTextRequest):
             print(f"[fulltext_fetch pdf] {e}")
 
     print(f"[fulltext_fetch] {debug_label} -> no full text "
-          f"(pid={pid or '-'}, doi={doi or '-'}, source={req.Source}, url_host="
+          f"(pid={pid or '-'}, doi={doi or '-'}, oa={oa_status}, source={req.Source}, url_host="
           f"{req.URL.split('/', 3)[2] if req.URL and '://' in req.URL else '-'})")
-    return {"status": "missing", "reason": "Full text not retrievable from open-access sources."}
+
+    # A specific reason plus the exact links a human needs, so the reviewer can
+    # finish the job by hand instead of being told only that it did not work.
+    if not doi:
+        code, reason = "no_doi", "No DOI found, so no open-access index could be searched."
+    elif oa_status == "closed":
+        code, reason = "paywalled", "Paywalled. Needs library or interlibrary loan access."
+    elif oa_status in ("pdf", "landing"):
+        code, reason = "oa_blocked", "Listed as open access but the publisher blocked the download."
+    else:
+        code, reason = "unresolved", "Could not resolve this record in the open-access index."
+
+    links: Dict[str, str] = {}
+    if doi:
+        links["doi"] = f"https://doi.org/{doi}"
+        links["scholar"] = ("https://scholar.google.com/scholar?q="
+                            + quote(f'"{doi}"', safe=""))
+    if pid and pid.isdigit():
+        links["pubmed"] = f"https://pubmed.ncbi.nlm.nih.gov/{pid}/"
+    if req.Title:
+        links["search"] = ("https://scholar.google.com/scholar?q="
+                           + quote(req.Title[:250], safe=""))
+    if req.URL:
+        links["record"] = req.URL
+
+    return {
+        "status": "missing",
+        "reason": reason,
+        "reason_code": code,
+        "oa_status": oa_status,
+        "doi": doi or "",
+        "pmid": pid if pid and pid.isdigit() else "",
+        "links": links,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -5511,13 +5872,27 @@ Rules:
 - Do NOT name commercial software or companies other than the AI system named above and the named bibliographic databases.
 - Output only the prose paragraphs — no title, no preamble, no closing remarks."""
 
+    # A model failure here used to escape the ThreadPoolExecutor as a 500 with a
+    # traceback. The reviewer has already done the work this paragraph
+    # describes; the right answer to a dead model is to say so, not to lose the
+    # page. Each half is independent, so one failing does not sink the other.
+    def _run(p: str) -> str:
+        try:
+            return (model.invoke([HumanMessage(content=p)]).content or "").strip()
+        except Exception as e:
+            print(f"[writing_summary] {e}")
+            return ""
+
     with ThreadPoolExecutor(max_workers=2) as ex:
-        fut_main = ex.submit(lambda: model.invoke([HumanMessage(content=main_prompt)]))
-        fut_app = ex.submit(lambda: model.invoke([HumanMessage(content=prompt)]))
-        main_text = (fut_main.result().content or "").strip()
-        appendix = (fut_app.result().content or "").strip()
-    # `summary` kept for back-compat with older clients.
-    return {"main_text": main_text, "appendix": appendix, "summary": appendix}
+        fut_main = ex.submit(_run, main_prompt)
+        fut_app = ex.submit(_run, prompt)
+        main_text = fut_main.result()
+        appendix = fut_app.result()
+
+    out = {"main_text": main_text, "appendix": appendix, "summary": appendix}
+    if not main_text and not appendix:
+        out["error"] = "The model did not return a summary. Check that it is running."
+    return out
 
 
 class CharItem(BaseModel):
@@ -5712,7 +6087,7 @@ def _openalex_retracted(doi: str, title: Optional[str]) -> Optional[dict]:
     try:
         if doi:
             r = requests.get(f"https://api.openalex.org/works/doi:{doi}",
-                             params={"mailto": Config.ENTREZ_EMAIL, "select": "id,is_retracted,doi"}, timeout=8)
+                             params={"select": "id,is_retracted,doi"}, timeout=8)
             if r.status_code == 200:
                 w = r.json()
                 return {"status": "retracted" if w.get("is_retracted") else "ok",
@@ -5720,8 +6095,7 @@ def _openalex_retracted(doi: str, title: Optional[str]) -> Optional[dict]:
                         "doi": doi, "source": "OpenAlex"}
         elif title:
             r = requests.get("https://api.openalex.org/works",
-                             params={"search": title, "per_page": 1, "select": "id,is_retracted,doi,title",
-                                     "mailto": Config.ENTREZ_EMAIL}, timeout=8)
+                             params={"search": title, "per_page": 1, "select": "id,is_retracted,doi,title"}, timeout=8)
             if r.status_code == 200:
                 res = (r.json().get("results") or [])
                 if res:
@@ -5740,7 +6114,7 @@ def _crossref_update(doi: str) -> Optional[dict]:
     if not doi:
         return None
     try:
-        r = requests.get(f"https://api.crossref.org/works/{doi}", params={"mailto": Config.ENTREZ_EMAIL}, timeout=8)
+        r = requests.get(f"https://api.crossref.org/works/{doi}", timeout=8)
         if r.status_code != 200:
             return None
         updates = r.json().get("message", {}).get("update-to") or []
