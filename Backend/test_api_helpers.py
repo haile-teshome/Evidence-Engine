@@ -11,6 +11,9 @@ touches a verdict before the reviewer sees it.
 import pytest
 
 import api
+import time
+import ratelimit
+from requests import exceptions as requests_exceptions
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +247,10 @@ class FakeResponse:
         self.text = content.decode("utf-8", "replace") if content else ""
         self.headers = {}
 
+    @property
+    def ok(self):
+        return 200 <= self.status_code < 400
+
     def json(self):
         if self._payload is None:
             raise ValueError("no json")
@@ -285,8 +292,11 @@ class TestEpmcResolve:
         assert api._epmc_resolve("A title", "31946617") == ("MED", "31946617")
 
     def test_resolves_a_title_when_the_id_is_not_a_pmid(self, monkeypatch):
+        """Patched on `ratelimit`, not `api`: every outgoing scholarly call now
+        goes through the shared rate limiter, which is where the request is
+        actually made."""
         payload = {"resultList": {"result": [{"source": "PMC", "id": "PMC999"}]}}
-        monkeypatch.setattr(api.requests, "get", lambda *a, **k: FakeResponse(payload))
+        monkeypatch.setattr(ratelimit.requests, "get", lambda *a, **k: FakeResponse(payload))
         assert api._epmc_resolve("A title", "") == ("PMC", "PMC999")
 
     def test_a_failure_returns_none(self, monkeypatch):
@@ -316,3 +326,102 @@ class TestEpmcFullTextXml:
     @pytest.mark.parametrize("pid", ["", None])
     def test_no_id_short_circuits(self, pid):
         assert api._fetch_epmc_full_text_xml(pid) is None
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting and the shared lookup cache.
+#
+# Snowballing was latency-bound, not limit-bound: every lookup was issued,
+# awaited in full, and only then followed by the next, achieving about 0.1
+# requests a second against services that permit several. Overlapping the
+# waiting is only safe if the rate stays inside what each service publishes,
+# so that is what these pin.
+# ---------------------------------------------------------------------------
+
+class TestRateLimiter:
+    def test_every_configured_rate_is_inside_the_published_limit(self):
+        """Published: OpenAlex 100/s, Europe PMC 10/s, Semantic Scholar 1/s for
+        a key holder, NCBI 3/s without a key. Ours must not exceed any."""
+        published = {"openalex": 100.0, "europepmc": 10.0, "semanticscholar": 1.0,
+                     "ncbi": 3.0, "crossref": 50.0}
+        for key, cap in published.items():
+            assert ratelimit._LIMITS[key] <= cap, f"{key} exceeds its published limit"
+
+    def test_the_bucket_holds_no_burst(self):
+        """A bucket holding `rate` tokens lets a caller spend them at once and
+        earn `rate` more inside the same second, so the observed rate reaches
+        twice the cap. Measured at 5/s against a 3/s limit before this."""
+        assert ratelimit._Bucket(3.0).capacity == 1.0
+
+    def test_the_bucket_spaces_calls_at_the_configured_rate(self):
+        b = ratelimit._Bucket(5.0)
+        start = time.monotonic()
+        for _ in range(5):
+            b.acquire()
+        # Five tokens at 5/s, with no burst credit, cannot take less than 4 gaps.
+        assert time.monotonic() - start >= 0.75
+
+    def test_a_timeout_is_not_retried(self, monkeypatch):
+        """A 429 means "slower" and waiting fixes it. A timeout means the
+        service is slow, and asking again costs another full timeout for the
+        same nothing: retrying turned a 10s failure into an 18s one."""
+        calls = []
+
+        def boom(*a, **k):
+            calls.append(1)
+            raise requests_exceptions.Timeout("slow")
+        monkeypatch.setattr(ratelimit.requests, "get", boom)
+        assert ratelimit.limited_get("https://www.ebi.ac.uk/x", retries=3) is None
+        assert len(calls) == 1
+
+    def test_a_429_is_retried_with_backoff(self, monkeypatch):
+        calls = []
+
+        def throttled(*a, **k):
+            calls.append(1)
+            return FakeResponse({}, status=429)
+        monkeypatch.setattr(ratelimit.requests, "get", throttled)
+        monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+        r = ratelimit.limited_get("https://api.semanticscholar.org/x", retries=2)
+        assert r.status_code == 429
+        assert len(calls) == 3
+
+
+class TestLookupCache:
+    def test_a_repeat_lookup_costs_no_request(self):
+        calls = []
+        produce = lambda: (calls.append(1), "value")[1]
+        assert ratelimit.cached("ns", "key", produce) == "value"
+        assert ratelimit.cached("ns", "key", produce) == "value"
+        assert len(calls) == 1
+
+    def test_a_failure_is_never_memoised(self):
+        """A lookup that came back empty because the service was throttling
+        would otherwise stay empty for the whole run, turning one refused
+        request into a permanently missing paper."""
+        answers = ["", "found"]
+        got = [ratelimit.cached("ns", "k2", lambda: answers.pop(0)) for _ in range(2)]
+        assert got == ["", "found"]
+
+    def test_namespaces_do_not_collide(self):
+        ratelimit.cached("a", "same", lambda: "from-a")
+        assert ratelimit.cached("b", "same", lambda: "from-b") == "from-b"
+
+
+class TestTransientErrors:
+    def test_a_503_is_retried(self, monkeypatch):
+        """Europe PMC answers 503 in bursts and recovers within seconds, so
+        one refusal should not cost a seed paper its whole reference list."""
+        seq = [FakeResponse({}, status=503), FakeResponse({"ok": 1}, status=200)]
+        monkeypatch.setattr(ratelimit.requests, "get", lambda *a, **k: seq.pop(0))
+        monkeypatch.setattr(ratelimit.time, "sleep", lambda s: None)
+        r = ratelimit.limited_get("https://www.ebi.ac.uk/x", retries=2)
+        assert r.status_code == 200
+
+    def test_a_404_is_not_retried(self, monkeypatch):
+        """Asking again cannot turn a missing record into a present one."""
+        calls = []
+        monkeypatch.setattr(ratelimit.requests, "get",
+                            lambda *a, **k: calls.append(1) or FakeResponse({}, status=404))
+        assert ratelimit.limited_get("https://www.ebi.ac.uk/x", retries=3).status_code == 404
+        assert len(calls) == 1

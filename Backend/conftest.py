@@ -43,6 +43,21 @@ def _no_accidental_network(monkeypatch, request):
     monkeypatch.setattr(socket.socket, "connect", blocked)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_lookup_cache():
+    """Empty the cross-run lookup cache around every test.
+
+    The scholarly lookups are memoised for the life of the process so a
+    snowball run does not ask a service the same question hundreds of times.
+    Left alone in a test session that is a leak: one test's stubbed answer
+    would be served to the next, and the failure would depend on test order.
+    """
+    import ratelimit
+    ratelimit.reset_cache()
+    yield
+    ratelimit.reset_cache()
+
+
 @pytest.fixture
 def temp_store(monkeypatch):
     """A store backed by its own empty database, isolated per test."""
