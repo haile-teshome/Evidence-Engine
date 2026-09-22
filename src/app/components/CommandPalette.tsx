@@ -10,7 +10,7 @@ const NAV: { id: PageId; label: string; icon: any }[] = [
   { id: "projects", label: "Projects", icon: Users },
   { id: "abstract", label: "Abstract Screening", icon: FileSearch },
   { id: "acquisition", label: "Full-Text Acquisition", icon: FileDown },
-  { id: "fulltext", label: "Full-Text Evidence", icon: FlaskConical },
+  { id: "fulltext", label: "Full-Text Screening", icon: FlaskConical },
   { id: "snowball", label: "Citation Snowballing", icon: Network },
   { id: "extraction", label: "Table Extraction", icon: Table2 },
   { id: "textextraction", label: "Text Extraction", icon: ScanText },

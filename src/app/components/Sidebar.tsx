@@ -21,6 +21,7 @@ const TASK_LABEL: Record<string, string> = {
   "ai-optimize": "AI Optimize",
   "quality-assess": "Quality assessment",
   "abstract-screen": "Abstract screening",
+  "retrieval": "Retrieving",
   "fulltext-fetch": "Full-text fetch",
   "full-text-screen": "Full-text screening",
   "snowball": "Citation snowball",
@@ -60,13 +61,13 @@ const NAV: { id: PageId; label: string; icon: any; anim: keyof typeof ANIM }[] =
   { id: "projects", label: "Projects", icon: Users, anim: "pop" },
   { id: "abstract", label: "Abstract Screening", icon: FileSearch, anim: "wiggle" },
   { id: "acquisition", label: "Full-Text Acquisition", icon: FileDown, anim: "dip" },
-  { id: "fulltext", label: "Full-Text Evidence", icon: FlaskConical, anim: "wiggle" },
+  { id: "fulltext", label: "Full-Text Screening", icon: FlaskConical, anim: "wiggle" },
   { id: "snowball", label: "Citation Snowball", icon: Network, anim: "spin" },
   { id: "extraction", label: "Table Extraction", icon: Table2, anim: "pop" },
   { id: "textextraction", label: "Text Extraction", icon: ScanText, anim: "bob" },
   { id: "quality", label: "Quality Assessment", icon: ShieldCheck, anim: "pop" },
   { id: "prisma", label: "Diagramming", icon: GitBranch, anim: "swing" },
-  // { id: "meta", label: "Meta-analysis", icon: Sigma, anim: "pop" },   // hidden for now
+  { id: "meta", label: "Meta-analysis", icon: Sigma, anim: "pop" },
   { id: "writing", label: "Writing Assistant", icon: PenLine, anim: "wiggle" },
 ];
 
@@ -87,6 +88,12 @@ const SOURCE_META: SourceMeta[] = [
   { name: "arXiv", group: "Preprints" },
   { name: "bioRxiv", group: "Preprints" },
   { name: "medRxiv", group: "Preprints" },
+  // Conference submissions and reviews: ICLR, NeurIPS and the machine-learning
+  // literature that never reaches a MEDLINE-indexed journal, including work
+  // still under review. Grouped with preprints because that is what most of it
+  // is. Off by default: for a clinical question it adds noise, for a methods
+  // question it is the only source that has this material at all.
+  { name: "OpenReview", group: "Preprints" },
   { name: "ClinicalTrials.gov", group: "Trials & grey literature" },
   { name: "Scopus", group: "Subscription", key: "required" },
   { name: "Web of Science", group: "Subscription", key: "required" },
