@@ -36,6 +36,7 @@ HEADER_TO_CRED = {
     "x-llm-openai-key": "openai",
     "x-llm-anthropic-key": "anthropic",
     "x-llm-google-key": "google",
+    "x-db-openalex-key": "openalex",
     "x-db-core-key": "core",
     "x-db-semantic-scholar-key": "semantic_scholar",
     "x-db-scopus-key": "scopus",
@@ -43,6 +44,16 @@ HEADER_TO_CRED = {
     "x-db-springer-key": "springer",
     "x-db-ieee-key": "ieee",
     "x-db-wos-key": "wos",
+    # Publisher text-and-data-mining credentials. These reach SUBSCRIPTION
+    # content through the interface each publisher provides for text mining;
+    # entitlement comes from the user's institution, not from this app, and
+    # with no key the corresponding tier makes no request at all.
+    "x-tdm-wiley-token": "wiley",
+    "x-tdm-elsevier-insttoken": "elsevier_insttoken",
+    # LibKey (Third Iron): maps a DOI to the copy this library is entitled to.
+    # Needs the library's numeric id as well as the token.
+    "x-libkey-id": "libkey_id",
+    "x-libkey-token": "libkey",
     # Not a key: the user's OWN contact address. Several scholarly APIs require
     # a real, working email as their politeness policy — Unpaywall hard-rejects
     # calls without one (HTTP 422). Supplied per user from the browser like any

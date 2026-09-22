@@ -182,3 +182,187 @@ class TestLandingPageFollow:
             raise api.requests.exceptions.ConnectionError("no route")
         monkeypatch.setattr(api.requests, "get", boom)
         assert api._pdf_from_landing_page("https://x.org/article") is None
+
+
+# ---------------------------------------------------------------------------
+# The acquisition ladder after the open-access rebuild.
+#
+# The old PMC-PDF tier scored 0 out of 411 on a real run because NCBI answers
+# that path with HTTP 200 and an HTML block page. These tests pin the shape of
+# what replaced it: E-utilities full text, two more open-access indexes, an
+# identifier backfill, and publisher text-mining tiers that stay dormant
+# without a credential.
+# ---------------------------------------------------------------------------
+
+class _Resp:
+    def __init__(self, status=200, text="", content=b"", headers=None):
+        self.status_code = status
+        self.text = text
+        self.content = content
+        self.headers = headers or {}
+
+    def json(self):
+        import json as _j
+        return _j.loads(self.text or "{}")
+
+
+def test_efetch_rejects_metadata_only_records():
+    """PMC answers for every record it holds, including ones whose publisher
+    withholds text-mining rights; those come back as front matter and an
+    abstract. Accepting them would feed an abstract to every downstream
+    extraction while reporting the full text as acquired."""
+    import api
+    front_matter = "<article><front><article-meta><title>T</title></article-meta></front></article>"
+    assert api._xml_body_text(front_matter) is None
+
+
+def test_efetch_accepts_a_real_body():
+    import api
+    body = "<article><body><p>" + ("Methods and results. " * 200) + "</p></body></article>"
+    text = api._xml_body_text(body)
+    assert text and len(text) > 2000
+
+
+def test_xml_body_text_requires_a_minimum_length():
+    """A <body> holding one sentence is a stub, not a full text."""
+    import api
+    assert api._xml_body_text("<article><body><p>Short.</p></body></article>") is None
+
+
+def test_download_pdf_rejects_an_html_block_page_served_as_200(monkeypatch):
+    """The exact failure that made the old PMC tier useless: HTTP 200, HTML
+    body. Status alone is not evidence of success, the magic number is."""
+    import api
+    monkeypatch.setattr(api.requests, "get", lambda *a, **k: _Resp(
+        200, content=b"<!DOCTYPE html><title>Access blocked</title>",
+        headers={"content-type": "text/html"}))
+    assert api._download_pdf("https://example.org/x.pdf") is None
+
+
+def test_download_pdf_accepts_a_real_pdf(monkeypatch):
+    import api
+    monkeypatch.setattr(api.requests, "get", lambda *a, **k: _Resp(
+        200, content=b"%PDF-1.7 ...", headers={"content-type": "application/pdf"}))
+    assert api._download_pdf("https://example.org/x.pdf") == b"%PDF-1.7 ..."
+
+
+def test_publisher_tdm_tiers_make_no_request_without_a_credential(monkeypatch):
+    """These tiers reach subscription content under the reader's institutional
+    entitlement. With no credential stored they must not call out at all."""
+    import api
+    from request_creds import set_request_creds
+    set_request_creds({})
+    monkeypatch.delenv("SCOPUS_API_KEY", raising=False)
+    monkeypatch.delenv("SPRINGER_API_KEY", raising=False)
+
+    called = []
+    monkeypatch.setattr(api.requests, "get", lambda *a, **k: called.append(a) or _Resp(200))
+    assert api._fetch_elsevier_tdm("10.1/x") is None
+    assert api._fetch_wiley_tdm("10.1/x") is None
+    assert api._fetch_springer_tdm("10.1/x") is None
+    assert called == []
+
+
+def test_wiley_tdm_sends_the_token_it_was_given(monkeypatch):
+    import api
+    from request_creds import set_request_creds
+    set_request_creds({"wiley": "tok-123"})
+    seen = {}
+
+    def fake_get(url, **kw):
+        seen.update(kw.get("headers") or {})
+        return _Resp(200, content=b"%PDF-1.4 body")
+    monkeypatch.setattr(api.requests, "get", fake_get)
+    got = api._fetch_wiley_tdm("10.1/x")
+    set_request_creds({})
+    assert got and got[0].startswith(b"%PDF")
+    assert seen.get("Wiley-TDM-Client-Token") == "tok-123"
+
+
+def test_ncbi_id_backfill_reads_the_converter(monkeypatch):
+    """A record with a PubMed id but no DOI used to be abandoned before any
+    open-access index was consulted."""
+    import api
+    monkeypatch.setattr(api.requests, "get", lambda *a, **k: _Resp(
+        200, text='{"records": [{"pmid": "123", "doi": "10.1/x", "pmcid": "PMC9"}]}'))
+    ids = api._ncbi_ids("123")
+    assert ids["doi"] == "10.1/x"
+    assert ids["pmcid"] == "PMC9"
+
+
+def test_ncbi_id_backfill_returns_nothing_on_an_error_record(monkeypatch):
+    import api
+    monkeypatch.setattr(api.requests, "get", lambda *a, **k: _Resp(
+        200, text='{"records": [{"status": "error", "errmsg": "invalid article id"}]}'))
+    assert api._ncbi_ids("nope") == {}
+
+
+def test_libkey_makes_no_request_without_both_credentials(monkeypatch):
+    """The id alone or the token alone resolves nothing, so neither should
+    produce a call. A library without LibKey pays nothing for this tier."""
+    import api
+    from request_creds import set_request_creds
+    called = []
+    monkeypatch.setattr(api.requests, "get", lambda *a, **k: called.append(a) or _Resp(200))
+
+    for creds in ({}, {"libkey_id": "42"}, {"libkey": "tok"}):
+        set_request_creds(creds)
+        assert api._libkey_lookup("10.1/x") == {}
+    set_request_creds({})
+    assert called == []
+
+
+def test_libkey_returns_the_entitled_links(monkeypatch):
+    import api
+    from request_creds import set_request_creds
+    set_request_creds({"libkey_id": "42", "libkey": "tok"})
+    seen = {}
+
+    def fake_get(url, **kw):
+        seen["url"] = url
+        seen["params"] = kw.get("params")
+        return _Resp(200, text='{"data": {"fullTextFile": "https://x/a.pdf",'
+                               ' "contentLocation": "https://x/article"}}')
+    monkeypatch.setattr(api.requests, "get", fake_get)
+    got = api._libkey_lookup("10.1/x")
+    set_request_creds({})
+    assert got["pdf"] == "https://x/a.pdf"
+    assert got["article"] == "https://x/article"
+    assert "/libraries/42/articles/doi/" in seen["url"]
+    assert seen["params"]["access_token"] == "tok"
+
+
+def test_libkey_survives_a_library_that_does_not_hold_the_article(monkeypatch):
+    """A 404 means this library has no entitled copy, which is an answer, not
+    a failure: the ladder must fall through rather than raise."""
+    import api
+    from request_creds import set_request_creds
+    set_request_creds({"libkey_id": "42", "libkey": "tok"})
+    monkeypatch.setattr(api.requests, "get", lambda *a, **k: _Resp(404, text="{}"))
+    assert api._libkey_lookup("10.1/x") == {}
+    assert api._fetch_libkey_pdf("10.1/x") is None
+    set_request_creds({})
+
+
+def test_libkey_link_is_offered_even_when_the_download_fails(monkeypatch):
+    """Off the institution's network we cannot fetch the entitled file, but the
+    reader can open it. Losing the link there would waste the whole lookup."""
+    import api
+    from request_creds import set_request_creds
+    set_request_creds({"libkey_id": "42", "libkey": "tok"})
+    monkeypatch.setattr(api, "_libkey_lookup",
+                        lambda doi: {"pdf": "https://x/a.pdf", "article": "https://x/art"})
+    monkeypatch.setattr(api, "_download_pdf", lambda url: None)          # entitlement refused
+    monkeypatch.setattr(api, "_fetch_epmc_fulltext_text", lambda pid: None)
+    monkeypatch.setattr(api, "_fetch_pmc_efetch_text", lambda pmcid: None)
+    monkeypatch.setattr(api, "_ncbi_ids", lambda ident: {})
+    monkeypatch.setattr(api, "_fetch_oa_pdf", lambda doi, title="": (None, "", "closed"))
+    monkeypatch.setattr(api, "_fetch_s2_oa_pdf", lambda doi: None)
+    monkeypatch.setattr(api, "_fetch_openaire_pdf", lambda doi: None)
+
+    out = api.fulltext_fetch(api.FullTextRequest(
+        Title="T", URL="", Source="PubMed", paper_id="1", doi="10.1/x"))
+    set_request_creds({})
+    assert out["status"] == "missing"
+    assert out["links"]["libkey"] == "https://x/a.pdf"
+    assert out["links"]["libkey_article"] == "https://x/art"

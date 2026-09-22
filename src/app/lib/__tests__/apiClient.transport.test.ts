@@ -184,6 +184,35 @@ describe("credential headers", () => {
     await AIService.fetchFullText({ Title: "T", URL: "", Source: "PubMed" });
     expect(String(calls[0].init.body)).not.toContain("core-secret-key");
   });
+
+  // Text-and-data-mining credentials reach SUBSCRIPTION content under the
+  // reader's institutional entitlement, so they travel like every other
+  // credential: a header, never the URL or the body, and never by default.
+  it("attaches the publisher text-mining tokens when configured", async () => {
+    setDbKey("wiley", "wiley-tdm-token");
+    setDbKey("elsevier_insttoken", "els-inst-token");
+    const calls = mockFetch(() => ok({ status: "missing" }));
+    await AIService.fetchFullText({ Title: "T", URL: "", Source: "PubMed" });
+    const h = calls[0].init.headers as any;
+    expect(h["X-TDM-Wiley-Token"]).toBe("wiley-tdm-token");
+    expect(h["X-TDM-Elsevier-Insttoken"]).toBe("els-inst-token");
+  });
+
+  it("sends no text-mining token when none is stored", async () => {
+    const calls = mockFetch(() => ok({ status: "missing" }));
+    await AIService.fetchFullText({ Title: "T", URL: "", Source: "PubMed" });
+    const h = calls[0].init.headers as any;
+    expect(h["X-TDM-Wiley-Token"]).toBeUndefined();
+    expect(h["X-TDM-Elsevier-Insttoken"]).toBeUndefined();
+  });
+
+  it("keeps a text-mining token out of the URL and body", async () => {
+    setDbKey("wiley", "wiley-tdm-token");
+    const calls = mockFetch(() => ok({ status: "missing" }));
+    await AIService.fetchFullText({ Title: "T", URL: "", Source: "PubMed" });
+    expect(calls[0].url).not.toContain("wiley-tdm-token");
+    expect(String(calls[0].init.body)).not.toContain("wiley-tdm-token");
+  });
 });
 
 // --------------------------------------------------------------------------

@@ -11,7 +11,7 @@ import {
   keychainIsAvailable, keychainStatus, keychainSet, keychainDelete,
   hasEncrypted, isUnlocked, unlock, lock, saveEncrypted, clearEncrypted, unlockedKeys,
 } from "../lib/keystore";
-import { getDbKey, setDbKey, hasDbKey, getContactEmail, setContactEmail, isValidContactEmail, type DbSource } from "../lib/dbKeys";
+import { getDbKey, setDbKey, hasDbKey, getContactEmail, setContactEmail, isValidContactEmail, getResolverBase, setResolverBase, type DbSource } from "../lib/dbKeys";
 
 const META: Record<LlmProvider, { label: string; placeholder: string }> = {
   anthropic: { label: "Anthropic (Claude)", placeholder: "sk-ant-..." },
@@ -24,6 +24,7 @@ const ORDER: LlmProvider[] = ["anthropic", "openai", "google"];
 // service reads get_cred(): CORE and Semantic Scholar today (Scopus once a Scopus
 // source is added, since the header + store already support it).
 const DB_ITEMS: { source: DbSource; label: string; placeholder: string; help: string; tier: "free" | "subscription" }[] = [
+  { source: "openalex", label: "OpenAlex", placeholder: "OpenAlex API key", help: "Free, and now necessary: without one you share ~100 requests a day with everyone on your network. help.openalex.org/api/authentication", tier: "free" },
   { source: "core", label: "CORE", placeholder: "CORE API key", help: "Free: core.ac.uk/services/api", tier: "free" },
   { source: "semantic_scholar", label: "Semantic Scholar", placeholder: "Semantic Scholar API key", help: "Free: semanticscholar.org/product/api", tier: "free" },
   { source: "ncbi", label: "PubMed (NCBI)", placeholder: "NCBI API key", help: "Free, raises PubMed rate limit: ncbi.nlm.nih.gov/account", tier: "free" },
@@ -31,6 +32,16 @@ const DB_ITEMS: { source: DbSource; label: string; placeholder: string; help: st
   { source: "ieee", label: "IEEE Xplore", placeholder: "IEEE API key", help: "Free: developer.ieee.org", tier: "free" },
   { source: "scopus", label: "Scopus (Elsevier)", placeholder: "Elsevier API key", help: "Institutional: dev.elsevier.com", tier: "subscription" },
   { source: "wos", label: "Web of Science", placeholder: "Web of Science key", help: "Institutional: developer.clarivate.com", tier: "subscription" },
+  // Text-and-data-mining credentials. These do not add a database to search;
+  // they let full-text acquisition read subscription articles through the
+  // interface each publisher provides for text mining, under the entitlement
+  // the reader's institution already holds. Nothing is requested without one.
+  { source: "elsevier_insttoken", label: "Elsevier TDM token", placeholder: "Elsevier institutional token", help: "Full text for Elsevier articles your library subscribes to. Request via dev.elsevier.com; pairs with the Scopus key above.", tier: "subscription" },
+  { source: "wiley", label: "Wiley TDM token", placeholder: "Wiley TDM client token", help: "Full text for Wiley articles your library subscribes to. Request through your library: onlinelibrary.wiley.com text and data mining.", tier: "subscription" },
+  // LibKey resolves a DOI to the copy this library is entitled to. Both fields
+  // are needed; the id alone or the token alone does nothing.
+  { source: "libkey_id", label: "LibKey library ID", placeholder: "Numeric library id", help: "Ask your library whether they subscribe to LibKey or BrowZine, and for their library id.", tier: "subscription" },
+  { source: "libkey", label: "LibKey token", placeholder: "LibKey access token", help: "Request from support@thirdiron.com, naming your library.", tier: "subscription" },
 ];
 
 function useKeystore() {
@@ -60,6 +71,7 @@ export function ApiKeysDialog({ open, onOpenChange, highlight }: {
   const [unlockPass, setUnlockPass] = useState("");
   const [busy, setBusy] = useState(false);
   const [email, setEmail] = useState(getContactEmail());
+  const [resolver, setResolver] = useState(getResolverBase());
 
   useEffect(() => {
     if (!open) return;
@@ -282,6 +294,34 @@ export function ApiKeysDialog({ open, onOpenChange, highlight }: {
                     {email.trim() && isValidContactEmail(email) && (
                       <p className="text-[11px] text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1">
                         <Check className="size-3" />Sent only to Unpaywall, NCBI, OpenAlex and Crossref, with each request.
+                      </p>
+                    )}
+                  </div>
+                </section>
+
+                <section className="space-y-2 border-t pt-4">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Library link resolver</span>
+                      <span className="text-[10px] rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400 px-1.5 py-0.5">recommended</span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Your library's OpenURL address. Most of a clinical corpus cannot be downloaded
+                      automatically, and this turns each one of those into a single click through to the
+                      copy your institution is entitled to, on the record and in the exported list.
+                      Your library can give you the address.
+                    </p>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="openurl-base" className="text-sm">OpenURL base</Label>
+                    <Input
+                      id="openurl-base" type="url" value={resolver}
+                      placeholder="https://yourlibrary.example.edu/openurl"
+                      onChange={e => { setResolver(e.target.value); setResolverBase(e.target.value); }}
+                    />
+                    {resolver.trim() && (
+                      <p className="text-[11px] text-emerald-600 dark:text-emerald-400 inline-flex items-center gap-1">
+                        <Check className="size-3" />Used to build links only. Nothing is sent to your library by this app.
                       </p>
                     )}
                   </div>

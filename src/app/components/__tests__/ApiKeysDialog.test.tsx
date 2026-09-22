@@ -173,6 +173,20 @@ function coreField(): HTMLInputElement | undefined {
   ) as HTMLInputElement | undefined;
 }
 
+/** The Save button belonging to CORE's row, not merely the first on the page.
+ *  Every database row carries its own Save, so picking the first one silently
+ *  saved whichever provider happened to be listed at the top. */
+function saveButtonFor(field: HTMLInputElement): HTMLButtonElement | undefined {
+  let el: HTMLElement | null = field;
+  while (el) {
+    const btn = Array.from(el.querySelectorAll("button"))
+      .find(b => /^save$/i.test(b.textContent?.trim() ?? ""));
+    if (btn) return btn as HTMLButtonElement;
+    el = el.parentElement;
+  }
+  return undefined;
+}
+
 describe("database keys", () => {
   it("does NOT persist a key until Save is pressed", async () => {
     /* Deliberate, and different from the contact email: typing a key is not a
@@ -191,8 +205,7 @@ describe("database keys", () => {
     const field = coreField();
     if (!field) return;
     fireEvent.change(field, { target: { value: "core-key-123" } });
-    const save = Array.from(document.querySelectorAll("button"))
-      .find(b => /^save$/i.test(b.textContent?.trim() ?? ""));
+    const save = saveButtonFor(field);
     if (!save) return;
     fireEvent.click(save);
     await waitFor(() => expect(getDbKey("core")).toBe("core-key-123"));

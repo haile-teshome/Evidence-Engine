@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 
 from config import Config
 from models import Paper as BackendPaper, PICOCriteria, clean_markup
-from utils import AIService, Deduplicator, AITableExtractor
+from utils import AIService, Deduplicator, AITableExtractor, QueryGenerationError
 import frameworks
 from data_services import DataAggregator, OpenAlexService
 from leads_screening import (
@@ -142,7 +142,8 @@ app.add_middleware(
 # Capture per-request LLM / database keys the user supplied from their browser
 # into a request-scoped ContextVar. Keys travel as headers, are used only to
 # construct model / data clients for this request, and are never persisted here.
-from request_creds import set_request_creds, HEADER_TO_CRED
+from request_creds import set_request_creds, get_cred, HEADER_TO_CRED
+from ratelimit import limited_get, cached, cache_stats
 
 
 from store import resolve_auth as _resolve_auth
@@ -498,6 +499,14 @@ def search_build(req: SearchBuildRequest):
         query, concepts = AIService.generate_mesh_query(
             pico, model_name, goal=req.goal or "", ground_mesh=True, return_concepts=True,
             seeds=seeds or None)
+    except QueryGenerationError as e:
+        # The question could not be turned into a search. 422, not 500: nothing
+        # is broken, the input could not be processed, and the message is
+        # written for the reviewer because the UI shows it verbatim. There is
+        # deliberately no fallback query here; a plausible wrong search costs
+        # far more than a visible failure.
+        print(f"[search_build] {e}")
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         print(f"[search_build] {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1303,7 +1312,7 @@ class FetchAllRequest(BaseModel):
 
 @app.post("/api/papers/fetch")
 def papers_fetch(req: FetchAllRequest):
-    papers, counts = DataAggregator.fetch_all(
+    papers, counts, source_status = DataAggregator.fetch_all(
         req.query, req.sources, max_per_source=req.max_per_source,
         uploaded_files=None, limit=req.limit, sort=req.sort,
         year_from=req.year_from, year_to=req.year_to,
@@ -1311,6 +1320,9 @@ def papers_fetch(req: FetchAllRequest):
     return {
         "papers": [_paper_to_dict(p) for p in papers],
         "sourceCounts": counts,
+        # Per-source diagnostics, so the UI can state why a source returned
+        # little rather than offering the reviewer a list of possibilities.
+        "sourceStatus": source_status,
     }
 
 
@@ -2915,6 +2927,18 @@ def simulation_agentic(req: AgenticOptimizeRequest):
 # ---------------------------------------------------------------------------
 
 
+# How many citations we are willing to pull from one source and direction for
+# one seed. Snowballing is meant to be exhaustive, so the default behaviour is
+# to take the whole list; this is only a guard against a seminal paper with
+# tens of thousands of citing works. Whatever it cuts off is REPORTED, never
+# silently dropped.
+_CITATION_CEILING = 500
+
+_EPMC_PAGE = 100          # Europe PMC's maximum page size for these endpoints
+_OA_BATCH = 50            # ids per openalex_id: filter, keeps the URL sane
+_SS_PAGE = 100
+
+
 class CitationsRequest(BaseModel):
     paper_id: str = ""
     source: str = ""
@@ -2922,65 +2946,108 @@ class CitationsRequest(BaseModel):
     snowball_type: str = "Both"  # "Both" | "Backward (References)" | "Forward (Cited by)"
     max_per: int = 10
     sources: List[str] = Field(default_factory=lambda: ["PubMed", "Semantic Scholar", "Europe PMC"])
+    # Fetch the whole reference / citation list and let the caller rank it,
+    # rather than keeping whichever N the API happened to return first. The old
+    # behaviour took page one in each source's own order, which for a
+    # bibliography means the papers printed first, and those skew to
+    # introduction and background rather than to the closest work.
+    fetch_all: bool = True
 
 
 def _epmc_resolve(title: str, paper_id: str) -> Optional[Tuple[str, str]]:
-    """Resolve a paper to (source, id) on Europe PMC. Falls back to a title search."""
+    """Resolve a paper to (source, id) on Europe PMC. Falls back to a title search.
+
+    Memoised for the run: snowballing revisits the same papers constantly, and
+    every repeat used to be a fresh request Europe PMC had to serve.
+    """
     if paper_id and paper_id.isdigit():
         return ("MED", paper_id)
-    try:
+
+    def _lookup():
         url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
         q = paper_id if (paper_id and not paper_id.isdigit()) else f'TITLE:"{title}"'
         params = {"query": q, "format": "json", "pageSize": 1, "resultType": "lite"}
-        r = requests.get(url, params=params, timeout=10).json()
-        for it in r.get("resultList", {}).get("result", []):
-            return ((it.get("source") or "MED"), str(it.get("id") or ""))
-    except Exception as e:
-        print(f"[epmc_resolve] {e}")
-    return None
+        r = limited_get(url, params=params, timeout=6)
+        if r is None or not r.ok:
+            return None
+        try:
+            for it in r.json().get("resultList", {}).get("result", []):
+                return ((it.get("source") or "MED"), str(it.get("id") or ""))
+        except Exception as e:
+            print(f"[epmc_resolve] {e}")
+        return None
+
+    return cached("epmc_resolve", paper_id or title, _lookup)
 
 
-def _epmc_links(source: str, pid: str, direction: str, max_per: int) -> List[Dict[str, Any]]:
-    """direction: 'references' (backward) or 'citations' (forward)."""
+def _epmc_links(source: str, pid: str, direction: str, max_per: int,
+                fetch_all: bool = True) -> Tuple[List[Dict[str, Any]], int]:
+    """direction: 'references' (backward) or 'citations' (forward).
+
+    Returns ``(citations, available)`` where `available` is the total the
+    source reports holding, so a caller can say "85 available, 20 kept"
+    instead of presenting a truncated list as the whole answer.
+    """
     out: List[Dict[str, Any]] = []
+    available = 0
+    ctype = "backward" if direction == "references" else "forward"
+    key = "referenceList" if direction == "references" else "citationList"
+    inner = "reference" if direction == "references" else "citation"
+    want = _CITATION_CEILING if fetch_all else max_per
     try:
         url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/{source}/{pid}/{direction}"
-        params = {"pageSize": max_per, "format": "json"}
-        r = requests.get(url, params=params, timeout=15).json()
-        key = "referenceList" if direction == "references" else "citationList"
-        items = (r.get(key) or {}).get("reference" if direction == "references" else "citation", []) or []
-        ctype = "backward" if direction == "references" else "forward"
-        for it in items[:max_per]:
-            cid = str(it.get("id") or it.get("doi") or "")
-            out.append({
-                "id": cid,
-                "title": (it.get("title") or it.get("source") or "Untitled").strip(),
-                "abstract": (it.get("abstractText") or "").strip(),
-                "url": (f"https://pubmed.ncbi.nlm.nih.gov/{cid}/" if cid.isdigit() else (f"https://doi.org/{cid}" if "/" in cid else "")),
-                "source": f"Europe PMC ({'Reference' if ctype == 'backward' else 'Cited by'})",
-                "citation_type": ctype,
-            })
+        page = 1
+        while len(out) < want:
+            params = {"pageSize": min(_EPMC_PAGE, want - len(out)), "page": page, "format": "json"}
+            resp = limited_get(url, params=params, timeout=8)
+            if resp is None or not resp.ok:
+                break
+            r = resp.json()
+            available = int(r.get("hitCount") or 0) or available
+            items = (r.get(key) or {}).get(inner, []) or []
+            if not items:
+                break
+            for it in items:
+                cid = str(it.get("id") or it.get("doi") or "")
+                out.append({
+                    "id": cid,
+                    "title": (it.get("title") or it.get("source") or "Untitled").strip(),
+                    "abstract": (it.get("abstractText") or "").strip(),
+                    "url": (f"https://pubmed.ncbi.nlm.nih.gov/{cid}/" if cid.isdigit() else (f"https://doi.org/{cid}" if "/" in cid else "")),
+                    "source": f"Europe PMC ({'Reference' if ctype == 'backward' else 'Cited by'})",
+                    "citation_type": ctype,
+                    "year": it.get("pubYear") or None,
+                    "cited_by_count": it.get("citedByCount"),
+                })
+            if len(items) < params["pageSize"]:
+                break
+            page += 1
     except Exception as e:
         print(f"[epmc_links] {direction} {e}")
-    return out
+    return out, max(available, len(out))
 
 
 def _openalex_resolve_work(title: str, paper_id: str) -> Optional[Dict[str, Any]]:
+    """Memoised for the run: the same work is resolved under many seeds."""
+    return cached("oa_work", paper_id or title, lambda: _openalex_resolve_work_uncached(title, paper_id))
+
+
+def _openalex_resolve_work_uncached(title: str, paper_id: str) -> Optional[Dict[str, Any]]:
     try:
         # DOI lookup
         if paper_id and "/" in paper_id and paper_id.startswith("10."):
-            r = requests.get(
+            r = limited_get(
                 f"https://api.openalex.org/works/doi:{paper_id}",
-                timeout=10,
+                params=_polite_params(), timeout=6,
             )
-            if r.status_code == 200:
+            if r is not None and r.status_code == 200:
                 return r.json()
         # Title search
-        r = requests.get(
+        r = limited_get(
             "https://api.openalex.org/works",
-            params={"search": title, "per_page": 1}, timeout=10,
+            params=_polite_params({"search": title, "per_page": 1}), timeout=6,
         )
-        if r.status_code == 200:
+        if r is not None and r.status_code == 200:
             results = r.json().get("results", [])
             if results:
                 return results[0]
@@ -2998,6 +3065,8 @@ def _openalex_minimal(work: Dict[str, Any], ctype: str) -> Dict[str, Any]:
         "abstract": _reconstruct_oa_abstract(work.get("abstract_inverted_index")),
         "url": oa.get("oa_url") or (f"https://doi.org/{doi}" if doi else (work.get("id") or "")),
         "source": f"OpenAlex ({'Reference' if ctype == 'backward' else 'Cited by'})",
+        "year": work.get("publication_year"),
+        "cited_by_count": work.get("cited_by_count"),
         "citation_type": ctype,
     }
 
@@ -3016,29 +3085,44 @@ def _reconstruct_oa_abstract(idx: Optional[dict]) -> str:
 def _abstract_via_epmc(title: str, ext_id: str) -> str:
     """Fetch an abstract from Europe PMC's full-text search. EPMC has far wider
     abstract coverage than OpenAlex (which omits abstracts for publishers that
-    forbid redistribution), and can be queried directly by PMID or DOI."""
-    try:
-        if ext_id and ext_id.isdigit():
-            q = f"EXT_ID:{ext_id}"
-        elif ext_id and "/" in ext_id:
-            q = f'DOI:"{ext_id}"'
-        elif title:
-            q = f'TITLE:"{title}"'
-        else:
-            return ""
-        r = requests.get(
+    forbid redistribution), and can be queried directly by PMID or DOI.
+
+    Memoised: the same citation appears under many seed papers.
+    """
+    if ext_id and ext_id.isdigit():
+        q = f"EXT_ID:{ext_id}"
+    elif ext_id and "/" in ext_id:
+        q = f'DOI:"{ext_id}"'
+    elif title:
+        q = f'TITLE:"{title}"'
+    else:
+        return ""
+
+    def _lookup() -> str:
+        r = limited_get(
             "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
             params={"query": q, "resultType": "core", "format": "json", "pageSize": 1},
-            timeout=10,
-        ).json()
-        results = (r.get("resultList") or {}).get("result", []) or []
-        if results:
-            raw = (results[0].get("abstractText") or "").strip()
-            # EPMC abstracts may carry light HTML/JATS markup — strip it.
-            return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
-    except Exception as e:
-        print(f"[abstract_epmc] {e}")
-    return ""
+            timeout=6,
+        )
+        if r is None or not r.ok:
+            return ""
+        try:
+            results = (r.json().get("resultList") or {}).get("result", []) or []
+        except Exception as e:
+            print(f"[abstract_epmc] {e}")
+            return ""
+        if not results:
+            return ""
+        raw = (results[0].get("abstractText") or "").strip()
+        # EPMC abstracts may carry light HTML/JATS markup — strip it.
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", raw)).strip()
+
+    return cached("epmc_abstract", q, _lookup)
+
+
+# Enough workers to keep each host's bucket saturated while one call is in
+# flight, and no more: the buckets, not this number, decide the request rate.
+_ENRICH_WORKERS = 8
 
 
 def _enrich_missing_abstracts(items: List[Dict[str, Any]], cap: int = 80) -> int:
@@ -3050,9 +3134,9 @@ def _enrich_missing_abstracts(items: List[Dict[str, Any]], cap: int = 80) -> int
     OpenAlex. Lookups are deduplicated by title and bounded by `cap`.
     Returns the number of papers resolved.
     """
-    seen: Dict[str, str] = {}
-    resolved = 0
-    looked = 0
+    # Which citations need a lookup, de-duplicated by title within this batch.
+    todo: Dict[str, Tuple[str, str]] = {}          # key -> (title, ext_id)
+    targets: Dict[str, List[Dict[str, Any]]] = {}  # key -> the rows to fill
     for it in items:
         if len((it.get("abstract") or "").strip()) >= 40:
             continue  # already has a usable abstract
@@ -3061,67 +3145,104 @@ def _enrich_missing_abstracts(items: List[Dict[str, Any]], cap: int = 80) -> int
         if not title and not ext_id:
             continue
         key = title.lower() or ext_id
-        if key in seen:                       # reuse a resolved duplicate
-            if seen[key]:
-                it["abstract"] = seen[key]
-            continue
-        if looked >= cap:
-            continue
-        looked += 1
+        targets.setdefault(key, []).append(it)
+        if key not in todo and len(todo) < cap:
+            todo[key] = (title, ext_id)
+
+    def _resolve_one(key: str) -> Tuple[str, str]:
+        title, ext_id = todo[key]
         abstract = _abstract_via_epmc(title, ext_id)
         if not abstract:                      # EPMC miss → try OpenAlex
             work = _openalex_resolve_work(title, ext_id)
             abstract = _reconstruct_oa_abstract(work.get("abstract_inverted_index")) if work else ""
-        seen[key] = abstract
-        if abstract:
-            it["abstract"] = abstract
-            resolved += 1
-    print(f"[enrich_abstracts] resolved {resolved}/{looked} lookups ({len(items)} citations)")
+        return key, abstract
+
+    # Run the lookups concurrently. This does NOT raise the request rate: every
+    # call still waits for a token from its host's bucket, which is set below
+    # each service's published limit. What it removes is the dead time, where
+    # the previous lookup's round trip had to finish before the next could
+    # start and the achieved rate sat near 0.1 requests a second.
+    resolved = 0
+    if todo:
+        with ThreadPoolExecutor(max_workers=_ENRICH_WORKERS) as pool:
+            for key, abstract in pool.map(_resolve_one, list(todo)):
+                if not abstract:
+                    continue
+                for row in targets.get(key, []):
+                    row["abstract"] = abstract
+                resolved += 1
+    print(f"[enrich_abstracts] resolved {resolved}/{len(todo)} lookups "
+          f"({len(items)} citations, cache {cache_stats()})")
     return resolved
 
 
-def _openalex_links(work: Dict[str, Any], direction: str, max_per: int) -> List[Dict[str, Any]]:
+def _openalex_links(work: Dict[str, Any], direction: str, max_per: int,
+                    fetch_all: bool = True) -> Tuple[List[Dict[str, Any]], int]:
+    """Returns ``(citations, available)``."""
     out: List[Dict[str, Any]] = []
+    available = 0
+    want = _CITATION_CEILING if fetch_all else max_per
     try:
         if direction == "backward":
             # referenced_works are canonical OpenAlex ids (openalex.org/W…).
-            # Batch-resolve them through the API in one call rather than
-            # dereferencing each web URL (which returns HTML, not JSON).
-            ref_ids = [r.split("/")[-1] for r in (work.get("referenced_works") or [])[:max_per] if r]
-            if ref_ids:
-                rr = requests.get(
+            # Batch-resolve them through the API rather than dereferencing each
+            # web URL (which returns HTML, not JSON).
+            refs = [r.split("/")[-1] for r in (work.get("referenced_works") or []) if r]
+            available = len(refs)
+            for i in range(0, min(len(refs), want), _OA_BATCH):
+                batch = refs[i:i + _OA_BATCH]
+                rr = limited_get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"openalex_id:{'|'.join(ref_ids)}", "per_page": max_per},
+                    params=_polite_params({"filter": f"openalex_id:{'|'.join(batch)}",
+                                           "per_page": len(batch)}),
                     timeout=12,
                 )
-                if rr.status_code == 200:
-                    for w in rr.json().get("results", [])[:max_per]:
-                        out.append(_openalex_minimal(w, "backward"))
+                if rr is None or rr.status_code != 200:
+                    break
+                for w in rr.json().get("results", []):
+                    out.append(_openalex_minimal(w, "backward"))
         else:
             # Forward citations via the `cites` filter (cited_by_api_url was
             # removed from the OpenAlex work schema).
             wid = (work.get("id") or "").split("/")[-1]
-            if wid:
-                rr = requests.get(
+            cursor = "*"
+            while wid and len(out) < want:
+                rr = limited_get(
                     "https://api.openalex.org/works",
-                    params={"filter": f"cites:{wid}", "per_page": max_per},
+                    params=_polite_params({"filter": f"cites:{wid}",
+                                           "per_page": min(200, want - len(out)),
+                                           "cursor": cursor}),
                     timeout=12,
                 )
-                if rr.status_code == 200:
-                    for w in rr.json().get("results", [])[:max_per]:
-                        out.append(_openalex_minimal(w, "forward"))
+                if rr is None or rr.status_code != 200:
+                    break
+                body = rr.json()
+                available = int((body.get("meta") or {}).get("count") or 0) or available
+                results = body.get("results", []) or []
+                for w in results:
+                    out.append(_openalex_minimal(w, "forward"))
+                cursor = (body.get("meta") or {}).get("next_cursor") or ""
+                if not results or not cursor:
+                    break
     except Exception as e:
         print(f"[openalex_links] {direction} {e}")
-    return out
+    return out, max(available, len(out))
 
 
 def _ss_resolve_id(title: str) -> Optional[str]:
+    """Memoised. Semantic Scholar allows ONE request a second to a key holder,
+    and unauthenticated callers share one pool worldwide, so a repeat lookup is
+    the most expensive request this code can make."""
+    return cached("ss_id", title, lambda: _ss_resolve_id_uncached(title))
+
+
+def _ss_resolve_id_uncached(title: str) -> Optional[str]:
     try:
-        r = requests.get(
+        r = limited_get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
-            params={"query": title, "limit": 1, "fields": "paperId"}, timeout=10,
+            params={"query": title, "limit": 1, "fields": "paperId"}, timeout=8,
         )
-        if r.status_code == 200:
+        if r is not None and r.status_code == 200:
             results = r.json().get("data", [])
             if results:
                 return results[0].get("paperId")
@@ -3130,28 +3251,50 @@ def _ss_resolve_id(title: str) -> Optional[str]:
     return None
 
 
-def _ss_links(pid: str, direction: str, max_per: int) -> List[Dict[str, Any]]:
+def _ss_links(pid: str, direction: str, max_per: int,
+              fetch_all: bool = True) -> Tuple[List[Dict[str, Any]], int]:
+    """Returns ``(citations, available)``."""
     out: List[Dict[str, Any]] = []
+    available = 0
+    want = _CITATION_CEILING if fetch_all else max_per
+    outer = "citedPaper" if direction == "backward" else "citingPaper"
     try:
         endpoint = "references" if direction == "backward" else "citations"
         url = f"https://api.semanticscholar.org/graph/v1/paper/{pid}/{endpoint}"
-        r = requests.get(url, params={"fields": "paperId,title,abstract,url", "limit": max_per}, timeout=12)
-        if r.status_code != 200:
-            return out
-        outer = "citedPaper" if direction == "backward" else "citingPaper"
-        for it in r.json().get("data", [])[:max_per]:
-            paper = it.get(outer) or {}
-            out.append({
-                "id": paper.get("paperId", ""),
-                "title": (paper.get("title") or "Untitled").strip(),
-                "abstract": (paper.get("abstract") or "").strip(),
-                "url": paper.get("url") or "",
-                "source": f"Semantic Scholar ({'Reference' if direction == 'backward' else 'Cited by'})",
-                "citation_type": "backward" if direction == "backward" else "forward",
-            })
+        offset = 0
+        while len(out) < want:
+            r = limited_get(url, params={
+                "fields": "paperId,title,abstract,url,year,citationCount",
+                "limit": min(_SS_PAGE, want - len(out)), "offset": offset,
+            }, timeout=8)
+            if r is None or not r.ok:
+                break
+            body = r.json()
+            total = body.get("total")
+            if isinstance(total, int):
+                available = max(available, total)
+            data = body.get("data", []) or []
+            if not data:
+                break
+            for it in data:
+                paper = it.get(outer) or {}
+                out.append({
+                    "id": paper.get("paperId", ""),
+                    "title": (paper.get("title") or "Untitled").strip(),
+                    "abstract": (paper.get("abstract") or "").strip(),
+                    "url": paper.get("url") or "",
+                    "source": f"Semantic Scholar ({'Reference' if direction == 'backward' else 'Cited by'})",
+                    "citation_type": "backward" if direction == "backward" else "forward",
+                    "year": paper.get("year"),
+                    "cited_by_count": paper.get("citationCount"),
+                })
+            nxt = body.get("next")
+            if not nxt:
+                break
+            offset = nxt
     except Exception as e:
         print(f"[ss_links] {direction} {e}")
-    return out
+    return out, max(available, len(out))
 
 
 @app.post("/api/citations")
@@ -3159,35 +3302,71 @@ def citations(req: CitationsRequest):
     want_back = req.snowball_type in {"Both", "Backward (References)"}
     want_fwd = req.snowball_type in {"Both", "Forward (Cited by)"}
     sources = set(s for s in req.sources)
-    out: List[Dict[str, Any]] = []
 
-    # Europe PMC (and via that any PubMed-indexed paper).
-    if "Europe PMC" in sources or "PubMed" in sources:
+    # Every source reports how many it HOLDS as well as what it handed over,
+    # so the caller can state "85 available, 20 kept" rather than presenting a
+    # truncated list as the whole answer.
+    Haul = Tuple[List[Dict[str, Any]], Dict[str, int]]
+
+    def _from_epmc() -> Haul:
+        got: List[Dict[str, Any]] = []
+        avail: Dict[str, int] = {}
         resolved = _epmc_resolve(req.title, req.paper_id)
         if resolved:
             src, pid = resolved
             if want_back:
-                out.extend(_epmc_links(src, pid, "references", req.max_per))
+                rows, n = _epmc_links(src, pid, "references", req.max_per, req.fetch_all)
+                got.extend(rows); avail["Europe PMC · backward"] = n
             if want_fwd:
-                out.extend(_epmc_links(src, pid, "citations", req.max_per))
+                rows, n = _epmc_links(src, pid, "citations", req.max_per, req.fetch_all)
+                got.extend(rows); avail["Europe PMC · forward"] = n
+        return got, avail
 
-    # OpenAlex.
-    if "OpenAlex" in sources:
+    def _from_openalex() -> Haul:
+        got: List[Dict[str, Any]] = []
+        avail: Dict[str, int] = {}
         work = _openalex_resolve_work(req.title, req.paper_id)
         if work:
             if want_back:
-                out.extend(_openalex_links(work, "backward", req.max_per))
+                rows, n = _openalex_links(work, "backward", req.max_per, req.fetch_all)
+                got.extend(rows); avail["OpenAlex · backward"] = n
             if want_fwd:
-                out.extend(_openalex_links(work, "forward", req.max_per))
+                rows, n = _openalex_links(work, "forward", req.max_per, req.fetch_all)
+                got.extend(rows); avail["OpenAlex · forward"] = n
+        return got, avail
 
-    # Semantic Scholar.
-    if "Semantic Scholar" in sources:
+    def _from_ss() -> Haul:
+        got: List[Dict[str, Any]] = []
+        avail: Dict[str, int] = {}
         ss_id = _ss_resolve_id(req.title)
         if ss_id:
             if want_back:
-                out.extend(_ss_links(ss_id, "backward", req.max_per))
+                rows, n = _ss_links(ss_id, "backward", req.max_per, req.fetch_all)
+                got.extend(rows); avail["Semantic Scholar · backward"] = n
             if want_fwd:
-                out.extend(_ss_links(ss_id, "forward", req.max_per))
+                rows, n = _ss_links(ss_id, "forward", req.max_per, req.fetch_all)
+                got.extend(rows); avail["Semantic Scholar · forward"] = n
+        return got, avail
+
+    # The three sources are independent and hit different hosts, so they wait
+    # concurrently rather than in turn. Each still passes through its own host
+    # bucket, so no service sees a higher rate than it did before; a seed
+    # simply costs the slowest source instead of the sum of all three.
+    jobs = []
+    if "Europe PMC" in sources or "PubMed" in sources:
+        jobs.append(_from_epmc)
+    if "OpenAlex" in sources:
+        jobs.append(_from_openalex)
+    if "Semantic Scholar" in sources:
+        jobs.append(_from_ss)
+
+    out: List[Dict[str, Any]] = []
+    available: Dict[str, int] = {}
+    if jobs:
+        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+            for got, avail in pool.map(lambda fn: fn(), jobs):
+                out.extend(got)
+                available.update(avail)
 
     # Reference/citation lists often omit abstracts — backfill them so the
     # downstream screening has something to work with.
@@ -3199,7 +3378,17 @@ def citations(req: CitationsRequest):
         if it.get("abstract"):
             it["abstract"] = clean_markup(it["abstract"])
 
-    return {"citations": out}
+    total_available = sum(available.values())
+    print(f"[citations] {req.title[:50]!r}: fetched {len(out)} of {total_available} available "
+          f"{available}")
+    return {
+        "citations": out,
+        # What each source and direction actually holds, so the reviewer can be
+        # told what was left behind instead of discovering it later.
+        "available": available,
+        "total_available": total_available,
+        "ceiling": _CITATION_CEILING,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3318,8 +3507,15 @@ def _extract_arxiv_id(url: str) -> Optional[str]:
 
 
 def _fetch_pmc_pdf(pmcid: str) -> Optional[bytes]:
-    """Download the PMC-hosted PDF for a given PMC ID. Tries the EuPMC
-    rendered PDF URL first, then falls back to the NCBI PMC URL."""
+    """Download the PMC-hosted PDF for a given PMC ID.
+
+    NO LONGER IN THE LADDER. Measured over a 411-record acquisition run it
+    succeeded 0 times: NCBI answers the article PDF path with HTTP 200 and an
+    HTML block page, and Europe PMC's rendered PDF returns 403 regardless of
+    user agent. Kept only because the bulk-import path still calls it for
+    records a reviewer supplies a PMC id for by hand. Prefer
+    `_fetch_pmc_efetch_text`.
+    """
     if not pmcid:
         return None
     if not pmcid.upper().startswith("PMC"):
@@ -3371,12 +3567,21 @@ def _contact_email() -> str:
 
 
 def _polite_params(extra: Optional[dict] = None) -> dict:
-    """Query params for OpenAlex/Crossref, adding `mailto` only if the user gave
-    an address (it buys their requests the faster 'polite pool')."""
+    """Query params for OpenAlex and Crossref.
+
+    `mailto` is what Crossref asks for. OpenAlex asks for it too, but since
+    February 2026 it is usage-based: an unkeyed caller shares a free budget of
+    about a hundred requests a day WITH EVERY OTHER MACHINE ON THE SAME NETWORK,
+    so on a university address it is usually spent before you start. A free key
+    carries its own budget and is the only way to run a real search.
+    """
     p = dict(extra or {})
     email = _contact_email()
     if email:
         p["mailto"] = email
+    key = get_cred("openalex") or os.getenv("OPENALEX_API_KEY", "")
+    if key:
+        p["api_key"] = key
     return p
 
 # OpenAlex asks for <= 3 requests/second from anonymous callers.
@@ -3589,6 +3794,289 @@ def _fetch_arxiv_pdf(arxiv_id: str) -> Optional[bytes]:
     return None
 
 
+_NCBI_IDCONV = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+
+
+def _ncbi_ids(ident: str) -> Dict[str, str]:
+    """Map any of DOI / PMID / PMCID to the other two via NCBI's ID converter.
+
+    The ladder used to give up on a record the moment it had no DOI, even when
+    it was holding a PubMed id NCBI would happily convert. On a 411-record run
+    that abandoned 16 records before a single open-access index was consulted.
+    """
+    ident = (ident or "").strip()
+    if not ident:
+        return {}
+    params = {"ids": ident, "format": "json", "tool": "EvidenceEngine"}
+    email = _contact_email()
+    if email:
+        params["email"] = email
+    try:
+        r = requests.get(_NCBI_IDCONV, params=params, headers=_OA_UA, timeout=25)
+        if r.status_code != 200:
+            return {}
+        rec = ((r.json() or {}).get("records") or [{}])[0]
+    except Exception as e:
+        print(f"[ncbi_idconv] {ident[:40]}: {e}")
+        return {}
+    if rec.get("status") == "error":
+        return {}
+    return {k: v for k, v in (
+        ("pmcid", rec.get("pmcid") or ""),
+        ("pmid", rec.get("pmid") or ""),
+        ("doi", rec.get("doi") or ""),
+    ) if v}
+
+
+def _xml_body_text(xml: str, min_chars: int = 2000) -> Optional[str]:
+    """Plain text from a JATS document, but ONLY when it carries a real <body>.
+
+    NCBI answers for every PMC record, including ones whose publisher withholds
+    text-mining rights; those come back as front matter and an abstract. Without
+    this check the ladder would accept a few hundred words of metadata as the
+    full text and every downstream extraction would quietly work off an
+    abstract.
+    """
+    if not xml or "<body" not in xml:
+        return None
+    try:
+        soup = BeautifulSoup(xml, "lxml-xml")
+        body = soup.find("body")
+        if body is None:
+            return None
+        text = body.get_text(separator="\n", strip=True)
+        return text if text and len(text) >= min_chars else None
+    except Exception as e:
+        print(f"[jats parse] {e}")
+        return None
+
+
+def _fetch_pmc_efetch_text(pmcid: str) -> Optional[str]:
+    """Full text for a PMC record through NCBI E-utilities.
+
+    This replaces the old PMC-PDF tier, which scored 0 out of 411 on a real
+    run: NCBI answers the article PDF path with HTTP 200 and an HTML block
+    page, so it read as a success and returned nothing. E-utilities is the
+    interface NCBI actually supports for programmatic access and is not
+    rate-blocked the same way.
+    """
+    if not pmcid:
+        return None
+    pmcid = pmcid.upper()
+    if not pmcid.startswith("PMC"):
+        pmcid = f"PMC{pmcid}"
+    params = {"db": "pmc", "id": pmcid, "retmode": "xml", "tool": "EvidenceEngine"}
+    email = _contact_email()
+    if email:
+        params["email"] = email
+    # An NCBI key lifts the shared limit from 3 to 10 requests/second, which is
+    # the difference between minutes and an hour on a review-sized corpus.
+    key = get_cred("ncbi") or os.getenv("NCBI_API_KEY", "")
+    if key:
+        params["api_key"] = key
+    try:
+        r = requests.get("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi",
+                         params=params, headers=_OA_UA, timeout=40)
+        if r.status_code != 200:
+            print(f"[efetch {pmcid}] HTTP {r.status_code}")
+            return None
+        return _xml_body_text(r.text)
+    except Exception as e:
+        print(f"[efetch {pmcid}] {e}")
+        return None
+
+
+def _fetch_s2_oa_pdf(doi: str) -> Optional[Tuple[bytes, str]]:
+    """Semantic Scholar's own open-access PDF field, a separate index again."""
+    if not doi:
+        return None
+    headers = dict(_OA_UA)
+    key = get_cred("semantic_scholar") or Config.SEMANTIC_SCHOLAR_KEY
+    if key:
+        headers["x-api-key"] = key
+    try:
+        r = requests.get(f"https://api.semanticscholar.org/graph/v1/paper/DOI:{quote(doi, safe='')}",
+                         params={"fields": "openAccessPdf"}, headers=headers, timeout=30)
+        if r.status_code != 200:
+            return None
+        url = ((r.json() or {}).get("openAccessPdf") or {}).get("url") or ""
+    except Exception as e:
+        print(f"[s2_oa {doi}] {e}")
+        return None
+    if not url:
+        return None
+    pdf = _download_pdf(url)
+    return (pdf, url) if pdf else None
+
+
+_OPENAIRE_PDF_RE = re.compile(r'"(https?://[^"]+?\.pdf[^"]*)"', re.I)
+
+
+def _fetch_openaire_pdf(doi: str) -> Optional[Tuple[bytes, str]]:
+    """Green open-access copies held in the OpenAIRE aggregator.
+
+    Reaches institutional and national repositories that neither OpenAlex nor
+    Unpaywall surfaces a downloadable link for.
+    """
+    if not doi:
+        return None
+    try:
+        r = requests.get("https://api.openaire.eu/search/publications",
+                         params={"doi": doi, "format": "json"}, headers=_OA_UA, timeout=30)
+        if r.status_code != 200:
+            return None
+        body = r.text
+    except Exception as e:
+        print(f"[openaire {doi}] {e}")
+        return None
+    seen = set()
+    for m in _OPENAIRE_PDF_RE.finditer(body):
+        url = m.group(1)
+        if url in seen:
+            continue
+        seen.add(url)
+        if len(seen) > 4:
+            break
+        pdf = _download_pdf(url)
+        if pdf:
+            return pdf, url
+    return None
+
+
+def _download_pdf(url: str) -> Optional[bytes]:
+    """GET a URL and return the bytes only if they really are a PDF.
+
+    Several hosts answer a blocked request with HTTP 200 and an HTML notice, so
+    status alone is not evidence of success; the magic number is.
+    """
+    if not url or not url.startswith("http"):
+        return None
+    try:
+        r = requests.get(url, headers=_OA_UA, timeout=40, allow_redirects=True)
+    except Exception as e:
+        print(f"[download_pdf] {url[:70]}: {e}")
+        return None
+    if r.status_code != 200:
+        return None
+    ct = (r.headers.get("content-type") or "").lower()
+    if r.content[:5] == b"%PDF-" or ("pdf" in ct and r.content[:5] == b"%PDF-"):
+        return r.content
+    return None
+
+
+# ---- publisher text-and-data-mining APIs -----------------------------------
+# Subscription content, accessed through the interface each publisher provides
+# FOR text mining, with the user's own institutional credential. Nothing here
+# works without a key the user supplied, and no request is made without one.
+
+_LIBKEY_API = "https://public-api.thirdiron.com/public/v1/libraries"
+
+
+def _libkey_lookup(doi: str) -> Dict[str, str]:
+    """Ask LibKey where this library's entitled copy of a DOI lives.
+
+    LibKey (Third Iron) maps a DOI to the copy the subscribing institution is
+    entitled to, which is the same question a library link resolver answers but
+    in one call and with a direct file link. Returns {} unless the user has
+    configured their library's id and token, so a library without LibKey pays
+    nothing for this.
+
+    Note the download still requires entitlement: off the institution's network
+    the link is for the READER to open, not for us to fetch. Both are returned
+    so the caller can try the fetch and still hand the link over if it fails.
+    """
+    lib = get_cred("libkey_id")
+    token = get_cred("libkey")
+    if not (lib and token and doi):
+        return {}
+    try:
+        r = requests.get(f"{_LIBKEY_API}/{quote(lib, safe='')}/articles/doi/{quote(doi, safe='')}",
+                         params={"access_token": token}, headers=_OA_UA, timeout=25)
+        if r.status_code != 200:
+            print(f"[libkey {doi}] HTTP {r.status_code}")
+            return {}
+        data = (r.json() or {}).get("data") or {}
+    except Exception as e:
+        print(f"[libkey {doi}] {e}")
+        return {}
+    return {k: v for k, v in (
+        ("pdf", data.get("fullTextFile") or ""),
+        ("article", data.get("contentLocation") or ""),
+        ("retraction", data.get("retractionNoticeUrl") or ""),
+    ) if v}
+
+
+def _fetch_libkey_pdf(doi: str) -> Optional[Tuple[bytes, str]]:
+    """Try the entitled copy LibKey points at. Succeeds only where this machine
+    already holds the entitlement (institutional network or VPN)."""
+    link = _libkey_lookup(doi).get("pdf")
+    if not link:
+        return None
+    pdf = _download_pdf(link)
+    return (pdf, link) if pdf else None
+
+
+def _fetch_elsevier_tdm(doi: str) -> Optional[Tuple[str, str]]:
+    """Elsevier full-text article API. Key from dev.elsevier.com; entitlement
+    comes from the institution's subscription."""
+    key = get_cred("scopus") or os.getenv("SCOPUS_API_KEY", "")
+    if not key or not doi:
+        return None
+    headers = {**_OA_UA, "X-ELS-APIKey": key, "Accept": "text/xml"}
+    token = get_cred("elsevier_insttoken")
+    if token:
+        headers["X-ELS-Insttoken"] = token
+    try:
+        r = requests.get(f"https://api.elsevier.com/content/article/doi/{quote(doi, safe='')}",
+                         params={"view": "FULL"}, headers=headers, timeout=45)
+        if r.status_code != 200:
+            print(f"[elsevier_tdm {doi}] HTTP {r.status_code}")
+            return None
+        soup = BeautifulSoup(r.text, "lxml-xml")
+        node = soup.find("originalText") or soup.find("body") or soup
+        text = node.get_text(separator="\n", strip=True)
+        return (text, "Elsevier TDM") if text and len(text) > 2000 else None
+    except Exception as e:
+        print(f"[elsevier_tdm {doi}] {e}")
+        return None
+
+
+def _fetch_wiley_tdm(doi: str) -> Optional[Tuple[bytes, str]]:
+    """Wiley Online Library TDM. Token requested by the institution's library."""
+    token = get_cred("wiley")
+    if not token or not doi:
+        return None
+    try:
+        r = requests.get(f"https://api.wiley.com/onlinelibrary/tdm/v1/articles/{quote(doi, safe='')}",
+                         headers={**_OA_UA, "Wiley-TDM-Client-Token": token},
+                         timeout=45, allow_redirects=True)
+        if r.status_code != 200:
+            print(f"[wiley_tdm {doi}] HTTP {r.status_code}")
+            return None
+        return (r.content, "Wiley TDM") if r.content[:5] == b"%PDF-" else None
+    except Exception as e:
+        print(f"[wiley_tdm {doi}] {e}")
+        return None
+
+
+def _fetch_springer_tdm(doi: str) -> Optional[Tuple[str, str]]:
+    """Springer Nature full-text API. Key from dev.springernature.com."""
+    key = get_cred("springer") or os.getenv("SPRINGER_API_KEY", "")
+    if not key or not doi:
+        return None
+    try:
+        r = requests.get("https://api.springernature.com/openaccess/jats",
+                         params={"q": f"doi:{doi}", "api_key": key}, headers=_OA_UA, timeout=45)
+        if r.status_code != 200:
+            print(f"[springer_tdm {doi}] HTTP {r.status_code}")
+            return None
+        text = _xml_body_text(r.text)
+        return (text, "Springer Nature TDM") if text else None
+    except Exception as e:
+        print(f"[springer_tdm {doi}] {e}")
+        return None
+
+
 def _fetch_epmc_fulltext_text(paper_id: str) -> Optional[str]:
     """JATS-XML route via _fetch_epmc_full_text_xml (which already handles the
     PMID -> PMCID lookup). Returns plain text or None."""
@@ -3662,15 +4150,24 @@ def fulltext_pdf(key: str):
 @app.post("/api/fulltext/fetch")
 def fulltext_fetch(req: FullTextRequest):
     """Strategy ladder, in order of decreasing reliability:
-      1. Europe PMC JATS fullTextXML  (best — structured text)
-      2. PMC PDF                       (parsed with pypdf)
-      3. Unpaywall OA PDF              (any source, parsed with pypdf)
-      4. arXiv PDF                     (for arXiv papers, parsed with pypdf)
-      5. Direct open-access PDF link   (only when the record URL is itself a PDF)
-    Only open-access sources are used: structured EuPMC/PMC content, the Unpaywall
-    OA resolver, arXiv, and direct PDF links.
+      1. Europe PMC JATS fullTextXML   (best — structured text)
+      2. NCBI E-utilities PMC full text (structured, and not rate-blocked)
+      3. Unpaywall / OpenAlex OA PDF
+      4. Semantic Scholar open-access PDF
+      5. OpenAIRE repository copy
+      6. Publisher text-mining API      (only with the user's own key)
+      7. arXiv PDF
+      8. Direct open-access PDF link    (only when the record URL is itself a PDF)
+
+    Tiers 1-5 and 7-8 use open-access content only. Tier 6 reaches subscription
+    content through the interface each publisher provides FOR text mining, using
+    a credential the user supplied; with no key it makes no request at all.
+
+    The old PMC-PDF tier is gone: measured over a 411-record run it succeeded 0
+    times, because NCBI answers that path with HTTP 200 and an HTML block page.
+
     Returns `source` describing which tier supplied the text so the UI can
-    show e.g. "PMC PDF (PMC1234567)" instead of just "Europe PMC".
+    show e.g. "PMC full text (PMC1234567)" instead of just "Europe PMC".
     """
     pid = (req.paper_id or "").strip()
     if not pid and req.URL:
@@ -3700,18 +4197,25 @@ def fulltext_fetch(req: FullTextRequest):
             print(f"[fulltext_fetch] {debug_label} tier1 EuPMC XML -> {len(text)} chars")
             return {"status": "found", "text": text, "source": "Europe PMC (XML)"}
 
-    # Tier 2 — PMC PDF (works for any PubMed paper with a PMC mirror).
+    # Identifier backfill. Everything below is keyed on a DOI or a PMC id, so
+    # resolve whichever is missing BEFORE deciding a record is unreachable.
+    doi = (req.doi or "").strip() or _extract_doi(req.URL, req.Title) or (lookup_doi or "")
+    if not doi and pid:
+        doi = _ncbi_ids(pid).get("doi", "")
+        if doi:
+            print(f"[fulltext_fetch] {debug_label} recovered DOI {doi} from {pid}")
+    if not pmcid and doi:
+        pmcid = _ncbi_ids(doi).get("pmcid") or None
+
+    # Tier 2 — NCBI E-utilities full text.
     if pmcid:
-        pdf = _fetch_pmc_pdf(pmcid)
-        if pdf:
-            text = _extract_text_from_pdf(pdf)
-            if text:
-                print(f"[fulltext_fetch] {debug_label} tier2 PMC PDF ({pmcid}) -> {len(text)} chars")
-                return _found(text, f"PMC PDF ({pmcid})", req.paper_id, req.URL, pdf)
+        text = _fetch_pmc_efetch_text(pmcid)
+        if text:
+            print(f"[fulltext_fetch] {debug_label} tier2 EFetch ({pmcid}) -> {len(text)} chars")
+            return {"status": "found", "text": text, "source": f"PMC full text ({pmcid})"}
 
     # Tier 3 — open-access PDF via the OpenAlex OA index, including a
     # landing-page follow for records that advertise no direct PDF url.
-    doi = (req.doi or "").strip() or _extract_doi(req.URL, req.Title) or (lookup_doi or "")
     oa_status = "unknown"
     if doi or req.Title:
         pdf, src_url, oa_status = _fetch_oa_pdf(doi, req.Title or "")
@@ -3722,7 +4226,53 @@ def fulltext_fetch(req: FullTextRequest):
                 print(f"[fulltext_fetch] {debug_label} tier3 OA PDF ({host}) -> {len(text)} chars")
                 return _found(text, f"Open access ({host})", req.paper_id, req.URL, pdf)
 
-    # Tier 4 — arXiv PDF.
+    # Tier 4 — Semantic Scholar's open-access PDF index.
+    if doi:
+        found = _fetch_s2_oa_pdf(doi)
+        if found:
+            pdf, src_url = found
+            text = _extract_text_from_pdf(pdf)
+            if text:
+                print(f"[fulltext_fetch] {debug_label} tier4 Semantic Scholar OA -> {len(text)} chars")
+                return _found(text, "Open access (Semantic Scholar)", req.paper_id, req.URL, pdf)
+
+    # Tier 5 — OpenAIRE, which aggregates repository copies the other two miss.
+    if doi:
+        found = _fetch_openaire_pdf(doi)
+        if found:
+            pdf, src_url = found
+            text = _extract_text_from_pdf(pdf)
+            if text:
+                host = src_url.split("/", 3)[2] if "://" in src_url else src_url
+                print(f"[fulltext_fetch] {debug_label} tier5 OpenAIRE ({host}) -> {len(text)} chars")
+                return _found(text, f"Repository ({host})", req.paper_id, req.URL, pdf)
+
+    # Tier 6 — the reader's own institutional entitlement, via LibKey and then
+    # the publisher's text-mining interface. Both are skipped entirely when the
+    # corresponding credential is absent, so neither makes a request by default.
+    if doi:
+        got_pdf = _fetch_libkey_pdf(doi)
+        if got_pdf:
+            pdf, link = got_pdf
+            text = _extract_text_from_pdf(pdf)
+            if text:
+                print(f"[fulltext_fetch] {debug_label} tier6 LibKey -> {len(text)} chars")
+                return _found(text, "Library entitlement (LibKey)", req.paper_id, req.URL, pdf)
+        for fn in (_fetch_elsevier_tdm, _fetch_springer_tdm):
+            got = fn(doi)
+            if got:
+                text, label = got
+                print(f"[fulltext_fetch] {debug_label} tier6 {label} -> {len(text)} chars")
+                return {"status": "found", "text": text, "source": label}
+        got_pdf = _fetch_wiley_tdm(doi)
+        if got_pdf:
+            pdf, label = got_pdf
+            text = _extract_text_from_pdf(pdf)
+            if text:
+                print(f"[fulltext_fetch] {debug_label} tier6 {label} -> {len(text)} chars")
+                return _found(text, label, req.paper_id, req.URL, pdf)
+
+    # Tier 7 — arXiv PDF.
     if (req.Source or "").lower() == "arxiv" or "arxiv.org" in (req.URL or "").lower():
         arxiv_id = _extract_arxiv_id(req.URL or "") or (pid if pid and not pid.isdigit() else None)
         if arxiv_id:
@@ -3730,10 +4280,10 @@ def fulltext_fetch(req: FullTextRequest):
             if pdf:
                 text = _extract_text_from_pdf(pdf)
                 if text:
-                    print(f"[fulltext_fetch] {debug_label} tier4 arXiv PDF ({arxiv_id}) -> {len(text)} chars")
+                    print(f"[fulltext_fetch] {debug_label} tier7 arXiv PDF ({arxiv_id}) -> {len(text)} chars")
                     return _found(text, f"arXiv PDF ({arxiv_id})", req.paper_id, req.URL, pdf)
 
-    # Tier 5 — direct PDF link, only when the record's own URL is itself a PDF.
+    # Tier 8 — direct PDF link, only when the record's own URL is itself a PDF.
     if req.URL and req.URL.startswith("http") and req.URL.lower().split("?", 1)[0].rstrip("/").endswith(".pdf"):
         host = req.URL.split("/", 3)[2].lower() if "://" in req.URL else ""
         try:
@@ -3743,28 +4293,46 @@ def fulltext_fetch(req: FullTextRequest):
             if r.status_code == 200 and ("pdf" in ct or r.content[:5] == b"%PDF-"):
                 text = _extract_text_from_pdf(r.content)
                 if text:
-                    print(f"[fulltext_fetch] {debug_label} tier5 direct OA PDF ({host}) -> {len(text)} chars")
+                    print(f"[fulltext_fetch] {debug_label} tier8 direct OA PDF ({host}) -> {len(text)} chars")
                     return _found(text, f"Open-access PDF ({host})", req.paper_id, req.URL, r.content)
         except Exception as e:
             print(f"[fulltext_fetch pdf] {e}")
 
+    has_tdm = bool(get_cred("scopus") or get_cred("springer") or get_cred("wiley"))
     print(f"[fulltext_fetch] {debug_label} -> no full text "
-          f"(pid={pid or '-'}, doi={doi or '-'}, oa={oa_status}, source={req.Source}, url_host="
+          f"(pid={pid or '-'}, doi={doi or '-'}, pmcid={pmcid or '-'}, oa={oa_status}, "
+          f"tdm_keys={'yes' if has_tdm else 'no'}, source={req.Source}, url_host="
           f"{req.URL.split('/', 3)[2] if req.URL and '://' in req.URL else '-'})")
 
     # A specific reason plus the exact links a human needs, so the reviewer can
     # finish the job by hand instead of being told only that it did not work.
     if not doi:
-        code, reason = "no_doi", "No DOI found, so no open-access index could be searched."
+        code, reason = "no_doi", "No DOI found for this record, in the source or at NCBI."
+    elif pmcid:
+        # A PMC copy exists and E-utilities answered with metadata only, which
+        # is how PMC represents an article whose publisher withholds
+        # text-mining rights. Readable in a browser, not retrievable here.
+        code, reason = ("pmc_restricted",
+                        f"{pmcid} is in PMC but its publisher does not permit text mining. "
+                        "Open it in a browser and upload the PDF.")
     elif oa_status == "closed":
-        code, reason = "paywalled", "Paywalled. Needs library or interlibrary loan access."
+        code, reason = ("paywalled",
+                        "Paywalled. A publisher text-mining key, your library, or "
+                        "interlibrary loan can reach it."
+                        if not has_tdm else
+                        "Paywalled, and your text-mining keys did not cover this publisher.")
     elif oa_status in ("pdf", "landing"):
         code, reason = "oa_blocked", "Listed as open access but the publisher blocked the download."
     else:
-        code, reason = "unresolved", "Could not resolve this record in the open-access index."
+        code, reason = "unresolved", "Could not resolve this record in any open-access index."
 
     links: Dict[str, str] = {}
     if doi:
+        # A one-click route to the copy this library is entitled to, for the
+        # records we could not fetch ourselves. This is the whole value of
+        # LibKey off-campus: we cannot download it, the reader can.
+        for name, url in _libkey_lookup(doi).items():
+            links[f"libkey_{name}" if name != "pdf" else "libkey"] = url
         links["doi"] = f"https://doi.org/{doi}"
         links["scholar"] = ("https://scholar.google.com/scholar?q="
                             + quote(f'"{doi}"', safe=""))
@@ -4381,6 +4949,11 @@ def _extract_epmc_tables(paper_id: str, extraction_type: str) -> List[Dict[str, 
                     "type": _classify_table(rows, extraction_type or ""),
                     "data": rows,
                     "caption": caption.get_text(strip=True) if caption else "",
+                    # JATS is structured markup, so there is no page to cite; the
+                    # table label is the citable unit instead.
+                    "page": None,
+                    "tier": "jats",
+                    "deterministic": True,
                 })
         return out
     except Exception as e:
@@ -4449,15 +5022,17 @@ def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str
                         found = page.extract_tables(text_settings) or []
                     except Exception:
                         found = []
-                # pdfplumber (text-layer) tables on this page
-                page_tables: List[List[List[str]]] = []
+                # pdfplumber (text-layer) tables on this page. Each entry carries
+                # the strategy that produced it, because the UI states which tier
+                # a number came from and the two differ in fidelity.
+                page_tables: List[Tuple[List[List[str]], str]] = []
                 for t in found:
                     rows = [
                         [(c or "").strip() for c in row]
                         for row in t if any((c or "").strip() for c in row)
                     ]
                     if _table_is_real(rows):
-                        page_tables.append(rows)
+                        page_tables.append((rows, "pdfplumber"))
                 # Image-based recognition runs on EVERY page (when enabled), and its
                 # result is added only if it isn't already one of pdfplumber's tables
                 # for this page. This catches image-only / scanned / complex-spanning
@@ -4466,17 +5041,22 @@ def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str
                     try:
                         page_img = page.to_image(resolution=150).original
                         irows = _tabrec.recognize_table_image(page_img)
-                        if irows and _table_is_real(irows) and not any(_rows_similar(irows, r) for r in page_tables):
-                            page_tables.append(irows)
+                        if irows and _table_is_real(irows) and not any(_rows_similar(irows, r) for r, _ in page_tables):
+                            page_tables.append((irows, "unitable"))
                     except Exception as _e:
                         print(f"[extract_pdf_tables] unitable pass: {_e}")
-                for rows in page_tables:
+                for rows, tier in page_tables:
                     idx += 1
                     out.append({
                         "title": f"Table {idx}",
                         "type": _classify_table(rows, extraction_type or ""),
                         "data": rows,
                         "caption": "",
+                        # Provenance. page_number is 1-based, which is what a
+                        # reader sees on the page and what "p. 7" has to mean.
+                        "page": page.page_number,
+                        "tier": tier,
+                        "deterministic": True,
                     })
         return out
     except Exception as e:
@@ -4905,6 +5485,9 @@ def extract_tables(req: ExtractTablesRequest):
                     "type": _classify_table(rows, req.extraction_type or ""),
                     "data": rows,
                     "caption": t.get("caption", ""),
+                    "page": None,
+                    "tier": "llm",
+                    "deterministic": False,
                 })
             print(f"[extract_tables] {pid or 'no-id'} tier3 (LLM) -> {len(ai_tables or [])} tables (seed {len(seed)} chars)")
         except Exception as e:
@@ -5616,6 +6199,11 @@ class MetaExtractRequest(BaseModel):
     model: Optional[str] = None                  # LLM for extraction
     # Per-paper full text (paper_id → text), opt-in. If absent, abstract only.
     full_texts: Dict[str, str] = Field(default_factory=dict)
+    # Per-paper tables (paper_id → tables) the client already extracted. Effect
+    # sizes live in results tables, and PDF-derived prose loses their column
+    # structure, so passing these is the difference between reading the numbers
+    # and guessing at a run-on sentence.
+    tables: Dict[str, List[Dict[str, Any]]] = Field(default_factory=dict)
 
 
 @app.post("/api/meta/extract")
@@ -5629,10 +6217,11 @@ def meta_extract(req: MetaExtractRequest):
     def _one(p: PaperIn) -> Dict[str, Any]:
         d = p.dict() if hasattr(p, "dict") else dict(p.__dict__)
         ft = req.full_texts.get(str(d.get("id") or "")) or None
+        pid = str(d.get("id") or "")
         se = extract_effect_size(
             d, model_name=model_name,
             outcome_hint=req.outcome, measure_hint=req.measure,
-            full_text=ft,
+            full_text=ft, tables=req.tables.get(pid) or None,
         )
         return _ma_asdict(se)
 
@@ -5645,6 +6234,32 @@ def meta_extract(req: MetaExtractRequest):
             except Exception as e:
                 print(f"[meta_extract] worker error: {e}")
     return {"extractions": out, "model_used": model_name, "outcome": req.outcome}
+
+
+class MetaAskRequest(BaseModel):
+    """Ask one question about one paper and get a value back with its provenance."""
+    paper: Dict[str, Any]
+    question: str
+    full_text: Optional[str] = None
+    tables: Optional[List[Dict[str, Any]]] = None
+    model: Optional[str] = None
+
+
+@app.post("/api/meta/ask")
+def meta_ask(req: MetaAskRequest):
+    """Grounded question answering over a single paper.
+
+    Uses the thinking model, not LEADS: LEADS is fine-tuned for screening
+    verdicts and does not do numerical extraction."""
+    from meta_analysis import answer_grounded
+
+    return answer_grounded(
+        req.paper,
+        req.question,
+        model_name=resolve_for_thinking(req.model),
+        full_text=req.full_text,
+        tables=req.tables,
+    )
 
 
 class MetaPoolRequest(BaseModel):
@@ -5686,10 +6301,32 @@ def _hydrate_studies(rows: List[Dict[str, Any]]) -> List[StudyEffect]:
     return out
 
 
+def _json_safe(obj: Any) -> Any:
+    """Replace non-finite floats with None, recursively.
+
+    Statistics legitimately produce NaN and infinity: a p-value with zero
+    degrees of freedom, a z-score with zero standard error, a between-group Q
+    with one group. FastAPI serialises with the strict JSON encoder, which
+    rejects all three, so a single undefined statistic buried anywhere in the
+    response turns the whole analysis into a 500 and the user sees "Analysis
+    failed" with no hint which of a dozen sub-analyses was at fault.
+
+    Undefined is information, not an error. It travels as null.
+    """
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
+
+
 @app.post("/api/meta/pool")
 def meta_pool(req: MetaPoolRequest):
     studies = _hydrate_studies(req.extractions)
-    return _ma_pool(studies, tau2_method=req.tau2_method, use_knapp_hartung=req.use_knapp_hartung)
+    return _json_safe(_ma_pool(studies, tau2_method=req.tau2_method,
+                               use_knapp_hartung=req.use_knapp_hartung))
 
 
 class MetaAnalysisRunRequest(BaseModel):
@@ -5704,7 +6341,10 @@ class MetaAnalysisRunRequest(BaseModel):
 @app.post("/api/meta/run")
 def meta_run(req: MetaAnalysisRunRequest):
     studies = _hydrate_studies(req.extractions)
-    return {
+    # Every sub-analysis is wrapped: one undefined statistic anywhere in here
+    # used to fail the serialisation of the entire response, so a run that
+    # succeeded in nine of nine analyses still reached the user as a 500.
+    return _json_safe({
         "pool": _ma_pool(studies, tau2_method=req.tau2_method, use_knapp_hartung=req.use_knapp_hartung),
         "subgroup": _ma_subgroup(studies, tau2_method=req.tau2_method),
         "leave_one_out": _ma_loo(studies, tau2_method=req.tau2_method),
@@ -5714,7 +6354,7 @@ def meta_run(req: MetaAnalysisRunRequest):
         "begg": _ma_begg(studies),
         "trim_fill": _ma_trim_fill(studies, tau2_method=req.tau2_method),
         "meta_regression": _ma_metareg(studies, tau2_method=req.tau2_method),
-    }
+    })
 
 
 # ── Writing assistant ──────────────────────────────────────────────────────────

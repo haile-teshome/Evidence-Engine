@@ -20,9 +20,14 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
 import {
   FileDown, CheckCircle2, AlertTriangle, ExternalLink, RefreshCcw, Upload, FileUp, FileText, X, Search,
-  BookOpen, Code2, FileType2, FileSearch, Clock, Copy,
+  BookOpen, Code2, FileType2, FileSearch, Clock, Copy, ChevronDown, Library,
 } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
+import { openUrlFor } from "../lib/dbKeys";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
+  DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
+} from "../components/ui/dropdown-menu";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
@@ -336,25 +341,91 @@ export function AcquisitionPage() {
 
   /** Everything a request form or a librarian needs, for every paper we could
    *  not download. Most of a clinical corpus is paywalled, so finishing the
-   *  acquisition step is a manual job and this is the handoff for it. */
-  function exportMissing() {
-    const rows = records.filter(r => r.status === "missing");
+   *  acquisition step is a manual job and this is the handoff for it.
+   *
+   *  Two formats because the two consumers differ: a librarian or a
+   *  spreadsheet wants CSV, while every interlibrary-loan and reference
+   *  manager (ILLiad, Tipasa, RapidILL, EndNote, Zotero) ingests RIS. */
+  function missingRows(): FullTextRecord[] {
+    return records.filter(r => r.status === "missing");
+  }
+
+  /** Bibliographic detail lives on the search record, not the acquisition
+   *  record, so pull author and year back across for the export. */
+  function bibFor(id: string): { authors: string; year: string } {
+    const p = (s.uniquePapers || []).find(x => x.id === id);
+    return { authors: p?.authors || "", year: p?.year ? String(p.year) : "" };
+  }
+
+  /** A link to the copy this library is entitled to, or "" when no resolver is
+   *  configured. LibKey, when the library subscribes, names the actual file and
+   *  so wins; otherwise the OpenURL resolver answers from the catalogue. */
+  function libraryLinkFor(r: FullTextRecord): string {
+    if (r.links?.libkey) return r.links.libkey;
+    return openUrlFor({ doi: r.doi, pmid: r.pmid, title: r.title, year: bibFor(r.paper_id).year });
+  }
+
+  function download(name: string, body: string, mime: string) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([body], { type: mime }));
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  const stamp = () => new Date().toISOString().slice(0, 10);
+
+  function exportMissingCsv() {
+    const rows = missingRows();
     if (!rows.length) { toast.info("Nothing missing."); return; }
     const esc = (v: string) => `"${String(v ?? "").replace(/"/g, '""')}"`;
     const csv = [
-      ["Title", "DOI", "PMID", "Why missing", "DOI link", "PubMed link"].join(","),
-      ...rows.map(r => [
-        esc(r.title), esc(r.doi || ""), esc(r.pmid || ""), esc(r.reason || ""),
-        esc(r.links?.doi || (r.doi ? `https://doi.org/${r.doi}` : "")),
-        esc(r.links?.pubmed || ""),
-      ].join(",")),
+      ["Title", "Authors", "Year", "Source", "DOI", "PMID", "Why missing",
+       "Library link", "DOI link", "PubMed link"].join(","),
+      ...rows.map(r => {
+        const b = bibFor(r.paper_id);
+        return [
+          esc(r.title), esc(b.authors), esc(b.year), esc(r.source || ""),
+          esc(r.doi || ""), esc(r.pmid || ""), esc(r.reason || ""),
+          esc(libraryLinkFor(r)),
+          esc(r.links?.doi || (r.doi ? `https://doi.org/${r.doi}` : "")),
+          esc(r.links?.pubmed || ""),
+        ].join(",");
+      }),
     ].join("\n");
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-    a.download = `missing-full-texts-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-    toast.success(`Exported ${rows.length} missing records`);
+    download(`missing-full-texts-${stamp()}.csv`, csv, "text/csv;charset=utf-8");
+    toast.success(`Exported ${rows.length} missing records as CSV`);
+  }
+
+  function exportMissingRis() {
+    const rows = missingRows();
+    if (!rows.length) { toast.info("Nothing missing."); return; }
+    // RIS is line-oriented with a two-letter tag, two spaces, a hyphen, a
+    // space. Each author needs its own AU line, and ER must close every record.
+    const ris = rows.map(r => {
+      const b = bibFor(r.paper_id);
+      const lines: string[] = ["TY  - JOUR", `TI  - ${r.title}`];
+      for (const a of b.authors.split(/;|,(?=\s*[A-Z])/).map(x => x.trim()).filter(Boolean)) {
+        lines.push(`AU  - ${a}`);
+      }
+      if (b.year) lines.push(`PY  - ${b.year}`);
+      if (r.doi) lines.push(`DO  - ${r.doi}`);
+      if (r.pmid) lines.push(`AN  - ${r.pmid}`);
+      if (r.source) lines.push(`DB  - ${r.source}`);
+      // UR is what an ILL form and a reference manager follow, so the entitled
+      // copy goes there when there is one; the publisher link is the fallback.
+      const link = libraryLinkFor(r) || r.links?.doi || (r.doi ? `https://doi.org/${r.doi}` : "") || r.url || "";
+      if (link) lines.push(`UR  - ${link}`);
+      const publisher = r.links?.doi || (r.doi ? `https://doi.org/${r.doi}` : "");
+      if (publisher && publisher !== link) lines.push(`L2  - ${publisher}`);
+      // The reason rides along so whoever fills the request knows why it was
+      // escalated to them rather than having to rediscover it.
+      if (r.reason) lines.push(`N1  - Full text not retrievable: ${r.reason}`);
+      lines.push("ER  - ");
+      return lines.join("\r\n");
+    }).join("\r\n\r\n") + "\r\n";
+    download(`missing-full-texts-${stamp()}.ris`, ris, "application/x-research-info-systems");
+    toast.success(`Exported ${rows.length} missing records as RIS`);
   }
 
   async function copyMissingIds() {
@@ -381,9 +452,12 @@ export function AcquisitionPage() {
         stats={<>
           <InlineStat icon={FileText} value={included.length} label="Included" />
           <PaneDivider />
-          <InlineStat icon={CheckCircle2} tone="success" value={found} label="Acquired" hint={included.length ? `${Math.round((found / included.length) * 100)}%` : undefined} />
+          <InlineStat icon={CheckCircle2} tone="success" value={found} label="Acquired" />
           <InlineStat icon={AlertTriangle} tone="amber" value={missing} label="Missing" />
-          <InlineStat icon={Clock} tone="neutral" value={pending} label="Not fetched" />
+          {/* Only once there is something still to fetch. A standing "0 Not
+              fetched" crowded the row hard enough to clip its own label, and
+              said nothing: Included minus Acquired minus Missing is already 0. */}
+          {pending > 0 && <InlineStat icon={Clock} tone="neutral" value={pending} label="Not fetched" />}
         </>}
         actions={<>
           {running ? (
@@ -409,10 +483,36 @@ export function AcquisitionPage() {
                 title="Copy every missing DOI / PMID, one per line, to paste into an interlibrary loan request">
                 <Copy className="size-3.5 mr-1.5" />Copy IDs
               </Button>
-              <Button size="sm" variant="outline" className="h-8" onClick={exportMissing}
-                title="Download the missing list as CSV, with links and the reason each one failed">
-                <FileDown className="size-3.5 mr-1.5" />Export missing
-              </Button>
+              {/* One control, two formats. Which one you want depends on where
+                  the list is going, so the choice belongs in the menu rather
+                  than as two buttons competing for the same slot. */}
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button size="sm" variant="outline" className="h-8"
+                    title="Download the missing list, with links and the reason each one failed">
+                    <FileDown className="size-3.5 mr-1.5" />Export
+                    <ChevronDown className="size-3.5 ml-1 opacity-60" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-72">
+                  <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                    {missing} missing {missing === 1 ? "record" : "records"}
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={exportMissingCsv} className="flex-col items-start gap-0.5 py-2">
+                    <span className="font-medium">CSV</span>
+                    <span className="text-xs text-muted-foreground">
+                      A spreadsheet for you or a librarian
+                    </span>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={exportMissingRis} className="flex-col items-start gap-0.5 py-2">
+                    <span className="font-medium">RIS</span>
+                    <span className="text-xs text-muted-foreground">
+                      Imports into interlibrary loan and reference managers
+                    </span>
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </>
           )}
           <Button size="sm" variant="outline" className="h-8" onClick={() => setBulkOpen(true)}>
@@ -481,12 +581,29 @@ export function AcquisitionPage() {
                 {selected.status === "missing" && (
                   <div className="rounded-md border border-amber-200 bg-amber-50/60 p-2.5 space-y-2">
                     <div className="text-xs text-amber-900">
+                      {/* The reason from the server already names the route in
+                          for a paywalled record, so the old suffix here just
+                          said it twice. Only add what the reason leaves out. */}
                       {selected.reason || "Could not be retrieved automatically."}
-                      {selected.reason_code === "paywalled" && " Your library or an interlibrary loan request is the way in."}
                       {selected.reason_code === "oa_blocked" && " The file is free, so opening the publisher page by hand usually works."}
                     </div>
                     <div className="flex items-center gap-3 flex-wrap text-xs">
                       <span className="text-amber-900/70">Get it from:</span>
+                      {/* The entitled copy first. For a paywalled record the
+                          publisher link is a dead end and this one is not, so
+                          it leads rather than trails the row. LibKey names the
+                          file directly; the resolver answers the same question
+                          from the library's own catalogue. */}
+                      {selected.links?.libkey && (
+                        <a href={selected.links.libkey} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
+                          <Library className="size-3" />Your library (PDF)
+                        </a>
+                      )}
+                      {!selected.links?.libkey && libraryLinkFor(selected) && (
+                        <a href={libraryLinkFor(selected)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
+                          <Library className="size-3" />Your library
+                        </a>
+                      )}
                       {selected.links?.doi && (
                         <a href={selected.links.doi} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
                           <ExternalLink className="size-3" />Publisher
@@ -505,7 +622,7 @@ export function AcquisitionPage() {
                       {selected.doi && (
                         <button
                           onClick={() => { navigator.clipboard?.writeText(selected.doi!); toast.success("DOI copied"); }}
-                          className="inline-flex items-center gap-1 text-primary hover:underline"
+                          className="inline-flex items-center gap-1 text-xs font-normal text-primary hover:underline"
                         >
                           <Copy className="size-3" />Copy DOI
                         </button>
