@@ -1,18 +1,16 @@
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
-import { useStore } from "../lib/store";
-import { AIService, ScreenResult, Paper } from "../lib/mockServices";
+import { useStore, type SnowballSort, type SnowballPlan } from "../lib/store";
+import { AIService, ScreenResult, Paper, DataAggregator } from "../lib/mockServices";
 import { effectiveFullTextDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
+import { Popover, PopoverTrigger, PopoverContent } from "../components/ui/popover";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
 import { Checkbox } from "../components/ui/checkbox";
 import { Input } from "../components/ui/input";
-import {
-  Network, Plus, Minus, Trash2, Search, Sparkles, FileText, ArrowDownLeft, ArrowUpRight,
-  CheckCircle2, XCircle, ExternalLink, Layers, ChevronDown, ChevronsDownUp, ChevronsUpDown, FlaskConical,
-} from "lucide-react";
+import { Network, Plus, Minus, Trash2, Search, Sparkles, FileText, ArrowDownLeft, ArrowUpRight, CheckCircle2, XCircle, ExternalLink, Layers, ChevronDown, ChevronsDownUp, ChevronsUpDown, FlaskConical, SlidersHorizontal, Check } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -30,10 +28,110 @@ const DIRECTIONS: { value: SnowballType; label: string }[] = [
 // (as a fallback when none passed) the whole uploaded/searched corpus.
 type SnowballSeed = { paper_id: string; Title: string; Abstract: string; URL: string };
 
+/** What the last snowball run found, and the rule that decided what survived. */
+export function SnowballProvenance({ plan }: { plan: SnowballPlan | null }) {
+  if (!plan || !plan.seeds.length) return null;
+  const available = plan.seeds.reduce((a, x) => a + x.available, 0);
+  const kept = plan.seeds.reduce((a, x) => a + x.kept, 0);
+  const capped = plan.seeds.filter(x => x.kept < x.available);
+  const atCeiling = plan.seeds.filter(x => plan.ceiling > 0 && x.fetched >= plan.ceiling);
+  const rule = SORT_LABEL[plan.sort] ?? plan.sort;
+
+  return (
+    <Card className="p-0 overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-muted/10">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Citations kept
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          run of {new Date(plan.ranAt).toLocaleString()}
+        </span>
+      </div>
+      <div className="px-4 py-3 text-xs space-y-1.5">
+        <div>
+          <span className="font-medium tabular-nums">{kept.toLocaleString()}</span> kept from{" "}
+          <span className="font-medium tabular-nums">{available.toLocaleString()}</span> found across{" "}
+          {plan.seeds.length.toLocaleString()} seed{plan.seeds.length === 1 ? "" : "s"}, keeping the{" "}
+          <span className="font-medium">{rule.toLowerCase()}</span> up to {plan.maxPerSeed} per seed.
+        </div>
+        {capped.length > 0 && (
+          <div className="text-amber-600">
+            {capped.length.toLocaleString()} seed{capped.length === 1 ? "" : "s"} had more than the cap, so{" "}
+            {(available - kept).toLocaleString()} citation{available - kept === 1 ? " was" : "s were"} not taken.
+            Raise Max to include them.
+          </div>
+        )}
+        {atCeiling.length > 0 && (
+          <div className="text-amber-600">
+            {atCeiling.length.toLocaleString()} seed{atCeiling.length === 1 ? "" : "s"} hit the{" "}
+            {plan.ceiling.toLocaleString()}-per-source fetch ceiling, so even the pool they were
+            chosen from is incomplete.
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/** The short form for the trigger button, where space is tight. */
+const SORT_SHORT: Record<SnowballSort, string> = {
+  relevance: "closest first",
+  cited: "most cited",
+  recent: "most recent",
+  source: "source order",
+};
+
+const SORT_OPTIONS: { value: SnowballSort; label: string; help: string }[] = [
+  { value: "relevance", label: "Closest to your question", help: "Ranked against your PICO, once across every seed" },
+  { value: "cited", label: "Most cited", help: "Highest citation count first" },
+  { value: "recent", label: "Most recent", help: "Newest publication year first" },
+  { value: "source", label: "Source order", help: "Whatever order the database returned" },
+];
+
+const SORT_LABEL: Record<SnowballSort, string> = {
+  relevance: "Closest to your question",
+  cited: "Most cited",
+  recent: "Most recent",
+  source: "Source order",
+};
+
+/** One row per title. Snowballing reaches the same paper from many seeds. */
+function dedupeByTitle(rows: any[]): any[] {
+  const seen = new Set<string>();
+  return rows.filter(p => {
+    const k = (p.title || "").toLowerCase();
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/** Which citations survive the per-seed cap.
+ *
+ *  "source" preserves what the API returned, which is what the app used to do
+ *  implicitly; the others state a rule the write-up can name. Ties and missing
+ *  values fall back to the source order rather than shuffling, so a run is
+ *  reproducible.
+ */
+export function sortCitations(rows: any[], sort: SnowballSort, scores?: Map<string, number> | null): any[] {
+  if (sort === "source") return rows;
+  const key = (p: any): number => {
+    if (sort === "relevance") return scores?.get((p.title || "").toLowerCase()) ?? -Infinity;
+    if (sort === "cited") return typeof p.cited_by_count === "number" ? p.cited_by_count : -Infinity;
+    return typeof p.year === "number" ? p.year : -Infinity;      // "recent"
+  };
+  // A stable sort on the index keeps equal keys in the order the source gave.
+  return rows
+    .map((p, i) => ({ p, i, k: key(p) }))
+    .sort((a, b) => (b.k - a.k) || (a.i - b.i))
+    .map(x => x.p);
+}
+
 export function SnowballPage() {
   const s = useStore();
   const [type, setType] = useState<SnowballType>("Both");
   const [maxCit, setMaxCit] = useState(20);
+  const [sort, setSort] = useState<SnowballSort>("relevance");
   // null = "All seeds"; otherwise the seed paper title whose citations are shown.
   const [selectedSeed, setSelectedSeed] = useState<string | null>(null);
   const [q, setQ] = useState("");
@@ -96,7 +194,7 @@ export function SnowballPage() {
     .map(r => ({ paper_id: r.paper_id, Title: r.Title, Abstract: r.Abstract, URL: r.URL }));
 
   if (seeds.length === 0) {
-    return <EmptyState icon={FlaskConical} title="No kept full-text studies yet" description="Keep at least one study at Full-Text Evidence (include it, or check its Keep box). Snowballing expands from the kept studies." action={{ label: "Go to Full-Text Evidence", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
+    return <EmptyState icon={FlaskConical} title="No kept full-text studies yet" description="Keep at least one study at Full-Text Screening (include it, or check its Keep box). Snowballing expands from the kept studies." action={{ label: "Go to Full-Text Screening", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
   }
 
   async function start() {
@@ -107,7 +205,12 @@ export function SnowballPage() {
     s.setSnowballSeeds(seeds.map(x => x.Title));
     const signal = abort.signal;
     try {
-      const all: any[] = [];
+      // Gather the WHOLE reference / citation list per seed, then rank and
+      // truncate here. Letting each API decide by returning page one meant
+      // keeping the papers printed first in a bibliography, which skew to
+      // introduction and background rather than to the closest work.
+      const perSeed: { title: string; rows: any[]; available: number }[] = [];
+      let ceiling = 0;
       for (let i = 0; i < seeds.length; i++) {
         if (signal.aborted) break;
         const seed = seeds[i];
@@ -116,17 +219,61 @@ export function SnowballPage() {
           detail: seed.Title.slice(0, 80),
         });
         try {
-          const cits = await AIService.fetchCitations(seed.Title, type, maxCit, s.sources, signal);
-          cits.forEach(c => { c.seed_paper_title = seed.Title; });
-          all.push(...cits);
+          const haul = await AIService.fetchCitations(seed.Title, type, maxCit, s.sources, signal);
+          haul.citations.forEach(c => { c.seed_paper_title = seed.Title; });
+          perSeed.push({ title: seed.Title, rows: haul.citations, available: haul.totalAvailable });
+          ceiling = haul.ceiling || ceiling;
         } catch (e: any) {
           if (signal.aborted) break;
           console.error(`snowball ${i + 1} failed:`, e?.message);
+          perSeed.push({ title: seed.Title, rows: [], available: 0 });
         }
         s.updateTask("snowball", { progress: { done: i + 1, total: seeds.length } });
       }
-      const seenT = new Set<string>();
-      const unique = all.filter(p => seenT.has((p.title || "").toLowerCase()) ? false : (seenT.add((p.title || "").toLowerCase()), true));
+
+      // Relevance is the only ordering that needs the model, and it runs ONCE
+      // over the pooled set rather than per seed: the same paper deserves the
+      // same score whichever seed reached it, and one pass is one model call
+      // instead of ninety-five.
+      let scores: Map<string, number> | null = null;
+      if (sort === "relevance" && !signal.aborted) {
+        const pool = dedupeByTitle(perSeed.flatMap(x => x.rows));
+        if (pool.length) {
+          s.updateTask("snowball", {
+            detail: `Ranking ${pool.length.toLocaleString()} citations against your question…`,
+            stages: [{ id: "snow", label: "Ranking by relevance", status: "running" }],
+          });
+          try {
+            const res = await DataAggregator.rerankByRelevance(
+              pool.map(p => ({ id: p.id, title: p.title, abstract: p.abstract || "", source: p.source, url: p.url })) as any,
+              s.pico, s.inclusion, s.exclusion, -1, undefined, signal,
+            );
+            scores = new Map(res.ranked.map(r => [(r.paper.title || "").toLowerCase(), r.leads_score]));
+          } catch (e: any) {
+            // A ranking failure must not lose the citations themselves.
+            console.error("snowball ranking failed:", e?.message);
+            toast.warning("Could not rank by relevance; kept the source order instead.");
+          }
+        }
+      }
+
+      const kept = perSeed.map(seed => ({
+        ...seed,
+        rows: sortCitations(seed.rows, sort, scores).slice(0, maxCit),
+      }));
+      const all = kept.flatMap(x => x.rows);
+      const unique = dedupeByTitle(all);
+
+      // Write down what was found against what was taken. Without this the
+      // search cannot be reproduced from what the app records.
+      s.setSnowballPlan({
+        sort, maxPerSeed: maxCit, direction: type, sources: [...s.sources],
+        seeds: kept.map((k, i) => ({
+          title: k.title, available: perSeed[i].available,
+          fetched: perSeed[i].rows.length, kept: k.rows.length,
+        })),
+        ceiling, ranAt: new Date().toISOString(),
+      });
       if (signal.aborted) {
         // Save partial progress: merge the citations gathered this run into the
         // existing set (dedup by title) and keep the current selection.
@@ -141,7 +288,13 @@ export function SnowballPage() {
       s.setSnowballResults(unique);
       s.setSnowballChosen(null);   // fresh citations → re-seed selection from the next screening pass
       s.updateTask("snowball", { status: "done" });
-      toast.success(`Found ${unique.length} unique articles via snowballing`);
+      const totalAvailable = perSeed.reduce((a, x) => a + x.available, 0);
+      const dropped = totalAvailable - all.length;
+      toast.success(
+        dropped > 0
+          ? `${unique.length.toLocaleString()} unique articles kept, out of ${totalAvailable.toLocaleString()} found`
+          : `Found ${unique.length.toLocaleString()} unique articles via snowballing`,
+      );
     } catch (e: any) {
       s.updateTask("snowball", { status: "error", detail: e?.message });
     }
@@ -312,6 +465,11 @@ export function SnowballPage() {
   return (
     <div className="space-y-3">
       {/* ── Compact header: stats + controls + run ─────────────────────────── */}
+      {/* What the pull found against what it kept. A seed with 85 references
+          capped at 20 loses 65, and that was invisible: the search could not be
+          reproduced from anything the app recorded. */}
+      <SnowballProvenance plan={s.snowballPlan} />
+
       <ControlPane
         singleLine
         stats={<>
@@ -344,38 +502,72 @@ export function SnowballPage() {
                 </button>
               ))}
             </div>
-            <div className="h-5 w-px bg-border mx-1" />
-            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Max</span>
-            <div className="inline-flex h-7 items-center rounded-md border bg-background">
-              <button
-                onClick={() => setMaxCit(m => Math.max(5, m - 5))}
-                className="px-1.5 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
-                disabled={maxCit <= 5}
-                aria-label="Decrease"
-              >
-                <Minus className="size-3.5" />
-              </button>
-              <input
-                type="number"
-                value={maxCit}
-                min={1}
-                max={500}
-                onChange={e => {
-                  const n = parseInt(e.target.value, 10);
-                  setMaxCit(Number.isNaN(n) ? 1 : Math.min(500, Math.max(1, n)));
-                }}
-                className="w-9 h-full text-center text-sm font-semibold tabular-nums bg-transparent border-x outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-              />
-              <button
-                onClick={() => setMaxCit(m => Math.min(500, m + 5))}
-                className="px-1.5 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
-                disabled={maxCit >= 500}
-                aria-label="Increase"
-              >
-                <Plus className="size-3.5" />
-              </button>
-            </div>
           </div>
+
+          {/* Keep and Max both answer one question, "what survives the cap", so
+              they live together behind one control. Inline they made a toolbar
+              of three labelled groups that left no room for the run button. */}
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" size="sm" className="h-9 shadow-sm font-normal"
+                      title="Choose how many citations to keep per seed, and which ones">
+                <SlidersHorizontal className="size-3.5 mr-1.5" />
+                {maxCit} per seed
+                <span className="text-muted-foreground ml-1.5">· {SORT_SHORT[sort]}</span>
+                <ChevronDown className="size-3.5 ml-1 opacity-60" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80 p-0">
+              <div className="px-3.5 py-3 border-b">
+                <div className="text-xs font-semibold">Keep per seed</div>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  Every reference and citation is fetched. This decides which are kept
+                  when a seed has more than the cap, and the run records which rule was used.
+                </p>
+              </div>
+              <div className="p-1.5">
+                {SORT_OPTIONS.map(o => (
+                  <button
+                    key={o.value}
+                    onClick={() => setSort(o.value)}
+                    className={`w-full text-left rounded-md px-2.5 py-2 transition-colors ${
+                      sort === o.value ? "bg-primary/10" : "hover:bg-muted"}`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {sort === o.value
+                        ? <Check className="size-3.5 text-primary shrink-0" />
+                        : <span className="size-3.5 shrink-0" />}
+                      <span className="text-xs font-medium">{o.label}</span>
+                    </div>
+                    <div className="pl-5.5 text-[11px] text-muted-foreground">{o.help}</div>
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center justify-between gap-2 border-t px-3.5 py-2.5">
+                <span className="text-xs font-medium">Maximum per seed</span>
+                <div className="inline-flex h-7 items-center rounded-md border bg-background">
+                  <button onClick={() => setMaxCit(m => Math.max(5, m - 5))}
+                          className="px-1.5 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
+                          disabled={maxCit <= 5} aria-label="Decrease">
+                    <Minus className="size-3.5" />
+                  </button>
+                  <input
+                    type="number" value={maxCit} min={1} max={500}
+                    onChange={e => {
+                      const n = parseInt(e.target.value, 10);
+                      setMaxCit(Number.isNaN(n) ? 1 : Math.min(500, Math.max(1, n)));
+                    }}
+                    className="w-10 h-full text-center text-sm font-semibold tabular-nums bg-transparent border-x outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  />
+                  <button onClick={() => setMaxCit(m => Math.min(500, m + 5))}
+                          className="px-1.5 h-full text-muted-foreground hover:text-foreground disabled:opacity-40"
+                          disabled={maxCit >= 500} aria-label="Increase">
+                    <Plus className="size-3.5" />
+                  </button>
+                </div>
+              </div>
+            </PopoverContent>
+          </Popover>
           {running ? (
             <Button size="sm" variant="destructive" className="h-9 shadow-sm" onClick={() => s.cancelTask("snowball")}>
               <XCircle className="size-3.5 mr-1.5" />Cancel
