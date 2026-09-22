@@ -290,6 +290,36 @@ function SummaryText({ text, onCite }: { text: string; onCite?: (n: number) => v
   );
 }
 
+/** Write clarifying answers back into the elements they were asked about.
+ *
+ *  Clarifying questions carry the element id they clarify ("population",
+ *  "concept", …). Their answers used to be appended to the inference prompt as
+ *  prose and nothing more, leaving the model to re-derive the element from
+ *  them. When it declined, the card read "None specified" for something the
+ *  reviewer had just been asked and had just answered, which reads as the app
+ *  having ignored them.
+ *
+ *  Only EMPTY elements are filled. A populated one is the model's
+ *  operationalised version of the same answer ("adults aged 18 and over with
+ *  type 2 diabetes" against a picked "adults"), and that is the more useful
+ *  text to search and screen with. */
+export function applyClarifyAnswers<T extends Record<string, any>>(
+  pico: T,
+  answers: Record<string, string>,
+): T {
+  const FIELDS = ["population", "intervention", "comparator", "outcome", "concept", "context"];
+  let out = pico;
+  for (const [qid, answer] of Object.entries(answers || {})) {
+    const field = qid.toLowerCase().trim();
+    const value = (answer || "").trim();
+    if (!FIELDS.includes(field) || !value) continue;
+    if (!String(out[field] ?? "").trim()) {
+      out = { ...out, [field]: value };
+    }
+  }
+  return out;
+}
+
 const INITIAL_STAGES: Stage[] = [
   // Four phases: frame the question (pico + formal question), build the search
   // (MeSH string + adversarial variant), retrieve (fetch + score), then scope
@@ -1345,7 +1375,10 @@ export function HomePage() {
       if (signal.aborted || e?.name === "AbortError") {
         markStage(id, { status: "canceled" });
       } else {
-        markStage(id, { status: "error", detail: e?.message?.slice(0, 80) || "Failed" });
+        // 200, not 80: the backend's query-generation error is written for the
+        // reviewer and tells them what to do about it, and 80 characters cut it
+        // off mid-sentence.
+        markStage(id, { status: "error", detail: e?.message?.slice(0, 200) || "Failed" });
       }
       return null;
     }
@@ -1542,6 +1575,9 @@ export function HomePage() {
         population: analysis.p, intervention: analysis.i, comparator: analysis.c, outcome: analysis.o,
         concept: analysis.concept || "", context: analysis.context || "", framework: resolvedFw,
       };
+
+      newPico = applyClarifyAnswers(newPico, clarifyAnswers);
+
       s.setPico(newPico);
       s.setFramework(resolvedFw);
       s.setInclusion(analysis.inclusion);
@@ -1555,10 +1591,27 @@ export function HomePage() {
       // Build the search: always run the comprehensive, MeSH-grounded builder
       // (broadened by any seed studies) rather than the basic PICO string, then
       // derive the adversarial (counter-evidence) variant as a companion.
-      const built = await runGroundedBuild({ pico: newPico, question: formalQ || effectiveText, signal });
-      const groundedQuery = built?.query || analysis.query;
+      // Through runStage like every other step. Called directly, this one was
+      // only ever marked "done": it sat on "pending" for its whole duration, so
+      // nothing spun and the header fell back to "Preparing analysis…" with no
+      // indication which step was running. It is also the slowest step (the
+      // decomposition retries, then every concept's MeSH is validated against
+      // NCBI), so it is the one where silence is least affordable.
+      const built = await runStage("query", signal, sig =>
+        runGroundedBuild({ pico: newPico, question: formalQ || effectiveText, signal: sig }));
+      // No fallback here either. If the search could not be built, the only
+      // other query available is the rough PICO string from step 1, and
+      // quietly searching with THAT is the same failure in a different place:
+      // a real review runs to completion on a question nobody asked. The
+      // backend raises rather than inventing one, so the pipeline stops and
+      // the reviewer can reword.
+      if (!built?.query) {
+        const why = s.tasks["home-analysis"]?.stages.find(st => st.id === "query")?.detail;
+        throw new Error(why || "Could not build a search for this question. Try rewording it.");
+      }
+      const groundedQuery = built.query;
       analysis = { ...analysis, query: groundedQuery };
-      markStage("query", { status: "done", detail: groundedQuery ? groundedQuery.slice(0, 60) + "…" : undefined });
+      markStage("query", { detail: groundedQuery.slice(0, 60) + "…" });
       const adv = await runStage("adversarial", signal, sig => AIService.generateAdversarialQuery(newPico, sig));
 
       // ── Pre-search review gate ──────────────────────────────────────────
@@ -1687,6 +1740,9 @@ export function HomePage() {
       s.updateTask("home-analysis", { status: "done" });
     } catch (e: any) {
       s.updateTask("home-analysis", { status: "error", detail: e?.message });
+      // Surface it. The task card shows the failed step, but the reviewer is
+      // often scrolled elsewhere during a run that takes minutes.
+      toast.error(e?.message?.slice(0, 200) || "Analysis failed.");
     }
   }
 

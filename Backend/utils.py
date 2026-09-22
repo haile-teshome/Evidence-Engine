@@ -1,4 +1,5 @@
 import re
+import json as _json
 import os
 import json
 from typing import List, Dict, Any, Tuple, Optional, Callable
@@ -14,6 +15,15 @@ from config import Config
 from models import Paper, PICOCriteria, ScreeningResult
 
 # utils.py
+
+class QueryGenerationError(RuntimeError):
+    """Raised when a search query cannot be built for a question.
+
+    Deliberately an exception rather than a degraded return value: every silent
+    fallback this code has had produced a query that looked fine and searched
+    for the wrong thing, which costs far more than a visible failure.
+    """
+
 
 class AIService:
     @staticmethod
@@ -75,12 +85,20 @@ class AIService:
         return (explicit or "").strip() or get_cred(provider) or keychain.get_key(provider) or env
 
     @staticmethod
-    def _build_model(model_name: str, keys: dict | None = None):
+    def _build_model(model_name: str, keys: dict | None = None, seed: int | None = None):
         """Construct a chat model for `model_name`. Cloud providers (gpt/claude/
         gemini) require a key from the request or environment; anything else runs
         locally via Ollama and needs no key. Returns None if a required cloud key
-        is missing, so callers surface an 'unavailable' message."""
+        is missing, so callers surface an 'unavailable' message.
+
+        `seed` overrides the run seed for this model only. Sampling is greedy
+        (temperature 0), so an identical prompt returns identical bytes: a retry
+        that changes nothing is guaranteed to fail the same way. Varying the
+        seed per attempt is what makes a retry a genuine second sample, and
+        deriving it from the attempt number keeps the whole sequence
+        reproducible."""
         keys = keys or {}
+        _seed = Config.RUN_SEED if seed is None else seed
         name_lower = (model_name or "").lower()
         ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         try:
@@ -89,7 +107,7 @@ class AIService:
                 if not key:
                     print("[get_model] OpenAI API key not provided for", model_name)
                     return None
-                return ChatOpenAI(model=model_name, api_key=key, temperature=0, seed=Config.RUN_SEED)
+                return ChatOpenAI(model=model_name, api_key=key, temperature=0, seed=_seed)
             if "claude" in name_lower:
                 key = AIService._cloud_key("anthropic", keys.get("anthropic", ""))
                 if not key:
@@ -112,7 +130,7 @@ class AIService:
             # default (2048 on most), which silently truncates long screening and
             # extraction prompts instead of erroring.
             return ChatOllama(model=model_name, temperature=0, base_url=ollama_base,
-                              seed=Config.RUN_SEED, num_predict=4096,
+                              seed=_seed, num_predict=4096,
                               num_ctx=Config.OLLAMA_NUM_CTX)
         except Exception as e:
             print(f"[get_model] AI connection error for {model_name}: {e}")
@@ -161,10 +179,10 @@ class AIService:
         return AIService._build_model(model_name, keys)
 
     @staticmethod
-    def get_model(model_name: str):
+    def get_model(model_name: str, seed: int | None = None):
         """Initialize a model. Cloud keys come from the user's per-request headers
         (stored only in their browser) or backend environment variables."""
-        return AIService._build_model(model_name, None)
+        return AIService._build_model(model_name, None, seed=seed)
 
     # @staticmethod
     # def _extract_json(text: str) -> Optional[Any]:
@@ -575,9 +593,18 @@ JSON shape:
         # Works for both PICO (intervention/comparator/outcome) and PCC
         # (concept/context); population is shared. Each populated field is raw
         # material the LLM decomposes into orthogonal concepts below.
+        # Context is deliberately NOT a source facet. The prompt already says
+        # "Do NOT invent concepts for setting, country, or year", and handing it
+        # the setting anyway contradicted that: asked for 6-15 synonyms of
+        # "Healthcare settings, global scope, 2010-present", the model had
+        # nothing real to list and degenerated into permutations -- "clinical
+        # settings", "hospital settings", "clinics settings", "health facilities
+        # settings", repeating until it blew the 4096-token output cap and the
+        # JSON was cut mid-string. 21,000 characters of garbage, no usable
+        # query, three minutes spent.
         raw_fields = [
             pico.intervention, getattr(pico, "concept", ""), pico.outcome,
-            getattr(pico, "context", ""), pico.population,
+            pico.population,
         ]
         field_desc: List[str] = []
         for val in raw_fields:
@@ -599,18 +626,33 @@ Review elements:
 
 Rules:
 - Identify 2 to 5 ORTHOGONAL concepts (distinct ideas that do not overlap).
-- Split any compound facet into SEPARATE concepts. For example "registries linking
-  both employment and education records" is THREE concepts: a "registry" concept,
-  an "employment" concept AND an "education" concept. Never merge two distinct
-  ideas into one list.
+- "AND" and "OR" in the question mean OPPOSITE things here. Read them carefully:
+  * "both X and Y" / "linking X and Y" / "X combined with Y" = X and Y are BOTH
+    REQUIRED. Give each its OWN concept. "registries linking both employment and
+    education records" is THREE concepts: registry, employment, education.
+  * "X or Y" / "X such as Y" / "X, including Y" = X and Y are ALTERNATIVES for the
+    SAME idea. Put them in ONE concept, listing both among its terms. "prediction
+    models or decision support tools" is ONE concept containing both phrasings.
+    Splitting alternatives into separate concepts requires a paper to be both at
+    once, which almost nothing is, and the search returns nothing.
+- Never merge two distinct ideas into one list, and never split one idea's
+  alternatives across two concepts.
+- EVERY distinctive noun the user wrote must appear in some concept. If the
+  question names a specific data type, domain, condition or population, it is
+  there because it narrows the search; dropping it returns a flood of papers
+  about the general case.
 - Give each SPECIFIC / discriminating idea (a named domain, condition, test, data
   type, or intervention) its own concept. Include a broad population concept
   (e.g. "adults", "patients") only if the review truly restricts to it, and keep it
   as its own concept. Do NOT invent concepts for setting, country, or year.
-- For each concept list 6 to 15 terms: the user's exact phrase(s) verbatim,
+- For each concept list 5 to 10 terms: the user's exact phrase(s) verbatim,
   singular/plural and hyphenation variants, British/American spellings, common
   abbreviations and their expansions, and closely related wording for the SAME
   idea. Stay on-concept; do not drift or over-broaden.
+- Never pad a list. If a concept has only three real synonyms, give three. Do NOT
+  invent variants by recombining words ("clinical settings", "hospital settings",
+  "health facilities settings"): they match nothing extra and crowd out the terms
+  that do.
 - Also give 1 to 4 MeSH controlled-vocabulary headings per concept when they exist.
 - Use plain terms only: NO field tags, NO Boolean operators, NO quotation marks.
 
@@ -657,21 +699,212 @@ Output ONLY the JSON object. No explanation, no markdown, no code fences."""
                     dedup.append(t)
             return dedup
 
-        concepts: List[Dict[str, Any]] = []
-        try:
-            r = model.invoke([HumanMessage(content=prompt)])
-            data = AIService._extract_json(r.content) or {}
-            for c in (data.get("concepts") or []):
-                if not isinstance(c, dict):
+        # Generic words that carry no discriminating power. A query that merely
+        # requires "model" or "patient" narrows nothing, so their absence from
+        # the decomposition is not a defect worth retrying over.
+        _GENERIC = {
+            "model", "models", "tool", "tools", "data", "record", "records", "system",
+            "systems", "study", "studies", "research", "patient", "patients", "adult",
+            "adults", "people", "person", "human", "humans", "health", "healthcare",
+            "care", "clinical", "medical", "setting", "settings", "global", "scope",
+            "using", "utilize", "utilizing", "containing", "both", "that", "which",
+            "with", "from", "into", "review", "reviews", "analysis", "based",
+            "prediction", "predictive", "support", "decision", "present",
+        }
+
+        def _uncovered_terms(fields: List[str], blocks: List[Dict[str, Any]]) -> List[str]:
+            """Distinctive words the user wrote that appear in NO concept.
+
+            "medical" and "dental" are both data types in the same phrase, but
+            only one of them is generic. Dropping "dental" turns a question about
+            linked dental records into a question about electronic health records
+            in general, which is a different review returning hundreds of
+            irrelevant papers. Checked in code because it is cheap and exact,
+            rather than trusting the model to have followed the instruction.
+            """
+            # Coverage means "has its own block", NOT "appears somewhere".
+            #
+            # Blocks are OR-ed internally and AND-ed together, so a term buried
+            # in another concept's synonym list constrains nothing: a paper
+            # matching any other term in that list satisfies the block without
+            # it. "dental" sitting inside the electronic-health-records block is
+            # exactly that, and it is why the search still returned general EHR
+            # papers after the term was nominally present. Only a block named
+            # for the term makes it required, so only names are matched here.
+            covered = " ".join((b.get("name") or "") for b in blocks).lower()
+            out: List[str] = []
+            for field in fields:
+                for w in re.findall(r"[A-Za-z][A-Za-z\-]{4,}", field or ""):
+                    lw = w.lower()
+                    if lw in _GENERIC or lw in out or lw in covered:
+                        continue
+                    out.append(lw)
+            return out[:6]
+
+        # Only the fields the search is ABOUT are checked for coverage.
+        # Outcome, context and POPULATION are excluded: the validated strategy
+        # drops broad outcome, study-design, setting and population facets
+        # because requiring them deletes true hits without narrowing scope, so a
+        # term missing from those is correct behaviour rather than an omission.
+        #
+        # Population was briefly included here and it broke the search. An
+        # inferred population of "any patients, any age, any comorbidity" made
+        # the guard demand a block for "comorbidity". The model correctly
+        # refused to build one, every retry was spent losing that argument, and
+        # the whole thing fell through to the keyword fallback: a minute of
+        # extra latency to produce a worse query than no guard at all.
+        coverage_fields = [
+            _strip_inferred_prefix(pico.intervention or ""),
+            _strip_inferred_prefix(getattr(pico, "concept", "") or ""),
+        ]
+
+        def _salvage_concepts(text: str) -> List[Dict[str, Any]]:
+            """Pull whole concept objects out of JSON that does not parse.
+
+            The model reliably produces GOOD concepts and then breaks the
+            document somewhere after them: one missing comma at character 2405
+            of a 4000-character reply. Handing that to json.loads discards four
+            correct concepts over a punctuation error, and the query falls back
+            to a keyword soup that searches for a different question.
+
+            Each {...} is balanced-scanned and parsed on its own, so a break
+            anywhere costs at most the object containing it.
+            """
+            out: List[Dict[str, Any]] = []
+            i = 0
+            while True:
+                start = text.find("{", i)
+                if start < 0:
+                    break
+                depth, in_str, esc, end = 0, False, False, -1
+                for j in range(start, len(text)):
+                    ch = text[j]
+                    if esc:
+                        esc = False
+                        continue
+                    if ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = not in_str
+                    elif not in_str:
+                        if ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                end = j
+                                break
+                if end < 0:
+                    # This object never closes (the reply was cut off). That is
+                    # true of the OUTER wrapper on every truncated response, so
+                    # stopping here would abandon the intact concept objects
+                    # nested inside it. Step past this brace and keep looking.
+                    i = start + 1
                     continue
-                name = str(c.get("name", "")).strip()
-                tiab = _clean_term_list(c.get("terms"))
-                mesh = _clean_term_list(c.get("mesh"))
-                if name or tiab or mesh:
-                    concepts.append({"name": name or (tiab[0] if tiab else "Concept"),
-                                     "tiab": tiab, "mesh": mesh})
-        except Exception as e:
-            print(f"Query concept decomposition error: {e}")
+                blob = text[start:end + 1]
+                i = end + 1
+                if '"terms"' not in blob and '"name"' not in blob:
+                    continue                      # the outer wrapper, not a concept
+                try:
+                    obj = _json.loads(blob)
+                    if isinstance(obj, dict) and (obj.get("name") or obj.get("terms")):
+                        out.append(obj)
+                except Exception:
+                    continue                      # this one object is lost, not all of them
+            return out
+
+        concepts: List[Dict[str, Any]] = []
+
+        # Retried until it works, with NO fallback query.
+        #
+        # There is no sensible generic query to fall back to. The questions this
+        # takes range from drug trials to scoping reviews of software tools, and
+        # a query assembled from whatever words survive a stopword filter is not
+        # a weaker search for the same question, it is a search for a different
+        # one. The version that existed here emitted
+        #   ("comorbidity" OR "prediction" OR "electronic" OR "healthcare" OR
+        #    "clinical" OR "decision" OR "patients" OR "settings")
+        # for a review about dental records: 15,580 PubMed hits, none relevant,
+        # and nothing on screen to suggest anything had gone wrong. Failing
+        # visibly is strictly better, because the reviewer can retry or reword,
+        # whereas a plausible wrong query is screened, acquired and written up.
+        #
+        # Each attempt must DIFFER to be worth making: sampling is greedy, so
+        # the same prompt and seed return the same bytes and the same failure.
+        # Both are varied. The seed is derived from the attempt number so the
+        # sequence stays reproducible.
+        _ATTEMPT_NOTES = [
+            "",
+            ("\n\nYour previous reply could not be used. Return STRICT, COMPACT JSON: "
+             "at most 4 concepts, at most 6 terms and 2 mesh headings each, no trailing "
+             "commas, no comments, nothing outside the JSON object."),
+            ("\n\nReturn the MINIMUM that answers the question: 2 to 4 concepts, 3 to 5 "
+             "terms each, mesh may be an empty list. Correctness of the concept split "
+             "matters far more than the number of synonyms."),
+            ("\n\nFinal attempt. Output ONLY this, on one line, with no prose: "
+             '{"concepts":[{"name":"...","terms":["..."],"mesh":[]}]} '
+             "Use 2 to 4 concepts and 3 terms each."),
+        ]
+
+        last_error = ""
+        for attempt, note in enumerate(_ATTEMPT_NOTES):
+            concepts = []
+            try:
+                m = AIService.get_model(model_name, seed=Config.RUN_SEED + attempt) or model
+                r = m.invoke([HumanMessage(content=prompt + note)])
+                data = AIService._extract_json(r.content) or {}
+                raw_concepts = data.get("concepts") or []
+                if not raw_concepts:
+                    raw_concepts = _salvage_concepts(str(r.content or ""))
+                    if raw_concepts:
+                        print(f"Query decomposition: salvaged {len(raw_concepts)} concepts "
+                              "from a malformed JSON reply.")
+                for c in raw_concepts:
+                    if not isinstance(c, dict):
+                        continue
+                    name = str(c.get("name", "")).strip()
+                    tiab = _clean_term_list(c.get("terms"))
+                    mesh = _clean_term_list(c.get("mesh"))
+                    if name or tiab or mesh:
+                        concepts.append({"name": name or (tiab[0] if tiab else "Concept"),
+                                         "tiab": tiab, "mesh": mesh})
+            except Exception as e:
+                last_error = str(e)
+                print(f"Query concept decomposition error (attempt {attempt + 1}): {e}")
+
+            if not concepts:
+                last_error = last_error or "no concepts returned"
+                print(f"Query decomposition attempt {attempt + 1} produced nothing; retrying.")
+                continue
+
+            missing = _uncovered_terms(coverage_fields, concepts)
+            if not missing:
+                break
+            # A distinctive word the user wrote has no concept of its own, so the
+            # search will not require it: the query still looks well-formed, it
+            # just describes a broader question. Name the omission and try again.
+            print(f"Query decomposition gave no block of its own to {missing}; retrying.")
+            last_error = f"dropped {', '.join(missing)}"
+            if attempt == len(_ATTEMPT_NOTES) - 1:
+                print("Adding the missing terms as their own concepts.")
+                for term in missing:
+                    concepts.append({"name": term.title(), "tiab": [term], "mesh": []})
+                break
+            prompt = (prompt + "\n\nYour previous attempt gave no concept of its own to: "
+                      f"{', '.join(missing)}. Each is discriminating and MUST be its own "
+                      "named concept, not a synonym inside another concept's term list: "
+                      "concepts are AND-ed, but terms within a concept are OR-ed, so a term "
+                      "listed inside another concept is not actually required by the search.")
+
+        if not concepts:
+            # Deliberately fatal. The caller marks the step failed and the
+            # reviewer sees it, instead of a search running on a query nobody
+            # wrote.
+            raise QueryGenerationError(
+                "Could not decompose this question into search concepts after "
+                f"{len(_ATTEMPT_NOTES)} attempts ({last_error}). Try rewording the "
+                "question, or shortening it to the core concepts."
+            )
 
         # ---- 2b. Ground MeSH against real NCBI controlled vocabulary ---------
         # Validate the model's headings (drop hallucinations via a token-overlap
@@ -790,12 +1023,13 @@ Output ONLY the JSON object. No explanation, no markdown, no code fences."""
         if blocks:
             return _ret(" AND ".join(blocks))
 
-        # ---- 4. Last-resort fallback -----------------------------------------
-        pop = (_strip_inferred_prefix(pico.population or "") or "adults").split()[:2]
-        intv = (_strip_inferred_prefix(pico.intervention or getattr(pico, "concept", "") or "") or "treatment").split()[:2]
-        pq = " OR ".join(f'"{t}"[tiab]' for t in pop)
-        iq = " OR ".join(f'"{t}"[tiab]' for t in intv)
-        return _ret(f"({pq}) AND ({iq})")
+        # No step 4. There is no fallback query: an unparseable decomposition
+        # raises above, so reaching here with no blocks would be a bug rather
+        # than a condition to paper over.
+        raise QueryGenerationError(
+            "The question decomposed into concepts, but none of them narrowed the "
+            "search. Add a specific population, intervention or concept."
+        )
 
     @staticmethod
     def generate_adversarial_query(pico: PICOCriteria, model_name: str) -> str:
@@ -1270,7 +1504,7 @@ Return ONLY JSON in this shape:
                 }
 
                 try:
-                    papers, _ = DataAggregator.fetch_all(
+                    papers, _, _ = DataAggregator.fetch_all(
                         query, [source], max_per_source=per_source_max, limit=per_source_max
                     )
                 except Exception as e:
@@ -3110,27 +3344,37 @@ OUTPUT FORMAT:
         return citations
         
 class Deduplicator:
+    """Bibliographic duplicate detection.
+
+    Runs the rule set benchmarked in the manuscript (dedup_rules.py: F1 0.994 on the five ASySD labelled sets,
+    0.987 with title and DOI alone). Keeps the first occurrence of a work and reports the later ones as duplicates.
+    """
+
     @staticmethod
     def normalize_text(text: str) -> str:
-        """Removes special characters and lowercases for fuzzy matching."""
+        """Letters and digits only, lower-cased (kept for callers that compare titles directly)."""
         if not text: return ""
         return re.sub(r'[^a-z0-9]', '', text.lower())
 
     @staticmethod
+    def as_record(p: Paper) -> Dict[str, str]:
+        from dedup_rules import doi_from_text
+        return {
+            "title": p.title or "",
+            "doi": doi_from_text(getattr(p, "doi", ""), p.id, p.url),
+            "year": getattr(p, "year", "") or "",
+            "authors": getattr(p, "authors", "") or "",
+            "journal": getattr(p, "journal", "") or "",
+            "pages": getattr(p, "pages", "") or "",
+        }
+
+    @staticmethod
     def run(papers: List[Paper]) -> Tuple[List[Paper], List[Paper]]:
         """Identifies unique papers and tracks duplicates."""
+        from dedup_rules import flag_duplicates
         unique, dups = [], []
-        seen_dois, seen_slugs = set(), set()
-        for p in papers:
-            doi = str(p.id).strip().lower()
-            slug = Deduplicator.normalize_text(p.title)
-            is_dup = (doi and doi != "n/a" and doi in seen_dois) or (slug in seen_slugs)
-            if not is_dup:
-                unique.append(p)
-                if doi and doi != "n/a": seen_dois.add(doi)
-                if slug: seen_slugs.add(slug)
-            else:
-                dups.append(p)
+        for p, is_dup in zip(papers, flag_duplicates(Deduplicator.as_record(p) for p in papers)):
+            (dups if is_dup else unique).append(p)
         return unique, dups
 
 class AITableExtractor:

@@ -10,6 +10,7 @@ a silent zero from an over-large page size).
 
 No network and no model: the LLM is stubbed and the transport is replaced.
 """
+import json
 import pytest
 
 import data_services as ds
@@ -99,6 +100,136 @@ class TestGenerateMeshQuery:
         assert "Adults" not in names
         assert len(concepts) == 2
 
+    def test_a_dropped_discriminating_term_is_added_back(self, monkeypatch):
+        """The failure this guard exists for.
+
+        A real question ("AI/ML models ... using EHRs containing both medical and
+        dental data") decomposed into AI/ML, EHR and *medical* data, silently
+        dropping "dental". The query stayed well-formed and returned 15,580
+        PubMed hits about prediction models in general instead of the 43 about
+        linked dental records. Nothing in the result revealed the omission, so
+        the check is made in code rather than left to the prompt.
+        """
+        calls = {"n": 0}
+
+        class Stub:
+            def invoke(self, _msgs):
+                calls["n"] += 1
+                # Always omits "dental", however many times it is asked.
+                return type("R", (), {"content": json.dumps({"concepts": [
+                    {"name": "AI/ML", "terms": ["machine learning"], "mesh": []},
+                    {"name": "Medical data", "terms": ["medical data"], "mesh": []},
+                ]})})()
+
+        monkeypatch.setattr(utils.AIService, "get_model", staticmethod(lambda *a, **k: Stub()))
+        pico = PICOCriteria(population="", intervention="", comparator="", outcome="")
+        pico.concept = "AI/ML models using records containing both medical and dental data"
+        q, concepts = utils.AIService.generate_mesh_query(pico, "m", return_concepts=True)
+
+        assert "dental" in q.lower(), "a term the user wrote must survive into the query"
+        assert calls["n"] > 1, "a dropped discriminating term should trigger a retry"
+
+    def test_a_term_buried_in_another_concept_does_not_count_as_covered(self, monkeypatch):
+        """Being present is not the same as being required.
+
+        Concepts are AND-ed; the terms inside one are OR-ed. So "dental" listed
+        among the electronic-health-records synonyms is satisfied by any paper
+        mentioning "EHR", and constrains nothing. That is exactly what shipped:
+        the query contained the word "dental" and still returned general EHR
+        papers, because it was never its own block.
+        """
+        calls = {"n": 0}
+
+        class Stub:
+            def invoke(self, _msgs):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    # "dental" present, but only as a synonym of another concept.
+                    return type("R", (), {"content": json.dumps({"concepts": [
+                        {"name": "Electronic health records",
+                         "terms": ["electronic health record", "EHR", "dental record"],
+                         "mesh": []},
+                    ]})})()
+                return type("R", (), {"content": json.dumps({"concepts": [
+                    {"name": "Electronic health records", "terms": ["EHR"], "mesh": []},
+                    {"name": "Dental data", "terms": ["dental data"], "mesh": []},
+                ]})})()
+
+        monkeypatch.setattr(utils.AIService, "get_model", staticmethod(lambda *a, **k: Stub()))
+        pico = PICOCriteria(population="", intervention="", comparator="", outcome="")
+        pico.concept = "records containing both medical and dental data"
+        q, concepts = utils.AIService.generate_mesh_query(pico, "m", return_concepts=True)
+
+        assert calls["n"] > 1, "a term with no block of its own should trigger a retry"
+        assert any("dental" in (c["name"] or "").lower() for c in concepts), \
+            "the term must end up as its own AND-ed block, not a buried synonym"
+
+    def test_concepts_are_salvaged_from_a_truncated_reply(self, monkeypatch):
+        """A cut-off reply must not throw away the concepts it did contain.
+
+        The real failure: asked for synonyms of "Healthcare settings, global
+        scope, 2010-present", the model had nothing real to list and looped on
+        permutations ("clinical settings", "hospital settings", "clinics
+        settings", ...) until it hit the 4096-token output cap. The JSON ended
+        mid-string, json.loads rejected all 21,000 characters, and four correct
+        concepts sitting at the top of the reply were discarded with it.
+        """
+        truncated = (
+            '{"concepts": ['
+            '{"name": "AI/ML", "terms": ["machine learning", "AI"], "mesh": ["Artificial Intelligence"]},'
+            '{"name": "Dental data", "terms": ["dental data", "oral health"], "mesh": []},'
+            '{"name": "Settings", "terms": ["clinical settings", "hospital settings", "clinics sett'
+        )
+
+        class Stub:
+            def invoke(self, _msgs):
+                return type("R", (), {"content": truncated})()
+
+        monkeypatch.setattr(utils.AIService, "get_model", staticmethod(lambda *a, **k: Stub()))
+        pico = PICOCriteria(population="", intervention="", comparator="", outcome="")
+        pico.concept = "AI/ML models using records containing both medical and dental data"
+        q, concepts = utils.AIService.generate_mesh_query(pico, "m", return_concepts=True)
+
+        names = " ".join(c["name"] for c in concepts).lower()
+        assert "ai/ml" in names, "the complete concepts before the break must survive"
+        assert "dental" in q.lower(), "including the discriminating one"
+
+    def test_the_setting_facet_is_not_sent_for_decomposition(self, stub_model):
+        """Context is excluded as a source facet.
+
+        The prompt already says not to invent concepts for setting, country or
+        year; passing the setting in anyway contradicted that and is what sent
+        the model looping over "settings" synonyms until it ran out of tokens.
+        """
+        captured = {}
+
+        class Stub:
+            def invoke(self, msgs):
+                captured["prompt"] = msgs[0].content
+                return type("R", (), {"content": json.dumps({"concepts": [
+                    {"name": "Dental", "terms": ["dental"], "mesh": []}]})})()
+
+        import pytest as _pytest
+        pico = PICOCriteria(population="", intervention="", comparator="", outcome="")
+        pico.concept = "records containing dental data"
+        pico.context = "Healthcare settings, global scope, 2010-present"
+        with _pytest.MonkeyPatch.context() as mp:
+            mp.setattr(utils.AIService, "get_model", staticmethod(lambda *a, **k: Stub()))
+            utils.AIService.generate_mesh_query(pico, "m")
+        assert "global scope" not in captured["prompt"]
+
+    def test_outcome_terms_are_not_forced_into_the_query(self, stub_model):
+        """Coverage applies to what the search is ABOUT, not to outcomes.
+
+        Broad outcome and study-design facets are dropped on purpose: requiring
+        them deletes true hits without narrowing scope. Repairing their absence
+        would undo the strategy the block decomposition exists to implement.
+        """
+        stub_model()
+        q = utils.AIService.generate_mesh_query(PICO, "m")
+        assert "diagnostic" not in q.lower()
+        assert "accuracy" not in q.lower()
+
     def test_every_returned_concept_has_the_expected_shape(self, stub_model):
         stub_model()
         _, concepts = utils.AIService.generate_mesh_query(PICO, "m", return_concepts=True)
@@ -115,22 +246,55 @@ class TestGenerateMeshQuery:
         prompt = m.calls and True
         assert prompt
 
-    def test_malformed_model_output_does_not_raise(self, stub_model):
+    # These three used to assert the opposite: that a failure returned a string
+    # rather than raising. That contract was the problem. There is no generic
+    # query that answers an arbitrary review question, so the string it returned
+    # was assembled from leftover words and searched for something else, while
+    # looking entirely normal. A visible failure is recoverable; a plausible
+    # wrong search gets screened, acquired and written up.
+
+    def test_malformed_model_output_raises_rather_than_inventing_a_query(self, stub_model):
         stub_model("this is not json")
-        out = utils.AIService.generate_mesh_query(PICO, "m")
-        assert isinstance(out, str)
+        with pytest.raises(utils.QueryGenerationError):
+            utils.AIService.generate_mesh_query(PICO, "m")
 
-    def test_model_exception_does_not_raise(self, stub_model):
+    def test_a_model_failure_raises(self, stub_model):
         stub_model(RuntimeError("model down"))
-        out = utils.AIService.generate_mesh_query(PICO, "m")
-        assert isinstance(out, str)
+        with pytest.raises(utils.QueryGenerationError):
+            utils.AIService.generate_mesh_query(PICO, "m")
 
-    def test_no_concepts_returns_a_string_not_a_broken_query(self, stub_model):
+    def test_an_empty_concept_list_raises(self, stub_model):
         stub_model('{"concepts": []}')
-        q = utils.AIService.generate_mesh_query(PICO, "m")
-        assert isinstance(q, str)
-        assert "AND AND" not in q
-        assert not q.strip().endswith("AND")
+        with pytest.raises(utils.QueryGenerationError):
+            utils.AIService.generate_mesh_query(PICO, "m")
+
+    def test_the_error_tells_the_reviewer_what_to_do(self, stub_model):
+        """The message reaches the UI verbatim, so it is written for a person."""
+        stub_model("this is not json")
+        with pytest.raises(utils.QueryGenerationError) as e:
+            utils.AIService.generate_mesh_query(PICO, "m")
+        assert "reword" in str(e.value).lower() or "shorten" in str(e.value).lower()
+
+    def test_every_retry_uses_a_different_seed(self, monkeypatch):
+        """Sampling is greedy, so an identical prompt and seed return identical
+        bytes. A retry that varies neither is guaranteed to fail the same way,
+        which is how one bad question cost three minutes of retries."""
+        seeds = []
+
+        class Stub:
+            def invoke(self, _msgs):
+                return type("R", (), {"content": "not json"})()
+
+        def fake_get_model(name, seed=None):
+            seeds.append(seed)
+            return Stub()
+
+        monkeypatch.setattr(utils.AIService, "get_model", staticmethod(fake_get_model))
+        with pytest.raises(utils.QueryGenerationError):
+            utils.AIService.generate_mesh_query(PICO, "m")
+        real = [x for x in seeds if x is not None]
+        assert len(real) > 1, "it should retry"
+        assert len(set(real)) == len(real), "each attempt needs its own seed"
 
     def test_single_concept_produces_no_dangling_and(self, stub_model):
         stub_model('{"concepts":[{"name":"Dental","terms":["dental"],"mesh":["Dentistry"]}]}')

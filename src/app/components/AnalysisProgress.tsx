@@ -39,12 +39,17 @@ export function AnalysisProgress({
   const running = stages.find(s => s.status === "running");
   const doneCount = stages.filter(s => s.status === "done").length;
   const allDone = doneCount === stages.length && stages.length > 0;
-  // Overall progress, not a repeat of the running step (the stage list already
-  // names and spins that): how far through the pipeline we are.
+  // Name the running step AND the overall position. The stage list shows both
+  // too, but a step can take well over a minute (the search builder retries its
+  // decomposition, then validates every concept against NCBI MeSH), and during
+  // that time the header is the only thing at the top of a long page. "2 of 8
+  // complete" alone leaves the reader wondering what is taking so long.
   const statusText = allDone
     ? "Analysis complete"
     : running
-    ? `${doneCount} of ${stages.length} steps complete`
+    ? `${running.label} · ${doneCount} of ${stages.length} complete`
+    : stages.length
+    ? `Starting · 0 of ${stages.length} complete`
     : "Preparing analysis…";
   const pct = Math.round((doneCount / stages.length) * 100);
   const elapsed = formatElapsed(Date.now() - startedAt);

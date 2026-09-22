@@ -93,6 +93,14 @@ class Paper:
     abstract: str
     score: Optional[int] = None
     url: str = ""
+    # Bibliographic fields used by duplicate detection (dedup_rules.py). Sources
+    # that do not carry them leave them empty; the matcher then works from the
+    # title and DOI alone.
+    doi: str = ""
+    year: str = ""
+    authors: str = ""
+    journal: str = ""
+    pages: str = ""
 
     def __post_init__(self):
         # Normalise source markup once, so every downstream consumer (display,
