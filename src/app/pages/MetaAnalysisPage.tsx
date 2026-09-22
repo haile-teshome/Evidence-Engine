@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../lib/store";
 import {
   MetaAnalysisService,
@@ -11,19 +11,41 @@ import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
+import { Textarea } from "../components/ui/textarea";
 import { Label } from "../components/ui/label";
 import { Badge } from "../components/ui/badge";
 import { Separator } from "../components/ui/separator";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
-import { Sigma, Play, Calculator, X as XIcon, AlertTriangle } from "lucide-react";
+import { SourcePane, TablePane, AskPane } from "../components/EvidenceWorkspace";
+import { AIService, type ExtractedTable } from "../lib/apiClient";
+import { Sigma, Play, Calculator, X as XIcon, AlertTriangle, ChevronDown, FileText, ListChecks, Percent } from "lucide-react";
+import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 
 // ===========================================================================
 // Effect-measure metadata
 // ===========================================================================
+
+/** Format a statistic that may legitimately not exist.
+ *
+ *  The backend sends null for an undefined statistic: a p-value with zero
+ *  degrees of freedom, a between-group Q when there is only one group, a
+ *  z-score with zero standard error. Those are real answers and "–" is the
+ *  right way to show them. Calling .toFixed() on one throws, and because this
+ *  is render-time it takes the entire page down with "Something went wrong"
+ *  rather than leaving a blank cell. */
+function num(v: number | null | undefined, dp = 3): string {
+  return v == null || !Number.isFinite(v) ? "–" : v.toFixed(dp);
+}
+
+/** Same, for a value that must be exponentiated first. Math.exp(null) is 1,
+ *  which would silently render a missing effect as a null effect. */
+function expNum(v: number | null | undefined, dp = 2): string {
+  return v == null || !Number.isFinite(v) ? "–" : Math.exp(v).toFixed(dp);
+}
 
 const MEASURE_META: Record<EffectMeasure, { label: string; group: string; logScale: boolean; nullValue: number; axis: string }> = {
   OR:       { label: "Odds Ratio (OR)",            group: "Binary (2x2)",      logScale: true,  nullValue: 0, axis: "log OR" },
@@ -42,7 +64,10 @@ const MEASURE_META: Record<EffectMeasure, { label: string; group: string; logSca
 
 const MEASURE_GROUPS = ["Binary (2x2)", "Time-to-event", "Continuous", "Single-arm", "Correlational", "Generic"];
 
-function exponentiateLabel(measure: EffectMeasure, v: number): string {
+function exponentiateLabel(measure: EffectMeasure, v: number | null | undefined): string {
+  // Every axis and study label funnels through here, so one null reaching it
+  // blanks the whole forest plot rather than one number.
+  if (v == null || !Number.isFinite(v)) return "–";
   return MEASURE_META[measure]?.logScale ? Math.exp(v).toFixed(2) : v.toFixed(3);
 }
 
@@ -75,17 +100,23 @@ function ForestPlot({
   pooled,
   predInterval,
   measures,
+  compact = false,
 }: {
   studies: StudyEffect[];
   pooled: { estimate: number; ci_low: number; ci_high: number } | null;
   predInterval: { low: number; high: number } | null;
   measures: EffectMeasure[];
+  /** Narrow layout for the side-by-side workspace. The label and weight
+   *  columns are fixed widths totalling 440px, so in a pane narrower than that
+   *  the plot area collapses to nothing and the chart renders as a column of
+   *  study names with no data in it. */
+  compact?: boolean;
 }) {
   const rowH = 24;
   const padTop = 30;
   const padBottom = 60;
-  const padLeftLabel = 280;
-  const padRightWeights = 160;
+  const padLeftLabel = compact ? 150 : 280;
+  const padRightWeights = compact ? 78 : 160;
   const plotW = 360;
   const totalRows = studies.length + (pooled ? 2 : 0) + (predInterval ? 1 : 0);
   const height = padTop + padBottom + Math.max(1, totalRows) * rowH;
@@ -127,14 +158,14 @@ function ForestPlot({
         const xHi = Math.min(padLeftLabel + plotW, px(s.ci_high));
         const sizePx = Math.max(4, Math.min(14, 4 + 30 * (s.weight_re ?? s.weight_fe ?? 0.05)));
         const weightPct = ((s.weight_re ?? s.weight_fe ?? 0) * 100).toFixed(1);
-        const eff = log ? exponentiateLabel(s.effect_measure, s.yi) : s.yi.toFixed(2);
-        const effLo = log ? exponentiateLabel(s.effect_measure, s.ci_low) : s.ci_low.toFixed(2);
-        const effHi = log ? exponentiateLabel(s.effect_measure, s.ci_high) : s.ci_high.toFixed(2);
+        const eff = log ? exponentiateLabel(s.effect_measure, s.yi) : num(s.yi, 2);
+        const effLo = log ? exponentiateLabel(s.effect_measure, s.ci_low) : num(s.ci_low, 2);
+        const effHi = log ? exponentiateLabel(s.effect_measure, s.ci_high) : num(s.ci_high, 2);
         return (
           <g key={s.paper_id || i}>
             <text x={6} y={rowY + 4} fontSize={11} fill="currentColor">
               <title>{s.title}</title>
-              {(s.title || "(untitled)").slice(0, 50)}
+              {(s.title || "(untitled)").slice(0, compact ? 22 : 50)}
             </text>
             <line x1={xLo} x2={xHi} y1={rowY} y2={rowY} stroke="currentColor" strokeWidth={1.2} className="text-foreground/70" />
             <rect x={cx - sizePx / 2} y={rowY - sizePx / 2} width={sizePx} height={sizePx} fill="currentColor" className="text-primary" />
@@ -159,9 +190,9 @@ function ForestPlot({
         const cx = px(pooled.estimate);
         const dyHalf = 7;
         const diamond = `${xLo},${rowY} ${cx},${rowY - dyHalf} ${xHi},${rowY} ${cx},${rowY + dyHalf}`;
-        const eff = log ? exponentiateLabel(measure, pooled.estimate) : pooled.estimate.toFixed(3);
-        const effLo = log ? exponentiateLabel(measure, pooled.ci_low) : pooled.ci_low.toFixed(3);
-        const effHi = log ? exponentiateLabel(measure, pooled.ci_high) : pooled.ci_high.toFixed(3);
+        const eff = log ? exponentiateLabel(measure, pooled.estimate) : num(pooled.estimate);
+        const effLo = log ? exponentiateLabel(measure, pooled.ci_low) : num(pooled.ci_low);
+        const effHi = log ? exponentiateLabel(measure, pooled.ci_high) : num(pooled.ci_high);
         return (
           <g>
             <line x1={padLeftLabel} x2={padLeftLabel + plotW} y1={rowY - rowH / 2} y2={rowY - rowH / 2} stroke="currentColor" strokeWidth={0.5} className="text-muted-foreground/40" />
@@ -178,8 +209,8 @@ function ForestPlot({
         const rowY = padTop + (studies.length + 1) * rowH + rowH;
         const xLo = Math.max(padLeftLabel - 5, px(predInterval.low));
         const xHi = Math.min(padLeftLabel + plotW + 5, px(predInterval.high));
-        const piLo = log ? exponentiateLabel(measure, predInterval.low) : predInterval.low.toFixed(3);
-        const piHi = log ? exponentiateLabel(measure, predInterval.high) : predInterval.high.toFixed(3);
+        const piLo = log ? exponentiateLabel(measure, predInterval.low) : num(predInterval.low);
+        const piHi = log ? exponentiateLabel(measure, predInterval.high) : num(predInterval.high);
         return (
           <g>
             <text x={6} y={rowY + 4} fontSize={10} fill="currentColor" className="text-muted-foreground italic">95% prediction interval</text>
@@ -449,7 +480,7 @@ function StudyRowEditor({
             )}
             {typeof study.yi === "number" && (
               <span className="font-mono tabular-nums">
-                yi={study.yi.toFixed(3)}  SE={study.se?.toFixed(3)}
+                yi={num(study.yi)}  SE={num(study.se)}
               </span>
             )}
           </div>
@@ -553,11 +584,69 @@ function StudyRowEditor({
 // Main page
 // ===========================================================================
 
+/** Shown in place of the forest plot when nothing could be pooled.
+ *
+ *  An empty panel here reads as a broken feature. In practice pooling fails for
+ *  a small number of concrete, fixable reasons, and naming them per study turns
+ *  a dead end into a worklist. */
+function PoolBlocked({ extractions, ran }: { extractions: StudyEffect[]; ran: boolean }) {
+  const blocked = extractions.filter(x => x.yi === null || x.yi === undefined);
+  if (!ran) {
+    return (
+      <div className="flex h-full min-h-[280px] flex-col items-center justify-center gap-2 p-6 text-center text-sm text-muted-foreground">
+        <Sigma className="size-7 opacity-40" />
+        <div>Nothing pooled yet.</div>
+        <div className="text-xs max-w-xs">
+          Review the extracted values, then click <strong>Run analyses</strong>.
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 p-1 text-sm">
+      <div className="flex items-center gap-2 text-amber-700">
+        <AlertTriangle className="size-4 shrink-0" />
+        <span className="font-medium">
+          {blocked.length} of {extractions.length} studies could not be pooled
+        </span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        A study needs either its raw per-arm numbers, or the effect with its 95% CI.
+        Fill either one below and re-run. Extractions made before the reported-CI
+        support was added will often fill in if you extract again.
+      </p>
+      <ul className="max-h-[320px] space-y-1 overflow-auto">
+        {blocked.slice(0, 20).map((x, i) => (
+          <li key={x.paper_id || i} className="rounded border bg-muted/30 px-2 py-1.5">
+            <div className="truncate text-xs font-medium">{x.title}</div>
+            <div className="text-[11px] text-amber-700">
+              {x.error || "no effect size could be derived"}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function MetaAnalysisPage() {
   const s = useStore();
   const [extracting, setExtracting] = useState(false);
   const [running, setRunning] = useState(false);
   const [tab, setTab] = useState<string>("forest");
+  // The settings panel collapses once there is something to look at, so the
+  // evidence gets the screen. Same behaviour as the question panel on Text
+  // Extraction, which this page is the sibling of.
+  const [setupOpen, setSetupOpen] = useState((s.metaExtractions || []).length === 0);
+
+  // Evidence pane: which study is open, which of its tables is shown, and which
+  // page the source pane is parked on. citedPage is set by clicking a citation,
+  // so "p. 7" in a provenance line actually moves the document beside it.
+  const [evidenceId, setEvidenceId] = useState<string>("");
+  const [tables, setTables] = useState<Record<string, ExtractedTable[]>>({});
+  const [tableIdx, setTableIdx] = useState(0);
+  const [citedPage, setCitedPage] = useState<number | null>(null);
+  const [loadingTables, setLoadingTables] = useState(false);
 
   const candidatePapers: Paper[] = useMemo(() => {
     if (s.results && s.results.length > 0) {
@@ -578,33 +667,51 @@ export function MetaAnalysisPage() {
     return out;
   }, [s.fullTexts]);
 
-  async function runExtraction() {
-    if (!s.metaOutcome.trim()) { toast.error("Specify the outcome you want to meta-analyse."); return; }
-    if (candidatePapers.length === 0) { toast.error("No included articles available. Run abstract screening first."); return; }
+  /** Extract effect sizes, then pool them. One action, because they are one
+   *  job: extracting without pooling leaves the reviewer holding numbers and
+   *  no answer, and pooling is meaningless without a fresh extraction behind
+   *  it. The two used to be separate buttons and the second was the one people
+   *  forgot to press. */
+  async function runCalculate() {
+    if (!canCalculate) return;
     setExtracting(true);
     try {
-      const r = await MetaAnalysisService.extract(candidatePapers, s.metaOutcome, s.metaMeasure || "", fullTextMap);
+      const r = await MetaAnalysisService.extract(
+        candidatePapers, s.metaOutcome, s.metaMeasure || "", fullTextMap, tablesByPaperId,
+      );
       s.setMetaExtractions(r.extractions);
-      s.setMetaRun(null);
-      const ok = r.extractions.filter(x => typeof x.yi === "number").length;
-      toast.success(`Extracted effect-size data from ${ok} of ${r.extractions.length} articles.`);
+      setExtracting(false);
+
+      // Pool the rows we just received rather than reading them back out of
+      // the store, which has not re-rendered yet.
+      setRunning(true);
+      const out = await MetaAnalysisService.run(r.extractions, s.metaTau2Method, s.metaUseKnappHartung);
+      s.setMetaRun(out);
+
+      const k = out.pool?.k ?? 0;
+      if (k === 0) {
+        toast.error(`Extracted ${r.extractions.length} studies, but none had enough data to pool. Fill in the missing values below and calculate again.`);
+      } else {
+        toast.success(`Pooled ${k} of ${r.extractions.length} studies.`);
+      }
     } catch (e: any) {
-      toast.error(`Extraction failed: ${e?.message?.slice(0, 80) || "unknown error"}`);
+      toast.error(`Calculation failed: ${e?.message?.slice(0, 100) || "unknown error"}`);
     } finally {
       setExtracting(false);
+      setRunning(false);
     }
   }
 
-  async function runAnalysis() {
-    if (!s.metaExtractions || s.metaExtractions.length === 0) { toast.error("Run extraction first."); return; }
+  /** Re-pool the rows already on screen, without calling the LLM again.
+   *  Used after a hand-correction, and when the estimator settings change. */
+  async function repool() {
+    const rows = s.metaExtractions || [];
+    if (rows.length === 0) return;
     setRunning(true);
     try {
-      const r = await MetaAnalysisService.run(s.metaExtractions, s.metaTau2Method, s.metaUseKnappHartung);
-      s.setMetaRun(r);
-      if (r.pool.k === 0) toast.error("No studies had complete enough data to pool. Edit rows and re-run.");
-      else toast.success(`Pooled ${r.pool.k} study${r.pool.k === 1 ? "" : "ies"}.`);
+      s.setMetaRun(await MetaAnalysisService.run(rows, s.metaTau2Method, s.metaUseKnappHartung));
     } catch (e: any) {
-      toast.error(`Analysis failed: ${e?.message?.slice(0, 80) || "unknown error"}`);
+      toast.error(`Pooling failed: ${e?.message?.slice(0, 100) || "unknown error"}`);
     } finally {
       setRunning(false);
     }
@@ -612,83 +719,262 @@ export function MetaAnalysisPage() {
 
   const extractions = s.metaExtractions || [];
   const run = s.metaRun;
+  const busy = extracting || running;
+
+  // The review already named its outcome during Planning, and the included
+  // studies already report theirs. Offering those beats making the reviewer
+  // retype something the app knows, and a mistyped outcome here silently
+  // changes what gets extracted.
+  const outcomeSuggestions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: { label: string; value: string; hint?: string }[] = [];
+    const add = (value: string, hint?: string) => {
+      const v = (value || "").trim();
+      const key = v.toLowerCase();
+      if (!v || seen.has(key) || v.length > 120) return;
+      seen.add(key);
+      out.push({ label: v.length > 48 ? `${v.slice(0, 48)}…` : v, value: v, hint: hint || v });
+    };
+    add(s.pico?.outcome || "", "The outcome declared in this review's PICO frame");
+    // Outcomes the extractor has already named on a previous pass.
+    for (const x of s.metaExtractions || []) add(x.outcome || "", "Already extracted on a previous pass");
+    return out.slice(0, 5);
+  }, [s.pico?.outcome, s.metaExtractions]);
+  // What the calculation needs before it can mean anything: an outcome to pull,
+  // and studies to pull it from. Stated as a reason so the button can say what
+  // is missing rather than just sitting greyed out.
+  const blocker = !s.metaOutcome.trim() ? "Name the outcome to meta-analyse." : "";
+  const canCalculate = !busy && !blocker;
+  // Once pooling has run, the pool is the authority on what it could not use.
+  // Counting rows with a null yi instead double-counts: the backend derives yi
+  // server-side, so a row can be perfectly poolable while the copy held here
+  // still carries only the raw inputs it was extracted with.
+  const unpoolableCount = (p: typeof run) =>
+    p?.pool ? p.pool.invalid_studies.length
+            : extractions.filter(x => x.yi === null || x.yi === undefined).length;
+
+  // ── Evidence pane derivations ──────────────────────────────────────────────
+  const evidenceStudy = useMemo(
+    () => extractions.find(x => x.paper_id === evidenceId) || extractions[0],
+    [extractions, evidenceId],
+  );
+  const evidenceFt = evidenceStudy ? s.fullTexts?.[evidenceStudy.paper_id] : undefined;
+  const evidenceFullText = evidenceFt?.text;
+  // AcquisitionPage stores this as a ready-made URL; SourcePane wants the key.
+  const evidencePdfKey = useMemo(() => {
+    const u = evidenceFt?.pdf_url || "";
+    const m = u.match(/\/fulltext\/pdf\/([^/?#]+)/);
+    return m ? decodeURIComponent(m[1]) : undefined;
+  }, [evidenceFt?.pdf_url]);
+
+  // Default the pane to the first extracted study.
+  useEffect(() => {
+    if (!evidenceId && extractions.length > 0) setEvidenceId(extractions[0].paper_id);
+  }, [extractions, evidenceId]);
+
+  // Park the source pane on whatever page the current extraction cites, so the
+  // document opens where the number is rather than at page one.
+  useEffect(() => {
+    if (evidenceStudy?.source_page) setCitedPage(evidenceStudy.source_page);
+  }, [evidenceStudy?.paper_id, evidenceStudy?.source_page]);
+
+  // Tables the Table Extraction tab already pulled, indexed for reuse.
+  //
+  // Those results are keyed by title and URL rather than paper_id, so matching
+  // is on normalised title with URL as a fallback. Worth the fuzziness: without
+  // it this page re-runs an extraction the reviewer already ran, which on the
+  // LLM tier means paying for the same tokens twice and waiting again, and can
+  // silently produce DIFFERENT tables from the ones they already reviewed,
+  // because that tier is not deterministic.
+  const tablesAlreadyExtracted = useMemo(() => {
+    const norm = (v: string) => (v || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const byTitle = new Map<string, ExtractedTable[]>();
+    const byUrl = new Map<string, ExtractedTable[]>();
+    for (const p of s.extractedPapers || []) {
+      const t = p.Extracted_Tables || [];
+      if (!t.length) continue;
+      if (p.Paper_Title) byTitle.set(norm(p.Paper_Title), t);
+      if (p.Paper_URL) byUrl.set(norm(p.Paper_URL), t);
+    }
+    return (title?: string, url?: string | null) =>
+      byTitle.get(norm(title || "")) || (url ? byUrl.get(norm(url)) : undefined);
+  }, [s.extractedPapers]);
+
+  // Tables to hand the extractor, keyed by paper id. Reusing what the Table
+  // Extraction stage already produced means the effect sizes are read out of a
+  // results table rather than out of prose that lost its columns in the PDF.
+  const tablesByPaperId = useMemo(() => {
+    const out: Record<string, ExtractedTable[]> = {};
+    for (const p of candidatePapers) {
+      const t = tablesAlreadyExtracted(p.title, (p as any).url);
+      if (t?.length) out[p.id] = t;
+    }
+    return out;
+  }, [candidatePapers, tablesAlreadyExtracted]);
+
+  // Tables are resolved once per study: from the Table Extraction tab if it has
+  // them, and only otherwise from the backend.
+  useEffect(() => {
+    if (!evidenceStudy || tables[evidenceStudy.paper_id]) return;
+    const reuse = tablesAlreadyExtracted(evidenceStudy.title, evidenceStudy.url);
+    if (reuse?.length) {
+      setTables(prev => ({ ...prev, [evidenceStudy.paper_id]: reuse }));
+      return;
+    }
+    let cancelled = false;
+    const id = evidenceStudy.paper_id;
+    setLoadingTables(true);
+    AIService.extractTables({
+      paper_id: id,
+      Title: evidenceStudy.title,
+      URL: evidenceStudy.url || "",
+      Source: "",
+      Abstract: "",
+      full_text: s.fullTexts?.[id]?.text || "",
+    } as any)
+      .then(t => { if (!cancelled) setTables(prev => ({ ...prev, [id]: t || [] })); })
+      .catch(() => { if (!cancelled) setTables(prev => ({ ...prev, [id]: [] })); })
+      .finally(() => { if (!cancelled) setLoadingTables(false); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [evidenceStudy?.paper_id, tablesAlreadyExtracted]);
   const pool = run?.pool;
   const measures = (pool?.effect_measures || []) as EffectMeasure[];
   const primaryMeasure: EffectMeasure = measures.length === 1 ? measures[0] : "GENERIC";
 
+  // Prerequisites, as an early return rather than a disabled page. Every other
+  // stage does this: until there is something to work on, the only useful thing
+  // on screen is the way to go and get it. Showing the controls greyed out
+  // alongside an empty state says the same thing three times and invites the
+  // reviewer to fill in settings that cannot run.
+  if (!s.results) {
+    return <EmptyState icon={Sigma} title="Screening not complete yet"
+      description="Run abstract screening first. The studies it includes are what gets extracted and pooled here."
+      action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }} />;
+  }
+  if (candidatePapers.length === 0) {
+    return <EmptyState icon={Sigma} title="No included articles to meta-analyse"
+      description="The current screening run included 0 articles, so there are no effect sizes to pool. Include some articles, or restore a run that has includes."
+      action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }} />;
+  }
+
   return (
     <div className="space-y-4">
-      {/* Setup card */}
-      <Card className="p-4 space-y-3">
-        <div className="flex items-center gap-2">
-          <Sigma className="size-5 text-primary" />
-          <div className="flex-1">
-            <div className="font-medium">Meta-analysis agent</div>
-            <div className="text-xs text-muted-foreground">
-              LLM-extracts effect sizes (OR / RR / RD / HR / MD / SMD / proportions / incidence / correlations / generic), then pools with FE + DL/PM/REML random-effects, plus subgroup / sensitivity / publication-bias / meta-regression diagnostics.
+      {/* Counts and actions, then settings. Same two-part header every other
+          working tab uses (ControlPane + a collapsible panel), so this page
+          reads as part of the app rather than a form bolted to the top of it. */}
+      <ControlPane
+        stats={extractions.length > 0 ? <>
+          <InlineStat icon={FileText} value={extractions.length} label="Extracted" />
+          <PaneDivider />
+          {pool && pool.k > 0 && <InlineStat icon={ListChecks} tone="success" value={pool.k} label="Pooled" />}
+          {unpoolableCount(run) > 0 && (
+            <InlineStat icon={AlertTriangle} tone="amber" value={unpoolableCount(run)} label="Unpoolable" />
+          )}
+          {pool?.heterogeneity && (
+            <InlineStat icon={Percent}
+              tone={(pool.heterogeneity.I2_pct ?? 0) > 50 ? "amber" : "default"}
+              value={`${num(pool.heterogeneity.I2_pct, 0)}%`} label="I² heterogeneity" />
+          )}
+        </> : (
+          <InlineStat icon={FileText} value={candidatePapers.length} label="Ready to extract" />
+        )}
+        actions={<>
+          {/* Say what is missing rather than leaving a greyed-out button and no
+              explanation of what would un-grey it. Shown whether or not there
+              are already extractions, since the outcome can be cleared after a
+              run and the button then disables for no visible reason. */}
+          {blocker && <span className="text-xs text-muted-foreground mr-1">{blocker}</span>}
+          {extractions.length > 0 && !busy && (
+            <Button size="sm" variant="ghost" className="h-8" onClick={repool}
+                    title="Re-pool the rows below without calling the model again">
+              Re-pool
+            </Button>
+          )}
+          <Button size="sm" className="h-8 shadow-sm" onClick={runCalculate}
+                  disabled={!canCalculate} title={blocker || undefined}>
+            <Calculator className="size-3.5 mr-1.5" />
+            {extracting ? "Extracting…" : running ? "Pooling…"
+              : extractions.length > 0 ? "Recalculate" : `Calculate from ${candidatePapers.length}`}
+          </Button>
+        </>}
+      />
+
+      <Card className="p-3 space-y-2">
+        <button
+          onClick={() => setSetupOpen(o => !o)}
+          className="flex items-center gap-2 text-sm font-medium w-full text-left min-w-0 hover:text-primary"
+          title={setupOpen ? "Collapse settings" : "Edit settings"}
+        >
+          <ChevronDown className={`size-4 shrink-0 transition-transform ${setupOpen ? "" : "-rotate-90"}`} />
+          <Sigma className="size-4 text-primary shrink-0" />
+          {setupOpen ? "Analysis settings" : (
+            <span className="truncate text-muted-foreground font-normal">
+              {s.metaOutcome || "No outcome set"} · {s.metaMeasure || "auto-detect"} · {s.metaTau2Method}
+              {s.metaUseKnappHartung ? " · Knapp-Hartung" : ""}
+            </span>
+          )}
+        </button>
+
+        {setupOpen && (
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_1fr] md:items-end">
+            <div className="md:col-span-4">
+              <Label className="text-[11px] text-muted-foreground">
+                Outcome to meta-analyse
+              </Label>
+              <Textarea
+                value={s.metaOutcome}
+                onChange={e => s.setMetaOutcome(e.target.value)}
+                rows={2}
+                placeholder="Describe the outcome in plain language, with its units and time point. e.g. all-cause mortality at 12 months"
+              />
+              {outcomeSuggestions.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {outcomeSuggestions.map((o, i) => (
+                    <Button key={i} size="sm" variant="outline" className="h-7 text-xs"
+                            onClick={() => s.setMetaOutcome(o.value)} title={o.hint}>
+                      {o.label}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div>
+              <Label className="text-[11px] text-muted-foreground">Effect measure</Label>
+              <Select value={s.metaMeasure || "auto"} onValueChange={v => s.setMetaMeasure(v === "auto" ? "" : (v as EffectMeasure))}>
+                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">Auto-detect</SelectItem>
+                  {MEASURE_GROUPS.map(g => (
+                    <div key={g}>
+                      <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">{g}</div>
+                      {(Object.keys(MEASURE_META) as EffectMeasure[])
+                        .filter(k => MEASURE_META[k].group === g && k !== "UNKNOWN")
+                        .map(k => <SelectItem key={k} value={k}>{MEASURE_META[k].label}</SelectItem>)}
+                    </div>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label className="text-[11px] text-muted-foreground">τ² estimator</Label>
+              <Select value={s.metaTau2Method} onValueChange={v => s.setMetaTau2Method(v as Tau2Method)}>
+                <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="DL">DerSimonian-Laird</SelectItem>
+                  <SelectItem value="PM">Paule-Mandel</SelectItem>
+                  <SelectItem value="REML">REML</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex h-9 items-center gap-2">
+              <Switch checked={s.metaUseKnappHartung} onCheckedChange={s.setMetaUseKnappHartung} id="kh-toggle" />
+              <Label htmlFor="kh-toggle" className="cursor-pointer text-xs whitespace-nowrap"
+                     title="Widens the random-effects interval using a t distribution. Recommended when pooling few studies.">
+                Knapp-Hartung
+              </Label>
             </div>
           </div>
-        </div>
-
-        <div className="grid md:grid-cols-3 gap-3">
-          <div className="md:col-span-2">
-            <Label className="text-sm">Outcome of interest</Label>
-            <Input
-              value={s.metaOutcome}
-              onChange={e => s.setMetaOutcome(e.target.value)}
-              placeholder="e.g., all-cause mortality at 12 months; depression score reduction; incidence of MI"
-            />
-            <p className="text-xs text-muted-foreground mt-1">A specific outcome gives better extractions. Include units and the time point.</p>
-          </div>
-          <div>
-            <Label className="text-sm">Preferred effect measure (optional hint)</Label>
-            <Select value={s.metaMeasure || "auto"} onValueChange={v => s.setMetaMeasure(v === "auto" ? "" : (v as EffectMeasure))}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="auto">Auto-detect</SelectItem>
-                {MEASURE_GROUPS.map(g => (
-                  <div key={g}>
-                    <div className="px-2 py-1 text-[10px] uppercase text-muted-foreground">{g}</div>
-                    {(Object.keys(MEASURE_META) as EffectMeasure[])
-                      .filter(k => MEASURE_META[k].group === g && k !== "UNKNOWN")
-                      .map(k => <SelectItem key={k} value={k}>{MEASURE_META[k].label}</SelectItem>)}
-                  </div>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <div className="grid md:grid-cols-3 gap-3 items-end">
-          <div>
-            <Label className="text-sm">τ² estimator</Label>
-            <Select value={s.metaTau2Method} onValueChange={v => s.setMetaTau2Method(v as Tau2Method)}>
-              <SelectTrigger><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="DL">DerSimonian-Laird (default)</SelectItem>
-                <SelectItem value="PM">Paule-Mandel</SelectItem>
-                <SelectItem value="REML">REML (restricted ML)</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="flex items-center gap-2">
-            <Switch checked={s.metaUseKnappHartung} onCheckedChange={s.setMetaUseKnappHartung} id="kh-toggle" />
-            <Label htmlFor="kh-toggle" className="text-sm cursor-pointer">Knapp-Hartung CI adjustment</Label>
-          </div>
-          <div className="flex gap-2 flex-wrap justify-end">
-            <Button onClick={runExtraction} disabled={extracting || candidatePapers.length === 0}>
-              <Play className="size-4 mr-2" />{extracting ? "Extracting…" : `Extract from ${candidatePapers.length}`}
-            </Button>
-            <Button variant="secondary" onClick={runAnalysis} disabled={running || extractions.length === 0}>
-              <Calculator className="size-4 mr-2" />{running ? "Running…" : "Run analyses"}
-            </Button>
-          </div>
-        </div>
-
-        {candidatePapers.length === 0 && (
-          <EmptyState icon={Sigma} title="No source articles yet"
-            description="Run Abstract Screening first; included studies feed effect-size extraction and pooling here."
-            action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }} />
         )}
       </Card>
 
@@ -699,29 +985,29 @@ export function MetaAnalysisPage() {
             <div>
               <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Random-effects pooled</div>
               <div className="font-mono tabular-nums">
-                {pool.random!.estimate.toFixed(3)} [{pool.random!.ci_low.toFixed(3)}, {pool.random!.ci_high.toFixed(3)}]
+                {num(pool.random!.estimate)} [{num(pool.random!.ci_low)}, {num(pool.random!.ci_high)}]
               </div>
               {isLogScale(measures) && (
                 <div className="text-xs text-muted-foreground tabular-nums">
-                  ≈ {Math.exp(pool.random!.estimate).toFixed(2)} [{Math.exp(pool.random!.ci_low).toFixed(2)}, {Math.exp(pool.random!.ci_high).toFixed(2)}] (back-transformed)
+                  ≈ {expNum(pool.random!.estimate)} [{expNum(pool.random!.ci_low)}, {expNum(pool.random!.ci_high)}] (back-transformed)
                 </div>
               )}
-              <div className="text-xs text-muted-foreground">τ² = {pool.random!.tau2.toFixed(4)} · p = {pool.random!.p_value?.toFixed(4)}</div>
+              <div className="text-xs text-muted-foreground">τ² = {num(pool.random!.tau2, 4)} · p = {num(pool.random!.p_value, 4)}</div>
             </div>
             <div>
               <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Fixed-effects pooled</div>
               <div className="font-mono tabular-nums">
-                {pool.fixed!.estimate.toFixed(3)} [{pool.fixed!.ci_low.toFixed(3)}, {pool.fixed!.ci_high.toFixed(3)}]
+                {num(pool.fixed!.estimate)} [{num(pool.fixed!.ci_low)}, {num(pool.fixed!.ci_high)}]
               </div>
-              <div className="text-xs text-muted-foreground">p = {pool.fixed!.p_value?.toFixed(4)}</div>
+              <div className="text-xs text-muted-foreground">p = {num(pool.fixed!.p_value, 4)}</div>
             </div>
             <div>
               <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Heterogeneity</div>
               <div className="font-mono tabular-nums">
-                I² = {pool.heterogeneity!.I2_pct.toFixed(1)}%
+                I² = {num(pool.heterogeneity!.I2_pct, 1)}%
               </div>
               <div className="text-xs text-muted-foreground">
-                Q = {pool.heterogeneity!.Q.toFixed(2)} (df {pool.heterogeneity!.df}, p = {pool.heterogeneity!.Q_p_value.toFixed(4)})
+                Q = {num(pool.heterogeneity!.Q, 2)} (df {pool.heterogeneity!.df}, p = {num(pool.heterogeneity!.Q_p_value, 4)})
               </div>
               <div className="text-xs text-muted-foreground">
                 {pool.heterogeneity!.I2_pct < 25 ? "Low" : pool.heterogeneity!.I2_pct < 50 ? "Moderate" : pool.heterogeneity!.I2_pct < 75 ? "Substantial" : "Considerable"} heterogeneity
@@ -749,6 +1035,81 @@ export function MetaAnalysisPage() {
             τ² method: {pool.tau2_method}{pool.use_knapp_hartung ? " · Knapp-Hartung adjusted" : ""}
             {pool.invalid_studies.length > 0 && <> · <span className="text-amber-700">{pool.invalid_studies.length} unpoolable</span></>}
           </div>
+        </Card>
+      )}
+
+      {/* Evidence workspace. Gated only on having something extracted, NOT on a
+          successful pool: when the numbers are wrong the reviewer needs the
+          source document beside them more than ever, and hiding it until the
+          statistics succeed removes the tool exactly when it is needed. */}
+      {extractions.length > 0 && (
+        <Card className="p-3">
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(0,1.45fr)]">
+              <div className="h-[560px]">
+                <SourcePane
+                  title={evidenceStudy?.title}
+                  pdfKey={evidencePdfKey}
+                  page={citedPage}
+                  url={evidenceStudy?.url}
+                  text={evidenceFullText}
+                />
+              </div>
+
+              <div className="space-y-3 min-w-0">
+                {extractions.length > 1 && (
+                  <select
+                    className="w-full rounded border bg-background px-2 py-1 text-xs"
+                    value={evidenceId}
+                    onChange={e => { setEvidenceId(e.target.value); setTableIdx(0); setCitedPage(null); }}
+                  >
+                    {extractions.map(x => (
+                      <option key={x.paper_id} value={x.paper_id}>{x.title}</option>
+                    ))}
+                  </select>
+                )}
+
+                {loadingTables ? (
+                  <div className="rounded-lg border bg-card p-6 text-center text-sm text-muted-foreground">
+                    Extracting tables...
+                  </div>
+                ) : (
+                  <TablePane
+                    tables={tables[evidenceId] || []}
+                    selected={tableIdx}
+                    onSelect={setTableIdx}
+                    onCite={p => setCitedPage(p ?? null)}
+                  />
+                )}
+
+                {evidenceStudy && (
+                  <AskPane
+                    paper={{ id: evidenceStudy.paper_id, title: evidenceStudy.title }}
+                    fullText={evidenceFullText}
+                    tables={tables[evidenceId] || []}
+                    onCite={p => setCitedPage(p ?? null)}
+                  />
+                )}
+              </div>
+
+              <Card className="p-3 min-w-0">
+                <div className="mb-2 text-xs font-medium text-muted-foreground">
+                  Forest plot · {s.metaOutcome || "pooled effect"} · random effects
+                </div>
+                {pool && pool.k > 0 ? (
+                  <div className="overflow-x-auto">
+                    <ForestPlot
+                      studies={pool.valid_studies}
+                      pooled={pool.random}
+                      predInterval={pool.prediction_interval}
+                      measures={measures}
+                      compact
+                    />
+                  </div>
+                ) : (
+                  <PoolBlocked extractions={extractions} ran={!!run} />
+                )}
+              </Card>
+            </div>
         </Card>
       )}
 
@@ -816,7 +1177,7 @@ export function MetaAnalysisPage() {
                       .map((r, i) => (
                         <tr key={i} className="border-t border-border/40">
                           <td className="py-1 pr-2 truncate max-w-[200px]" title={r.title}>{r.title.slice(0, 36)}</td>
-                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{r.estimate_without?.toFixed(3) ?? "–"}</td>
+                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{num(r.estimate_without)}</td>
                           <td className={`py-1 text-right font-mono tabular-nums ${Math.abs(r.delta ?? 0) > 0.1 ? "text-amber-700" : ""}`}>
                             {r.delta !== null ? (r.delta >= 0 ? "+" : "") + r.delta.toFixed(3) : "–"}
                           </td>
@@ -840,8 +1201,8 @@ export function MetaAnalysisPage() {
                       <tr key={i} className="border-t border-border/40">
                         <td className="py-1 pr-2 tabular-nums">{r.k}</td>
                         <td className="py-1 pr-2 truncate max-w-[180px]">{r.last_added.slice(0, 30)}</td>
-                        <td className="py-1 pr-2 text-right font-mono tabular-nums">{r.estimate?.toFixed(3) ?? "–"}</td>
-                        <td className="py-1 text-right font-mono tabular-nums">{r.I2_pct?.toFixed(0)}%</td>
+                        <td className="py-1 pr-2 text-right font-mono tabular-nums">{num(r.estimate)}</td>
+                        <td className="py-1 text-right font-mono tabular-nums">{num(r.I2_pct, 0)}%</td>
                       </tr>
                     ))}
                   </tbody>
@@ -862,7 +1223,7 @@ export function MetaAnalysisPage() {
                   <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Egger's regression test</div>
                   {run.egger.intercept !== null ? (
                     <>
-                      <div className="font-mono tabular-nums">intercept = {run.egger.intercept.toFixed(3)} · p = {run.egger.p_value!.toFixed(4)}</div>
+                      <div className="font-mono tabular-nums">intercept = {num(run.egger.intercept)} · p = {num(run.egger.p_value, 4)}</div>
                       <div className="text-xs text-muted-foreground">{(run.egger.p_value ?? 1) < 0.1 ? "Some evidence of funnel asymmetry." : "No strong evidence of small-study effects."}</div>
                     </>
                   ) : <div className="text-xs text-muted-foreground">{run.egger.note}</div>}
@@ -871,7 +1232,7 @@ export function MetaAnalysisPage() {
                   <div className="text-xs uppercase tracking-wide text-muted-foreground mb-1">Begg's rank test</div>
                   {run.begg.tau !== null ? (
                     <>
-                      <div className="font-mono tabular-nums">τ = {run.begg.tau.toFixed(3)} · p = {run.begg.p_value!.toFixed(4)}</div>
+                      <div className="font-mono tabular-nums">τ = {num(run.begg.tau)} · p = {num(run.begg.p_value, 4)}</div>
                       <div className="text-xs text-muted-foreground">Less powerful than Egger; corroborative.</div>
                     </>
                   ) : <div className="text-xs text-muted-foreground">{run.begg.note}</div>}
@@ -881,7 +1242,7 @@ export function MetaAnalysisPage() {
                   {typeof run.trim_fill.filled_estimate === "number" ? (
                     <>
                       <div className="font-mono tabular-nums">
-                        k₀ = {run.trim_fill.k0} ({run.trim_fill.side}-side) · adjusted = {run.trim_fill.filled_estimate.toFixed(3)}
+                        k₀ = {run.trim_fill.k0} ({run.trim_fill.side}-side) · adjusted = {num(run.trim_fill.filled_estimate)}
                       </div>
                       <div className="text-xs text-muted-foreground">
                         Adjusted CI [{run.trim_fill.filled_ci_low!.toFixed(3)}, {run.trim_fill.filled_ci_high!.toFixed(3)}]
@@ -916,19 +1277,19 @@ export function MetaAnalysisPage() {
                         <tr key={i} className="border-t border-border/40">
                           <td className="py-1 pr-2 font-medium">{g.name}</td>
                           <td className="py-1 pr-2 text-right tabular-nums">{g.k}</td>
-                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{g.estimate?.toFixed(3) ?? "–"}</td>
+                          <td className="py-1 pr-2 text-right font-mono tabular-nums">{num(g.estimate)}</td>
                           <td className="py-1 pr-2 text-right font-mono tabular-nums text-xs">
                             {g.ci_low !== null && g.ci_high !== null ? `[${g.ci_low.toFixed(3)}, ${g.ci_high.toFixed(3)}]` : "–"}
                           </td>
-                          <td className="py-1 text-right tabular-nums">{g.I2_pct?.toFixed(0)}%</td>
+                          <td className="py-1 text-right tabular-nums">{num(g.I2_pct, 0)}%</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                   <Separator />
                   <div className="text-xs text-muted-foreground">
-                    Between-group Q = <span className="font-mono">{run.subgroup.Q_between.toFixed(2)}</span>
-                    {" "}(df = {run.subgroup.df_between}, p = {run.subgroup.Q_between_p.toFixed(4)}).{" "}
+                    Between-group Q = <span className="font-mono">{num(run.subgroup.Q_between, 2)}</span>
+                    {" "}(df = {run.subgroup.df_between}, p = {num(run.subgroup.Q_between_p, 4)}).{" "}
                     {run.subgroup.Q_between_p < 0.05
                       ? "Statistically significant heterogeneity between subgroups: the moderator matters."
                       : "No significant between-group differences."}
@@ -981,13 +1342,6 @@ export function MetaAnalysisPage() {
             </Card>
           </TabsContent>
         </Tabs>
-      )}
-
-      {/* Empty state */}
-      {extractions.length === 0 && candidatePapers.length > 0 && (
-        <Alert><AlertDescription>
-          Specify an outcome above and click <strong>Extract from {candidatePapers.length}</strong> to run the LLM extractor.
-        </AlertDescription></Alert>
       )}
 
       {/* Show extractions before analysis is run */}

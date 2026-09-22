@@ -109,6 +109,14 @@ class StudyEffect:
     hr: Optional[float] = None
     hr_ci_low: Optional[float] = None
     hr_ci_high: Optional[float] = None
+
+    # A reported effect with its confidence interval, for ANY measure. Papers
+    # very often give "MD -0.9 (95% CI -1.2 to -0.6)" and never publish the
+    # per-arm SDs, so without this the study cannot be pooled at all even though
+    # the authors reported everything a meta-analysis needs.
+    effect: Optional[float] = None
+    effect_ci_low: Optional[float] = None
+    effect_ci_high: Optional[float] = None
     log_hr: Optional[float] = None
     log_hr_se: Optional[float] = None
 
@@ -138,6 +146,16 @@ class StudyEffect:
     extraction_quote: Optional[str] = None
     extraction_confidence: Optional[float] = None
     extraction_notes: Optional[str] = None
+
+    # Provenance. A pooled estimate is only as checkable as the reader's ability
+    # to get back to the number in the source, so units and time point travel
+    # with the value rather than being buried in free-text notes: "-0.9" is
+    # meaningless without "%" and "at 12 months", and two studies reporting the
+    # same outcome at different time points must not be silently pooled.
+    units: Optional[str] = None            # e.g. "%", "mmHg", "kg"
+    timepoint: Optional[str] = None        # e.g. "12 months"
+    source_page: Optional[int] = None      # 1-based page in the source PDF
+    source_table: Optional[str] = None     # e.g. "Table 2"
     error: Optional[str] = None
 
 
@@ -275,10 +293,55 @@ def _log_hr_from_ci(hr: float, ci_low: float, ci_high: float) -> Tuple[float, fl
     return log_hr, se**2
 
 
+# Measures whose effects are pooled on the log scale. A ratio's CI is symmetric
+# in log space, not in the ratio itself, so the scale decides how SE is recovered.
+_LOG_SCALE_MEASURES = {"OR", "RR", "HR", "PETO_OR", "IR"}
+_LINEAR_MEASURES = {"MD", "RD", "SMD"}
+
+
+def _from_reported_ci(s: StudyEffect, m: str) -> bool:
+    """Derive yi/vi from a reported effect and its 95% CI. Returns False when
+    that is not possible, leaving the caller to raise the original error.
+
+    Only measures with a well-defined pooling scale are handled. PROP and ZCOR
+    are deliberately excluded: recovering their SE means inverting a logit or a
+    Fisher z, and doing that from a rounded published CI loses enough precision
+    to distort the weights."""
+    val, lo, hi = s.effect, s.effect_ci_low, s.effect_ci_high
+    if val is None or lo is None or hi is None:
+        return False
+    if lo > hi:
+        lo, hi = hi, lo
+    try:
+        # Compute into locals and assign only on success. Assigning as we go
+        # would leave a rejected study carrying a yi with no vi, which reads
+        # downstream as a half-extracted effect rather than as no effect.
+        if m in _LOG_SCALE_MEASURES:
+            if val <= 0 or lo <= 0 or hi <= 0:
+                return False          # a ratio must be positive to take a log
+            yi = math.log(val)
+            se = (math.log(hi) - math.log(lo)) / (2 * _Z95)
+        elif m in _LINEAR_MEASURES:
+            yi = float(val)
+            se = (float(hi) - float(lo)) / (2 * _Z95)
+        else:
+            return False
+        if not (se > 0) or not math.isfinite(se) or not math.isfinite(yi):
+            return False              # a zero-width CI gives infinite weight
+        s.yi, s.vi = yi, se ** 2
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def compute_effect_size(s: StudyEffect) -> StudyEffect:
     """Populate yi/vi/se/CI for `s` based on its effect_measure + raw inputs."""
     try:
         m = (s.effect_measure or "GENERIC").upper()
+        # HR historically had its own reported-CI fields. Treat them as the
+        # generic ones so both spellings keep working.
+        if s.effect is None and s.hr is not None:
+            s.effect, s.effect_ci_low, s.effect_ci_high = s.hr, s.hr_ci_low, s.hr_ci_high
         if m == "OR":
             for k in ("events_t", "n_t", "events_c", "n_c"):
                 if getattr(s, k) is None:
@@ -345,6 +408,18 @@ def compute_effect_size(s: StudyEffect) -> StudyEffect:
             s.ci_low = s.yi - _Z95 * s.se
             s.ci_high = s.yi + _Z95 * s.se
     except Exception as e:
+        # Raw per-arm inputs were incomplete. If the paper reported the effect
+        # and its CI directly, that is just as poolable, so try it before giving
+        # up on the study entirely.
+        try:
+            if _from_reported_ci(s, (s.effect_measure or "GENERIC").upper()):
+                s.se = math.sqrt(s.vi)
+                s.ci_low = s.yi - _Z95 * s.se
+                s.ci_high = s.yi + _Z95 * s.se
+                s.error = None
+                return s
+        except Exception:
+            pass
         s.error = str(e)
     return s
 
@@ -663,9 +738,14 @@ def subgroup_analysis(
         df_b = len(means) - 1
         Q_b_p = _chi2_p(Q_b, df_b)
     else:
-        Q_b = float("nan")
+        # Fewer than two groups to compare, so a between-group Q is not a small
+        # number or a zero: it does not exist. NaN said that, but NaN is not
+        # JSON, so it took the whole /api/meta/run response down with a 500 on
+        # every default run (no subgroups assigned is the normal case). None is
+        # both serialisable and the truthful answer.
+        Q_b = None
         df_b = 0
-        Q_b_p = float("nan")
+        Q_b_p = None
 
     return {
         "groups": group_pools,
@@ -1005,6 +1085,13 @@ Output a SINGLE JSON object with these keys (any irrelevant numerical field set 
   // --- Correlation (ZCOR) ---
   "correlation":  <float|null>,   // Pearson r
 
+  // --- Reported effect + CI (works for ANY measure above) ---
+  // Use this whenever the paper states the effect and its 95% CI directly but
+  // does NOT give the per-arm counts / means / SDs. This is the common case.
+  "effect":         <float|null>,   // the reported effect, on its natural scale (e.g. -0.9 for an MD, 0.74 for an OR)
+  "effect_ci_low":  <float|null>,
+  "effect_ci_high": <float|null>,
+
   // --- Generic (GENERIC) ---
   "yi":           <float|null>,   // log effect (e.g. log HR, log OR) on the scale appropriate for the measure
   "se":           <float|null>,   // standard error of yi
@@ -1014,14 +1101,23 @@ Output a SINGLE JSON object with these keys (any irrelevant numerical field set 
 
   "quote":        "<exact sentence(s) from the paper grounding the extraction>",
   "confidence":   <float in [0,1]>,
-  "notes":        "<any caveats, e.g. units, time point, subgroup>"
+  "notes":        "<any caveats, e.g. subgroup, conversions you applied>",
+
+  "units":        "<string|null>",   // unit of the reported value, e.g. "%", "mmHg", "kg"
+  "timepoint":    "<string|null>",   // when it was measured, e.g. "12 months", "at discharge"
+  "source_page":  <int|null>,        // 1-based PDF page the value appears on, if visible
+  "source_table": "<string|null>"    // table the value came from, e.g. "Table 2"
 }}
 
 RULES:
 - Pick the effect_measure that best matches what the paper reports — do NOT convert measures yourself unless they are reported in multiple formats.
 - If the paper does not report enough information to fill ANY supported schema, set effect_measure="UNKNOWN" and leave numerical fields null. Still fill quote/confidence/notes honestly.
 - DO NOT hallucinate numbers. If a value is not in the text, return null. Hallucinated effect sizes corrupt the meta-analysis.
-- Use the units as reported. Document non-obvious units in `notes`.
+- Use the units as reported, and always fill `units` and `timepoint` when the paper states them. A value without its unit and time point cannot be pooled safely.
+- Fill `source_page` and `source_table` ONLY when you can actually see them in the supplied text (e.g. a "Table 2" caption or a page marker). Never guess a page number: a citation that points to the wrong page is worse than none.
+- When a results table is supplied above, read the numbers from it. A table states the arm sizes, event counts and effect estimates unambiguously; the same values in the body text are often a fragment of a sentence and are easy to misattribute to the wrong arm or outcome.
+- Prefer raw inputs (counts, means, SDs, Ns) when the paper gives them; they are more precise than a rounded published CI.
+- When the paper reports only the effect and its 95% CI, set effect_measure to what was reported and fill `effect`, `effect_ci_low` and `effect_ci_high`. Never leave a study unextractable just because the per-arm SDs are absent.
 - For HR: extract the HR and its 95% CI bounds (so we can derive log(HR) + SE). Do not extract HR without CI.
 - For continuous outcomes: if SE is reported instead of SD, convert SD = SE * sqrt(n) and note in `notes`.
 - For PROP: extract numerator (events) and denominator (n).
@@ -1074,6 +1170,7 @@ def extract_effect_size(
     outcome_hint: str = "",
     measure_hint: str = "",
     full_text: Optional[str] = None,
+    tables: Optional[List[Dict[str, Any]]] = None,
 ) -> StudyEffect:
     """LLM-based effect-size extraction. Returns StudyEffect with yi/vi
     computed when feasible, else with `error` set."""
@@ -1084,8 +1181,8 @@ def extract_effect_size(
 
     s = StudyEffect(paper_id=paper_id, title=title, url=url, outcome=outcome_hint)
 
-    if not abstract and not full_text:
-        s.error = "no abstract or full text available for extraction"
+    if not abstract and not full_text and not tables:
+        s.error = "no abstract, full text or tables available for extraction"
         return s
 
     full_text_block = ""
@@ -1100,7 +1197,9 @@ def extract_effect_size(
         measure_hint=measure_hint or "(auto-select; pick what the paper actually reports)",
         title=title,
         abstract=abstract,
-        full_text_block=full_text_block,
+        # Tables first: they are where the numbers are, and putting them ahead
+        # of the prose means they survive the truncation below.
+        full_text_block=format_tables_for_prompt(tables) + full_text_block,
     )
 
     try:
@@ -1129,6 +1228,33 @@ def extract_effect_size(
     except Exception:
         s.extraction_confidence = None
     s.extraction_notes = data.get("notes") or None
+    s.units = (str(data.get("units")).strip() or None) if data.get("units") else None
+    s.timepoint = (str(data.get("timepoint")).strip() or None) if data.get("timepoint") else None
+    s.source_table = (str(data.get("source_table")).strip() or None) if data.get("source_table") else None
+    try:
+        sp = data.get("source_page")
+        # A page number is only useful if it could really be one. Models like to
+        # answer 0, or echo a year, when they cannot find the page.
+        s.source_page = int(sp) if sp is not None and 1 <= int(sp) <= 2000 else None
+    except Exception:
+        s.source_page = None
+    for _k in ("effect", "effect_ci_low", "effect_ci_high"):
+        try:
+            _v = data.get(_k)
+            setattr(s, _k, float(_v) if _v is not None else None)
+        except (TypeError, ValueError):
+            setattr(s, _k, None)
+    # Prefer our page over the model's. When the model names a table we supplied,
+    # the extractor that produced that table already recorded which page it was
+    # on, and a deterministic citation beats one reconstructed from context.
+    if s.source_table and not s.source_page:
+        want = _normalise_ws(s.source_table).lower()
+        for t in tables or []:
+            title = _normalise_ws(str(t.get("title") or "")).lower()
+            if title and (title == want or want in title or title in want) and t.get("page"):
+                s.source_page = int(t["page"])
+                break
+
     s.subgroup = data.get("subgroup") or None
     try:
         s.moderator = float(data.get("moderator")) if data.get("moderator") is not None else None
@@ -1171,3 +1297,185 @@ def extract_effect_size(
         return s
 
     return compute_effect_size(s)
+
+
+# ---------------------------------------------------------------------------
+# Grounded question answering over one paper.
+# ---------------------------------------------------------------------------
+
+_ASK_PROMPT = """You answer a question about ONE research paper by quoting a value from it.
+
+You are not writing prose. You are locating a number (or a short factual answer)
+and citing exactly where in the paper it came from, so a reviewer can check it.
+
+QUESTION: {question}
+
+Paper title: {title}
+Abstract: {abstract}
+{tables_block}{full_text_block}
+
+Return ONLY this JSON object:
+
+{{
+  "found":        <true|false>,      // false if the paper does not answer the question
+  "answer":       "<short answer as it should be displayed, e.g. 'HbA1c -0.9%'>",
+  "value":        <float|null>,      // the numeric value alone, e.g. -0.9
+  "units":        "<string|null>",   // e.g. "%", "mmHg", "events per 1000 person-years"
+  "ci_low":       <float|null>,      // lower bound of the 95% CI, if reported
+  "ci_high":      <float|null>,
+  "timepoint":    "<string|null>",   // e.g. "12 months"
+  "source_page":  <int|null>,        // 1-based PDF page, ONLY if visible in the supplied text
+  "source_table": "<string|null>",   // e.g. "Table 2", if the value came from a table
+  "quote":        "<the exact sentence or table row the answer came from>",
+  "confidence":   <float in [0,1]>
+}}
+
+RULES:
+- If the paper does not answer the question, set found=false, answer to a short
+  explanation, and every other field to null. Do NOT substitute a related number.
+- NEVER invent a value, a page, or a table. An answer a reviewer cannot verify in
+  the source is worse than no answer, because it looks checked when it is not.
+- `quote` must be copied verbatim from the text above. Do not paraphrase it.
+- Report the value in the units the paper used. Do not convert.
+- Output ONLY the JSON object. No prose before or after.
+"""
+
+
+def format_tables_for_prompt(
+    tables: Optional[List[Dict[str, Any]]], max_tables: int = 6, max_rows: int = 15,
+) -> str:
+    """Render extracted tables as prompt text.
+
+    Tables are the densest evidence per token in a trial report, and they are
+    where effect sizes actually live: a results table gives the numbers in rows
+    and columns, while the same numbers in PDF-derived prose arrive as a run-on
+    line with the column structure destroyed. Capped, because one large table
+    can consume the whole prompt budget on its own.
+    """
+    if not tables:
+        return ""
+    parts = []
+    for t in tables[:max_tables]:
+        rows = t.get("data") or []
+        body = "\n".join(" | ".join(str(c) for c in r) for r in rows[:max_rows])
+        page = t.get("page")
+        where = f" (p. {page})" if page else ""
+        parts.append(f"{t.get('title') or 'Table'}{where}\n{body}")
+    return "\nTables:\n" + "\n\n".join(parts) + "\n"
+
+
+def answer_grounded(
+    paper: Dict[str, Any],
+    question: str,
+    model_name: str,
+    full_text: Optional[str] = None,
+    tables: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Answer `question` about one paper with a value plus its provenance.
+
+    This backs the extraction panel's question box. It deliberately returns a
+    structured value rather than prose: the reviewer is going to transcribe the
+    number into an extraction form, so what matters is the value, its units, its
+    time point, and a citation precise enough to jump back to."""
+    title = str(paper.get("title") or paper.get("Title") or "").strip()
+    abstract = str(paper.get("abstract") or paper.get("Abstract") or "").strip()
+
+    if not question.strip():
+        return {"found": False, "answer": "No question was asked.", "error": "empty question"}
+    if not abstract and not full_text and not tables:
+        return {"found": False, "answer": "No text available for this paper.",
+                "error": "no abstract, full text or tables"}
+
+    tables_block = format_tables_for_prompt(tables)
+
+    full_text_block = ""
+    if full_text:
+        trimmed = full_text.strip()
+        if len(trimmed) > 12000:
+            trimmed = trimmed[:12000] + "\n\n[...truncated for prompt budget...]"
+        full_text_block = f"\nFull text:\n{trimmed}\n"
+
+    prompt = _ASK_PROMPT.format(
+        question=question.strip(), title=title, abstract=abstract,
+        tables_block=tables_block, full_text_block=full_text_block,
+    )
+
+    try:
+        model = AIService.get_model(model_name)
+        if model is None:
+            return {"found": False, "answer": "", "error": f"model {model_name!r} not available"}
+        response = model.invoke(prompt)
+        text = getattr(response, "content", None) or str(response)
+    except Exception as e:
+        return {"found": False, "answer": "", "error": f"LLM call failed: {e}"}
+
+    data = _extract_json_block(text)
+    if not data:
+        return {"found": False, "answer": "", "error": "could not parse JSON from LLM response"}
+
+    def _f(k):
+        try:
+            v = data.get(k)
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _s(k):
+        v = data.get(k)
+        return str(v).strip() or None if v else None
+
+    page = None
+    try:
+        p = data.get("source_page")
+        if p is not None and 1 <= int(p) <= 2000:
+            page = int(p)
+    except (TypeError, ValueError):
+        page = None
+
+    # Prefer OUR page number over the model's. When the model names a table we
+    # supplied, pdfplumber already told us which page that table was on, and a
+    # deterministic citation beats one the model reconstructed from context.
+    table_ref = _s("source_table")
+    if table_ref:
+        want = _normalise_ws(table_ref).lower()
+        for t in tables or []:
+            title = _normalise_ws(str(t.get("title") or "")).lower()
+            if title and (title == want or want in title or title in want):
+                if t.get("page"):
+                    page = int(t["page"])
+                break
+
+    # A quote the reviewer cannot find in the source is the one failure mode that
+    # makes this feature worse than useless, so verify it rather than trust it.
+    quote = _s("quote")
+    haystack = " ".join((abstract or "", full_text or "", tables_block)).lower()
+    quote_verified = bool(quote) and _normalise_ws(quote).lower() in _normalise_ws(haystack).lower()
+
+    found = bool(data.get("found"))
+    answer = _s("answer") or ""
+    if not found and not answer:
+        # An empty card reads as a bug rather than as an answer. Say plainly that
+        # the paper does not contain it, which is itself useful information.
+        answer = "Not reported in the text available for this paper."
+
+    return {
+        "found": found,
+        "answer": answer,
+        "value": _f("value"),
+        "units": _s("units"),
+        "ci_low": _f("ci_low"),
+        "ci_high": _f("ci_high"),
+        "timepoint": _s("timepoint"),
+        "source_page": page,
+        "source_table": table_ref,
+        "quote": quote,
+        "quote_verified": quote_verified,
+        "confidence": _f("confidence"),
+        "model_used": model_name,
+    }
+
+
+def _normalise_ws(s: str) -> str:
+    """Collapse whitespace so a quote that differs only in line wrapping still
+    matches the source it was copied from."""
+    return re.sub(r"\s+", " ", s or "").strip()
