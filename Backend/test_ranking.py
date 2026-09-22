@@ -238,29 +238,45 @@ class TestTierHonesty:
 
 
 # ---------------------------------------------------------------------------
-# Recall estimate. It drives a "safe to stop" prompt, so its arithmetic matters.
+# Stop indicators. They drive the "likely complete" and "safe to stop" prompts,
+# so they must come from the decision history, never from the recall arithmetic
+# that used to live here (found / (found + predicted_remaining) fired at 2%
+# screened on the SYNERGY simulation).
 # ---------------------------------------------------------------------------
 
-class TestRecallEstimate:
+class TestStopIndicators:
     def test_counts_includes_found(self):
         recs, _ = corpus()
         assert do(recs, {"d0": 1, "d1": 1, "b0": 0}).includes_found == 2
 
-    def test_estimate_is_found_over_found_plus_predicted(self):
+    def test_no_recall_estimate_is_served(self):
         recs, _ = corpus()
         r = do(recs, {"d0": 1, "b0": 0})
-        expected = r.includes_found / (r.includes_found + r.predicted_remaining)
-        assert r.est_recall == pytest.approx(expected)
+        assert not hasattr(r, "est_recall")
 
-    def test_estimate_is_a_probability(self):
+    def test_predicted_remaining_is_a_count_only(self):
         recs, _ = corpus()
         r = do(recs, {"d0": 1, "b0": 0})
-        assert 0.0 <= r.est_recall <= 1.0
+        assert isinstance(r.predicted_remaining, int) and r.predicted_remaining >= 0
 
-    def test_estimate_is_none_when_there_is_nothing_to_divide(self):
+    def test_not_safe_after_two_labels_whatever_the_scores_say(self):
+        """The old rule fired here (no unlabelled record reaches a summed score of 1.0)."""
         recs, _ = corpus()
-        r = do(recs, {})
-        assert r.est_recall is None
+        r = do(recs, {"d0": 1, "b0": 0})
+        assert r.safe_to_stop is False and r.likely_complete is False
+
+    def test_since_last_include_follows_the_history_order(self):
+        recs, _ = corpus()
+        labels = {"d0": 1, "b0": 0, "b1": 0, "b2": 0}
+        r = rank(RankRequest(records=recs, labels=labels, history=["d0", "b0", "b1", "b2"], tier="tfidf"))
+        assert r.since_last_include == 3
+        r = rank(RankRequest(records=recs, labels=labels, history=["b0", "b1", "b2", "d0"], tier="tfidf"))
+        assert r.since_last_include == 0
+
+    def test_stop_fields_present_on_the_cold_path_too(self):
+        recs, _ = corpus()
+        r = do(recs, {"d0": 1})
+        assert r.tier == "cold" and r.safe_to_stop is False and r.stop_detail
 
     def test_reviewed_counts_every_label_not_only_includes(self):
         recs, _ = corpus()

@@ -218,10 +218,24 @@ class TestSearchEndpoints:
         if r.status_code == 200:
             assert "metformin" in json.dumps(r.json()).lower()
 
-    def test_search_build_survives_a_model_failure(self, client, stub_model):
+    def test_search_build_reports_a_model_failure_as_422(self, client, stub_model):
+        """Not 500, and not a fabricated query either.
+
+        The question could not be turned into a search: nothing is broken, so
+        the status says "unprocessable" and the body carries a message written
+        for the reviewer. The UI shows it verbatim. Returning a made-up query
+        with 200 was the old behaviour and it hid the failure completely.
+        """
         stub_model(RuntimeError("down"))
-        assert post(client, "/api/search/build",
-                    {"pico": PICO_BODY}).status_code != 500
+        r = post(client, "/api/search/build", {"pico": PICO_BODY})
+        assert r.status_code == 422
+        assert "reword" in r.json()["detail"].lower() or "shorten" in r.json()["detail"].lower()
+
+    def test_search_build_never_returns_an_invented_query(self, client, stub_model):
+        stub_model("not json at all")
+        r = post(client, "/api/search/build", {"pico": PICO_BODY})
+        assert r.status_code == 422
+        assert "query" not in r.json()
 
     def test_simulation_yield_returns_counts(self, client, monkeypatch):
         monkeypatch.setattr(api.DataAggregator, "simulate_yield",

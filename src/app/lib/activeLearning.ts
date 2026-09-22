@@ -1,8 +1,9 @@
 // Active-learning ranker for prioritized screening. As the reviewer labels
 // records (include/exclude), a model learns from those labels and re-ranks the
 // remaining unscreened records by predicted relevance. Before there are enough
-// labels it cold-starts from the AI decision. It also estimates recall so the
-// reviewer knows when it is safe to stop.
+// labels it cold-starts from the AI decision. The backend also returns two stop
+// indicators computed from the decision history (see Backend/stopping.py): a
+// heuristic "likely complete" and a hypergeometric "safe to stop".
 //
 // Two rankers, and which one ran is always reported:
 //
@@ -72,8 +73,12 @@ export type ALResult = {
   scores: Record<string, number>;       // predicted P(relevant) for unlabeled
   includesFound: number;                // labeled includes so far
   reviewed: number;                     // total labeled
-  predictedRemaining: number;           // unlabeled predicted relevant (P >= 0.5)
-  estRecall: number | null;             // found / (found + predicted remaining)
+  predictedRemaining: number;           // unlabeled predicted relevant (P >= 0.5); a count, not a recall estimate
+  sinceLastInclude: number;             // decisions since the last include (backend only)
+  likelyComplete: boolean;              // heuristic stop prompt (backend only)
+  safeToStop: boolean;                  // hypergeometric stopping test at 95% recall (backend only)
+  stopPValue: number | null;
+  stopDetail: string;
   trained: boolean;                     // model trained vs cold-start
 };
 
@@ -103,9 +108,13 @@ export function activeRank(items: ALItem[]): ALResult {
   const order = unlabeled.map(d => d.id).sort((a, b) => scores[b] - scores[a]);
   const predictedRemaining = unlabeled.filter(d => scores[d.id] >= 0.5).length;
   const includesFound = docs.filter(d => d.label === 1).length;
-  const denom = includesFound + predictedRemaining;
-  const estRecall = denom > 0 ? includesFound / denom : null;
-  return { order, scores, includesFound, reviewed: labeled.length, predictedRemaining, estRecall, trained };
+  // The in-browser ranker never claims a stopping point: the indicators need the
+  // decision history and are computed by the backend (Backend/stopping.py).
+  return {
+    order, scores, includesFound, reviewed: labeled.length, predictedRemaining,
+    sinceLastInclude: 0, likelyComplete: false, safeToStop: false, stopPValue: null,
+    stopDetail: "stop indicators need the backend ranker", trained,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -124,11 +133,13 @@ export type RankedState = ALResult & {
  * Naive Bayes only when the backend cannot answer.
  *
  * The fallback is deliberately NOT silent: `tier` comes back as "nb" and the
- * caller is expected to say so, because a reviewer deciding when to stop
- * screening is relying on a recall estimate whose validation depends entirely
- * on which model produced it.
+ * caller is expected to say so, because the ordering's validation depends
+ * entirely on which model produced it.
+ *
+ * `history` is the order in which the reviewer decided records (latest last);
+ * the backend's stop indicators are functions of that sequence.
  */
-export async function rankRecords(items: ALItem[], signal?: AbortSignal): Promise<RankedState> {
+export async function rankRecords(items: ALItem[], signal?: AbortSignal, history: string[] = []): Promise<RankedState> {
   const labels: Record<string, 0 | 1> = {};
   for (const it of items) {
     if (it.override) labels[it.id] = it.override === "include" ? 1 : 0;
@@ -140,6 +151,7 @@ export async function rankRecords(items: ALItem[], signal?: AbortSignal): Promis
       labels,
       "auto",
       signal,
+      history,
     );
     // Too few labels to fit anything. The local cold start orders by the AI
     // decision, which beats the arbitrary order the backend returns here.
@@ -152,7 +164,11 @@ export async function rankRecords(items: ALItem[], signal?: AbortSignal): Promis
       includesFound: r.includes_found,
       reviewed: r.reviewed,
       predictedRemaining: r.predicted_remaining,
-      estRecall: r.est_recall,
+      sinceLastInclude: r.since_last_include,
+      likelyComplete: r.likely_complete,
+      safeToStop: r.safe_to_stop,
+      stopPValue: r.stop_p_value,
+      stopDetail: r.stop_detail,
       trained: r.trained,
       tier: r.tier,
       detail: r.detail,

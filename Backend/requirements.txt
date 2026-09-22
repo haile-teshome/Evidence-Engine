@@ -56,3 +56,4 @@ keyring>=24
 # tokenizers
 # einops
 # beautifulsoup4
+rapidfuzz>=3.0

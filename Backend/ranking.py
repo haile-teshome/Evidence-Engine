@@ -32,6 +32,8 @@ import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from stopping import stop_indicators
+
 router = APIRouter(prefix="/api")
 
 EMB_MODEL = "BAAI/bge-large-en-v1.5"
@@ -241,6 +243,10 @@ class RankRequest(BaseModel):
     # Reviewer decisions so far: {record id: 1 include / 0 exclude}. Records not
     # present here are the unlabelled pool being ranked.
     labels: Dict[str, int] = Field(default_factory=dict)
+    # Record ids in the order the reviewer decided them (latest last). The stop
+    # indicators are functions of this sequence; labelled ids missing from it
+    # are treated as screened first.
+    history: List[str] = Field(default_factory=list)
     # "auto" takes the most faithful tier available; "bge" refuses to silently
     # degrade and errors instead; "tfidf" pins the lexical-only tier.
     tier: str = "auto"
@@ -253,8 +259,16 @@ class RankResponse(BaseModel):
     trained: bool
     reviewed: int
     includes_found: int
+    # Unlabelled records the classifier itself scores as relevant. A count, not
+    # a recall estimate: with a handful of labels it is usually zero, which is
+    # why the previous "safe to stop" rule built on it fired at 2% screened.
     predicted_remaining: int
-    est_recall: Optional[float]
+    # Stop indicators computed from the decision history alone (see stopping.py).
+    since_last_include: int = 0
+    likely_complete: bool = False
+    safe_to_stop: bool = False
+    stop_p_value: Optional[float] = None
+    stop_detail: str = ""
     batch: int
     detail: str = ""
 
@@ -323,6 +337,9 @@ def rank(req: RankRequest) -> RankResponse:
     # A supervised ranker needs both classes and a few examples. Short of that
     # there is nothing to report and the client keeps its cold-start ordering,
     # which is the same position the harness is in before its seed round.
+    known = {rid: lab for rid, lab in (req.labels or {}).items() if rid in idx}
+    stops = stop_indicators(known, req.history, n)
+
     both = bool((y == 1).any() and (y == 0).any())
     if not both or len(labeled) < MIN_LABELS:
         return RankResponse(
@@ -333,7 +350,7 @@ def rank(req: RankRequest) -> RankResponse:
             reviewed=len(labeled),
             includes_found=includes_found,
             predicted_remaining=0,
-            est_recall=None,
+            **stops,
             batch=batch,
             detail=f"needs {MIN_LABELS} labels including at least one of each class",
         )
@@ -367,11 +384,10 @@ def rank(req: RankRequest) -> RankResponse:
     scores = {ids[i]: float(score[i]) for i in unlabeled}
 
     # Scores are a sum of two probabilities under bge+tfidf, so the "probably
-    # relevant" line sits at 0.5 per view.
+    # relevant" line sits at 0.5 per view. Reported as a count only; the stop
+    # indicators come from the decision history, not from this number.
     thresh = 1.0 if tier == "bge+tfidf" else 0.5
     predicted_remaining = int(sum(1 for i in unlabeled if score[i] >= thresh))
-    denom = includes_found + predicted_remaining
-    est_recall = (includes_found / denom) if denom > 0 else None
 
     return RankResponse(
         order=[ids[i] for i in order_idx],
@@ -381,7 +397,7 @@ def rank(req: RankRequest) -> RankResponse:
         reviewed=len(labeled),
         includes_found=includes_found,
         predicted_remaining=predicted_remaining,
-        est_recall=est_recall,
+        **stops,
         batch=batch,
         detail=detail,
     )

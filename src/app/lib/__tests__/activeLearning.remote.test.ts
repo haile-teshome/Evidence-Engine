@@ -12,10 +12,9 @@
 //     whichever ranker produced the ordering, `tier` names it, and the
 //     unbenchmarked one is never labelled as the benchmarked one.
 //
-// Everything below exists to pin that. The recall estimate drives a "safe to
-// stop" prompt, so a reviewer trusting an unvalidated model's estimate while
-// believing it is the validated one is how a systematic review silently loses
-// included studies.
+// Everything below exists to pin that. A reviewer trusting an unvalidated
+// model's ordering while believing it is the validated one is how a systematic
+// review silently loses included studies.
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import { rankRecords, activeRank, type ALItem } from "../activeLearning";
@@ -53,7 +52,11 @@ const served = (over: Partial<any> = {}) => JSON.stringify({
   reviewed: 2,
   includes_found: 1,
   predicted_remaining: 1,
-  est_recall: 0.5,
+  since_last_include: 1,
+  likely_complete: false,
+  safe_to_stop: false,
+  stop_p_value: null,
+  stop_detail: "stop indicators start after 1 records",
   batch: 1,
   detail: "benchmarked configuration on mps",
   ...over,
@@ -79,13 +82,21 @@ describe("the benchmarked ranker", () => {
     expect((await rankRecords(items)).order).toEqual(["d", "c"]);
   });
 
-  it("carries the backend's recall estimate through unchanged", async () => {
-    /* This number drives the "safe to stop" prompt, so it must not be
-       recomputed from a different model's scores on the way to the UI. */
-    mockFetch(() => ({ body: served({ est_recall: 0.97, predicted_remaining: 0 }) }));
+  it("carries the backend's stop indicators through unchanged", async () => {
+    /* These drive the "likely complete" and "safe to stop" prompts, so they must
+       not be recomputed from a different model's scores on the way to the UI. */
+    mockFetch(() => ({ body: served({ safe_to_stop: true, likely_complete: true, since_last_include: 240, stop_p_value: 0.012 }) }));
     const r = await rankRecords(items);
-    expect(r.estRecall).toBe(0.97);
-    expect(r.predictedRemaining).toBe(0);
+    expect(r.safeToStop).toBe(true);
+    expect(r.likelyComplete).toBe(true);
+    expect(r.sinceLastInclude).toBe(240);
+    expect(r.stopPValue).toBe(0.012);
+  });
+
+  it("sends the decision history so the backend can compute the stop indicators", async () => {
+    const calls = mockFetch(() => ({ body: served() }));
+    await rankRecords(items, undefined, ["b", "a"]);
+    expect(JSON.parse(calls[0].init.body).history).toEqual(["b", "a"]);
   });
 
   it("posts to the rank endpoint", async () => {
