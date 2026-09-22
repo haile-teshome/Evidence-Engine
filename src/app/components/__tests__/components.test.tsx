@@ -8,6 +8,7 @@
 // that a reader can catch but the app cannot.
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { createRef } from "react";
 import { FileText, Search } from "lucide-react";
 
 import { EmptyState } from "../EmptyState";
@@ -16,6 +17,11 @@ import { ControlPane, InlineStat, PaneDivider } from "../ControlPane";
 import { QueryDiff } from "../QueryDiff";
 import { PrismaFlow } from "../PrismaFlow";
 import { TaskProgressCard } from "../TaskProgressCard";
+import { RapidScreen } from "../RapidScreen";
+import { Button } from "../ui/button";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+} from "../ui/dropdown-menu";
 
 // --------------------------------------------------------------------------
 // EmptyState
@@ -315,5 +321,100 @@ describe("PrismaFlow", () => {
     } as any} />);
     expect(container.textContent).not.toContain("NaN");
     expect(container.textContent).not.toContain("Infinity");
+  });
+});
+
+// --------------------------------------------------------------------------
+// RapidScreen keyboard shortcuts
+// --------------------------------------------------------------------------
+
+describe("RapidScreen shortcuts", () => {
+  const items = [
+    { id: "a", title: "First study", source: "PubMed", url: "", text: "abstract a", aiInclude: true, reason: "" },
+    { id: "b", title: "Second study", source: "PubMed", url: "", text: "abstract b", aiInclude: false, reason: "" },
+  ];
+  const mount = (onDecide: (id: string, d: "include" | "exclude") => void = () => {}) => render(
+    <RapidScreen open items={items} onClose={() => {}} onDecide={onDecide} hideAI />,
+  );
+
+  it("moves forward on the right arrow", () => {
+    mount();
+    expect(screen.getByText("First study")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    expect(screen.getByText("Second study")).toBeTruthy();
+  });
+
+  it("moves back on the left arrow", () => {
+    mount();
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    fireEvent.keyDown(window, { key: "ArrowLeft" });
+    expect(screen.getByText("First study")).toBeTruthy();
+  });
+
+  it("includes on a and excludes on s", () => {
+    const calls: [string, string][] = [];
+    mount((id, d) => calls.push([id, d]));
+    fireEvent.keyDown(window, { key: "a" });
+    fireEvent.keyDown(window, { key: "s" });
+    expect(calls).toEqual([["a", "include"], ["b", "exclude"]]);
+  });
+
+  it("no longer answers to the old i, e and b letters", () => {
+    const calls: [string, string][] = [];
+    mount((id, d) => calls.push([id, d]));
+    fireEvent.keyDown(window, { key: "i" });
+    fireEvent.keyDown(window, { key: "e" });
+    expect(calls).toEqual([]);
+    fireEvent.keyDown(window, { key: "ArrowRight" });
+    fireEvent.keyDown(window, { key: "b" });
+    expect(screen.getByText("Second study")).toBeTruthy();
+  });
+
+  it("labels every button with the key it actually listens for", () => {
+    mount();
+    expect(screen.getByText("Include").closest("button")?.textContent).toContain("a");
+    expect(screen.getByText("Exclude").closest("button")?.textContent).toContain("s");
+    expect(screen.getByText("Skip").closest("button")?.textContent).toContain("→");
+    expect(screen.getByText("Back").closest("button")?.textContent).toContain("←");
+  });
+});
+
+// --------------------------------------------------------------------------
+// Button ref forwarding.
+//
+// Not a detail. On React 18 a ref given to a plain function component is
+// dropped silently, and every Radix primitive that wraps a trigger in
+// `asChild` measures its anchor through that ref. Without it the Export menu
+// mounted with both its items and positioned itself off the top of the screen:
+// the button looked dead and nothing threw. jsdom has no layout, so the
+// positioning itself is not observable here; the ref is, and it is the cause.
+// --------------------------------------------------------------------------
+
+describe("Button", () => {
+  it("forwards its ref to the underlying DOM node", () => {
+    const ref = createRef<HTMLButtonElement>();
+    render(<Button ref={ref}>Press</Button>);
+    expect(ref.current).toBeInstanceOf(HTMLButtonElement);
+    expect(ref.current?.textContent).toBe("Press");
+  });
+
+  it("forwards its ref through asChild, the path Radix triggers use", () => {
+    const ref = createRef<HTMLAnchorElement>();
+    render(<Button asChild><a ref={ref} href="#x">Link</a></Button>);
+    expect(ref.current).toBeInstanceOf(HTMLAnchorElement);
+  });
+
+  it("gives a Radix trigger a real anchor element to measure", () => {
+    const ref = createRef<HTMLButtonElement>();
+    render(
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild><Button ref={ref}>Export</Button></DropdownMenuTrigger>
+        <DropdownMenuContent><DropdownMenuItem>CSV</DropdownMenuItem></DropdownMenuContent>
+      </DropdownMenu>,
+    );
+    // A trigger Radix cannot measure leaves the popper at its pre-measurement
+    // transform, which is what put the menu off-screen.
+    expect(ref.current).toBeInstanceOf(HTMLButtonElement);
+    expect(ref.current?.getAttribute("aria-haspopup")).toBe("menu");
   });
 });

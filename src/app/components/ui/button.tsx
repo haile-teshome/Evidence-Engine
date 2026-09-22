@@ -34,25 +34,28 @@ const buttonVariants = cva(
   },
 );
 
-function Button({
-  className,
-  variant,
-  size,
-  asChild = false,
-  ...props
-}: React.ComponentProps<"button"> &
-  VariantProps<typeof buttonVariants> & {
-    asChild?: boolean;
-  }) {
+// forwardRef is required, not cosmetic. On React 18 a ref given to a plain
+// function component is dropped silently, and every Radix primitive that wraps
+// a trigger in `asChild` (dropdown, popover, tooltip) measures its anchor
+// through exactly that ref. Without it the menu still mounts and still holds
+// its items, but the popper never learns where the trigger is and stays parked
+// at its pre-measurement transform, off the top of the screen: the button looks
+// dead, and nothing errors.
+const Button = React.forwardRef<
+  HTMLButtonElement,
+  React.ComponentProps<"button"> &
+    VariantProps<typeof buttonVariants> & { asChild?: boolean }
+>(function Button({ className, variant, size, asChild = false, ...props }, ref) {
   const Comp = asChild ? Slot : "button";
 
   return (
     <Comp
+      ref={ref}
       data-slot="button"
       className={cn(buttonVariants({ variant, size, className }))}
       {...props}
     />
   );
-}
+});
 
 export { Button, buttonVariants };

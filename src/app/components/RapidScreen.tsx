@@ -18,9 +18,16 @@ export type RapidItem = {
 };
 
 // Small keycap, tinted to sit on either a solid or a subtle button.
-function Kbd({ children, tone = "muted" }: { children: React.ReactNode; tone?: "muted" | "onColor" }) {
+function Kbd({ children, tone = "muted" }: {
+  children: React.ReactNode; tone?: "muted" | "onColor" | "onAmber";
+}) {
+  const tones = {
+    onColor: "bg-white/25 text-white",
+    onAmber: "bg-amber-950/15 text-amber-950",
+    muted: "bg-muted text-muted-foreground",
+  };
   return (
-    <kbd className={`ml-1.5 text-[10px] font-medium leading-none px-1 py-0.5 rounded ${tone === "onColor" ? "bg-white/25 text-white" : "bg-muted text-muted-foreground"}`}>
+    <kbd className={`ml-1.5 text-[10px] font-medium leading-none px-1 py-0.5 rounded ${tones[tone]}`}>
       {children}
     </kbd>
   );
@@ -44,7 +51,7 @@ export function RapidScreen({
 }) {
   // ── Per-stage persistence (position + starred cards) ──────────────────────
   const storeKey = `rapidscreen:v1:${label}`;
-  const readStore = (): { lastId?: string; flags?: string[] } => {
+  const readStore = (): { lastId?: string; flags?: string[]; history?: string[] } => {
     try { return JSON.parse(localStorage.getItem(storeKey) || "{}"); } catch { return {}; }
   };
   const writeStore = (patch: object) => {
@@ -61,9 +68,13 @@ export function RapidScreen({
   const [onlyStarred, setOnlyStarred] = useState(false);
 
   const COLD: RankedState = {
-    order: [], scores: {}, includesFound: 0, reviewed: 0,
-    predictedRemaining: 0, estRecall: null, trained: false, tier: "cold", detail: "",
+    order: [], scores: {}, includesFound: 0, reviewed: 0, predictedRemaining: 0,
+    sinceLastInclude: 0, likelyComplete: false, safeToStop: false, stopPValue: null, stopDetail: "",
+    trained: false, tier: "cold", detail: "",
   };
+  // The order in which the reviewer decided records (latest last). The stop
+  // indicators are functions of this sequence, so it persists with the stage.
+  const historyRef = useRef<string[]>(readStore().history || []);
   const [al, setAl] = useState<RankedState>(COLD);
   const [ranking, setRanking] = useState(false);
   const byId = useMemo(() => new Map(items.map(it => [it.id, it])), [items]);
@@ -108,7 +119,7 @@ export function RapidScreen({
     if (rankedAt.current >= 0 && reviewedNow - rankedAt.current < batchSize) return;
     const ac = new AbortController();
     setRanking(true);
-    rankRecords(itemsRef.current, ac.signal)
+    rankRecords(itemsRef.current, ac.signal, historyRef.current)
       .then(r => {
         rankedAt.current = reviewedNow;
         setAl(r);
@@ -139,11 +150,17 @@ export function RapidScreen({
   const cur = queue[i];
   const reviewed = items.filter(x => x.override).length;
   const pct = items.length ? (reviewed / items.length) * 100 : 0;
-  const safeToStop = learn && al.reviewed > 0 && (al.predictedRemaining === 0 || (al.estRecall != null && al.estRecall >= 0.95));
-
   const next = () => setI(v => Math.min(queue.length - 1, v + 1));
   const back = () => setI(v => Math.max(0, v - 1));
-  const decide = (d: "include" | "exclude") => { if (cur) { onDecide(cur.id, d); next(); } };
+  const decide = (d: "include" | "exclude") => {
+    if (!cur) return;
+    // A re-decided record moves to the end of the history: what matters for
+    // stopping is the sequence of decisions, and this is the latest one.
+    historyRef.current = [...historyRef.current.filter(id => id !== cur.id), cur.id];
+    writeStore({ history: historyRef.current });
+    onDecide(cur.id, d);
+    next();
+  };
   const jumpTo = (idx: number) => { setI(idx); setBrowseOpen(false); setSearch(""); };
   const toggleFlag = (id?: string) => {
     if (!id) return;
@@ -162,10 +179,10 @@ export function RapidScreen({
       const k = e.key.toLowerCase();
       if (k === "escape") { e.preventDefault(); browseOpen ? setBrowseOpen(false) : onClose(); return; }
       if (typing || browseOpen) return;
-      if (k === "i") { e.preventDefault(); decide("include"); }
-      else if (k === "e") { e.preventDefault(); decide("exclude"); }
-      else if (k === "s") { e.preventDefault(); next(); }
-      else if (k === "b" || k === "backspace") { e.preventDefault(); back(); }
+      if (k === "a") { e.preventDefault(); decide("include"); }
+      else if (k === "s") { e.preventDefault(); decide("exclude"); }
+      else if (k === "arrowright") { e.preventDefault(); next(); }
+      else if (k === "arrowleft" || k === "backspace") { e.preventDefault(); back(); }
       else if (k === "f") { e.preventDefault(); toggleFlag(cur?.id); }
       else if (k === "/") { e.preventDefault(); setBrowseOpen(true); }
     };
@@ -228,7 +245,7 @@ export function RapidScreen({
               )}
               <button
                 onClick={() => setLearn(v => !v)}
-                title="Rank the queue by a model that learns from your labels, and estimate recall to suggest when to stop"
+                title="Rank the queue by a model that learns from your labels, and indicate when it is safe to stop"
                 className={`text-[11px] px-2.5 py-1.5 rounded-full border inline-flex items-center gap-1.5 transition-colors ${learn ? "bg-primary text-primary-foreground border-primary shadow-sm" : "text-muted-foreground hover:bg-muted"}`}
               >
                 <Sparkles className="size-3" />Active learning {learn ? "on" : "off"}
@@ -255,14 +272,23 @@ export function RapidScreen({
           {learn && (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-muted-foreground">
               <span>{al.includesFound} includes found</span>
-              <span>~{al.predictedRemaining} predicted relevant remaining</span>
-              {al.estRecall != null && <span>est. recall {Math.round(al.estRecall * 100)}%</span>}
+              {al.reviewed > 0 && <span title={al.stopDetail}>{al.sinceLastInclude} since last include</span>}
               {!al.trained && <span className="text-amber-600">learning: label a few includes and excludes</span>}
               {ranking && <span className="text-muted-foreground/70">re-ranking...</span>}
-              {safeToStop && <span className="inline-flex items-center gap-1 text-emerald-600 font-medium"><CheckCircle2 className="size-3.5" />safe to stop</span>}
-              {/* Name the ranker. The stop suggestion above rests on a recall
-                  estimate, and only the validated ranker has a WSS@95 behind
-                  it, so a reviewer must be able to tell which one is running. */}
+              {/* Two stop indicators, both computed by the backend from the
+                  decision history (Backend/stopping.py). "Likely complete" is a
+                  heuristic prompt to review; "safe to stop" is a hypergeometric
+                  test at 95% recall and is the only one that carries the word.
+                  The old rule (no unlabelled record scored above 1.0) fired at
+                  2% screened with median recall 0.30 on the SYNERGY simulation. */}
+              {al.safeToStop
+                ? <span className="inline-flex items-center gap-1 text-emerald-600 font-medium" title={al.stopDetail}><CheckCircle2 className="size-3.5" />safe to stop (95% recall)</span>
+                : al.likelyComplete
+                  ? <span className="inline-flex items-center gap-1 text-amber-600 font-medium" title={al.stopDetail}><CheckCircle2 className="size-3.5" />likely complete; review before stopping</span>
+                  : null}
+              {/* Name the ranker. Only the validated ranker has a WSS@95 behind
+                  its ordering, so a reviewer must be able to tell which one is
+                  running. */}
               {al.trained && (
                 al.tier === "bge+tfidf"
                   ? <span className="text-muted-foreground/70" title={al.detail}>validated ranker</span>
@@ -395,20 +421,21 @@ export function RapidScreen({
         <div className="shrink-0 bg-card border-t px-5 py-3">
           <div className="flex items-center justify-center gap-2 flex-nowrap">
             <Button onClick={() => decide("include")} disabled={!cur} className="h-10 px-3.5 bg-emerald-600 hover:bg-emerald-700 text-white shadow-sm">
-              <Check className="size-4 mr-1" />Include<Kbd tone="onColor">i</Kbd>
+              <Check className="size-4 mr-1" />Include<Kbd tone="onColor">a</Kbd>
             </Button>
             <Button onClick={() => decide("exclude")} disabled={!cur} className="h-10 px-3.5 bg-rose-600 hover:bg-rose-700 text-white shadow-sm">
-              <X className="size-4 mr-1" />Exclude<Kbd tone="onColor">e</Kbd>
+              <X className="size-4 mr-1" />Exclude<Kbd tone="onColor">s</Kbd>
             </Button>
             <span className="mx-0.5 h-6 w-px bg-border shrink-0" aria-hidden="true" />
-            <Button variant="ghost" onClick={() => toggleFlag(cur?.id)} disabled={!cur} className={`h-10 px-2.5 ${curFlagged ? "text-amber-600" : "text-muted-foreground"}`}>
-              <Star className={`size-4 mr-1 ${curFlagged ? "fill-amber-400 text-amber-500" : ""}`} />Star<Kbd>f</Kbd>
+            <Button onClick={() => toggleFlag(cur?.id)} disabled={!cur}
+                    className="h-10 px-3.5 bg-amber-400 hover:bg-amber-500 text-amber-950 border-amber-400 shadow-sm dark:bg-amber-500 dark:hover:bg-amber-400 dark:text-amber-950">
+              <Star className={`size-4 mr-1 ${curFlagged ? "fill-amber-950" : ""}`} />Star<Kbd tone="onAmber">f</Kbd>
             </Button>
             <Button variant="ghost" onClick={next} disabled={!cur} className="h-10 px-2.5 text-muted-foreground">
-              <SkipForward className="size-4 mr-1" />Skip<Kbd>s</Kbd>
+              <SkipForward className="size-4 mr-1" />Skip<Kbd>→</Kbd>
             </Button>
             <Button variant="ghost" onClick={back} disabled={i === 0} className="h-10 px-2.5 text-muted-foreground">
-              <Undo2 className="size-4 mr-1" />Back<Kbd>b</Kbd>
+              <Undo2 className="size-4 mr-1" />Back<Kbd>←</Kbd>
             </Button>
           </div>
         </div>

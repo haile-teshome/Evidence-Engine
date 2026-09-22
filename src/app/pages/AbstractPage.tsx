@@ -1,5 +1,5 @@
 import { Fragment, useState, useEffect, useMemo } from "react";
-import { useStore } from "../lib/store";
+import { useStore, resolveInUseRun, ScreeningPlan } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
 import { frameworkOf, labelFor, type FrameworkId } from "../lib/frameworks";
 import { categoriseAbstractExclusion, effectiveAbstractDecision } from "../lib/exclusionBucketing";
@@ -12,6 +12,11 @@ import { Badge } from "../components/ui/badge";
 import { PopoverContent, PopoverTrigger, PopoverClose, ScrollAwarePopover } from "../components/ui/popover";
 import { Search, Download, Minus, Zap, ChevronRight, ChevronDown, Maximize2, Minimize2, Plus, RotateCcw, History, X, Check, FileText, CheckCircle2, XCircle, Clock, GripVertical, Sparkles, Pencil, CircleDashed } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
+import { CriteriaColumns } from "../components/CriteriaColumns";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
+  DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
+} from "../components/ui/dropdown-menu";
 import { RapidScreen } from "../components/RapidScreen";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
@@ -56,15 +61,186 @@ function picoVoteFullLabel(v: PicoVote): string {
 
 // ---- page ------------------------------------------------------------------
 
+
+/** What is about to be screened, shown before the run starts.
+ *
+ *  Screening is the expensive, irreversible-feeling step: one model call per
+ *  article against criteria that were mostly inferred rather than typed. The
+ *  count alone ("34 of 34 unique articles ready") did not help anyone check
+ *  anything, because the interesting question is not how many but WHICH
+ *  articles and against WHAT. Both are visible here while it is still free to
+ *  go back and fix the query or the criteria.
+ */
+export function ScreeningPreview({
+  papers, excludedIds, framework, pico, inclusion, exclusion,
+  plan, activeQuery = "", countedQuery = null,
+}: {
+  papers: Paper[];
+  excludedIds: Set<string>;
+  framework: FrameworkId;
+  pico: Record<string, string>;
+  inclusion: string[];
+  exclusion: string[];
+  /** The Planning run this corpus came from, when there was one. */
+  plan?: ScreeningPlan | null;
+  activeQuery?: string;
+  /** The query the planned counts were measured against, when known. */
+  countedQuery?: string | null;
+}) {
+  const toScreen = papers.filter(p => !excludedIds.has(p.id));
+
+  if (toScreen.length === 0) return null;
+
+  return (
+    <Card className="p-0 overflow-hidden">
+      {/* Where the records came from, and where they went: planned vs
+          retrieved per source, reconciled to the unique count. A
+          planned/retrieved mismatch is the signal that the curation did not
+          track over -- a source erroring out, or a query the target database
+          interpreted differently. It belongs here rather than in a separate
+          card because it answers the same question as the rest of this panel:
+          is this the set I meant to screen? */}
+      {plan && (
+        <div>
+
+          <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/10">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Retrieval per database</span>
+            <span className="text-[11px] text-muted-foreground">
+              {plan.runLabel ? `${plan.runLabel} · ` : ""}retrieved {new Date(plan.ranAt).toLocaleString()}
+            </span>
+          </div>
+          <div className="divide-y">
+            {plan.sources.map(src => {
+              const planned = plan.counts?.[src];
+              const got = plan.retrieved?.[src] ?? 0;
+              // Only a MATERIAL shortfall is worth a warning. Any strict
+              // inequality fired on 1,379 vs 1,378, which is noise.
+              const short = planned != null && planned > 0 && got < planned * 0.9 && planned - got >= 5;
+              const st = plan.sourceStatus?.[src];
+              const q = plan.perDbQueries[src] || "";
+              // Compare the strings that were ACTUALLY used, per source. The
+              // count is measured per source and the retrieval runs per source,
+              // so a unified-query comparison could not see a per-database edit:
+              // it passed silently and the shortfall got blamed on the database.
+              // Plans recorded before this fall back to the unified comparison.
+              const counted = plan.countedPerDb?.[src];
+              const stalePlan = counted !== undefined
+                ? !!counted && !!q && counted !== q
+                : !!countedQuery && !!activeQuery && countedQuery !== activeQuery;
+              // "Capped" means the source had MORE than we asked for. Asking for
+              // a source's full planned yield and receiving it is a complete
+              // result, not a truncated one; reporting that as a cap told the
+              // reviewer to raise a limit that was never binding.
+              const unplanned = planned == null || planned <= 0;
+              const truncatedHere = !!st?.capped && (unplanned || st.requested < planned);
+              return (
+                <div key={src} className="px-3 py-2">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="font-medium">{src}</span>
+                    <span className="tabular-nums text-muted-foreground">
+                      planned {planned != null ? planned.toLocaleString() : "—"} · retrieved{" "}
+                      <span className={short ? "text-amber-600 font-medium" : ""}>{got.toLocaleString()}</span>
+                    </span>
+                  </div>
+                  {/* State what happened. The app performed this call and knows
+                      the outcome, so offering the reviewer a list of things that
+                      might have gone wrong was a failure to report rather than a
+                      genuine ambiguity. Ordered by how actionable each case is. */}
+                  {st?.status === "error" ? (
+                    <div className="mt-1 text-[11px] text-rose-600">
+                      {src} failed after {st.ms.toLocaleString()} ms: {st.error || st.error_type || "unknown error"}.
+                      Nothing was retrieved from this source. Retry retrieval to try again.
+                    </div>
+                  ) : truncatedHere ? (
+                    <div className="mt-1 text-[11px] text-amber-600">
+                      Stopped at {st!.requested.toLocaleString()} records, and this source had more.
+                      {unplanned
+                        ? " It was never counted on the Planning tab, so there was no yield to retrieve against. Re-run Planning to count it."
+                        : " Re-run Planning to refresh its yield."}
+                    </div>
+                  ) : short && stalePlan ? (
+                    <div className="mt-1 text-[11px] text-amber-600">
+                      The planned count for {src} was measured on a different query from the one
+                      this search ran, so the two numbers do not describe the same search. Re-run
+                      Planning, then retry retrieval.
+                    </div>
+                  ) : short ? (
+                    <div className="mt-1 text-[11px] text-amber-600">
+                      {src} returned {got.toLocaleString()} of the {planned?.toLocaleString()} planned
+                      {st ? ` in ${st.ms.toLocaleString()} ms` : ""}, without erroring, on the same
+                      query the count was taken on. Its index has changed since Planning ran.
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <CriteriaColumns
+        framework={framework} pico={pico} inclusion={inclusion} exclusion={exclusion}
+        emptyHint="No criteria set. Define the question on the Home page first, or screening has nothing to judge each article against."
+      />
+    </Card>
+  );
+}
+
 export function AbstractPage() {
   const s = useStore();
+  // Screening retrieves with the planning run that is IN USE, never with the
+  // query editor's current text. Planning measures a count per source and
+  // screening retrieves per source, so unless both read the same string a
+  // planned-vs-retrieved gap says nothing about the database: it is an artefact
+  // of the app comparing two different searches. Defaults to the most recent
+  // run; the reviewer can pin an older one on the Planning tab.
+  const planRun = resolveInUseRun(s.simulationRuns, s.inUseRunId);
+  const planQueries = planRun ? planRun.perDbQueries : s.perDbQueries;
+  const planCounts = planRun ? planRun.counts : s.simulation;
+  const planBase = planRun?.unifiedQuery || s.unifiedSearchQuery || s.query || "";
+  /** The exact string each source is searched with, frozen alongside its count. */
+  const queryFor = (src: string) => planQueries[src] || planBase;
+
+  /** One plan record for every retrieval path, so the provenance of a screened
+   *  corpus is written the same way whether it came from AI screening, manual
+   *  screening, or a retry. */
+  const buildPlan = (
+    planSources: string[],
+    sourceCounts: Record<string, number>,
+    sourceStatus: Record<string, any>,
+  ) => ({
+    sources: planSources,
+    perDbQueries: Object.fromEntries(planSources.map(src => [src, queryFor(src)])),
+    counts: planCounts ? { ...planCounts } : null,
+    countedQuery: planRun?.unifiedQuery ?? s.simulationQuery ?? null,
+    // The counts and the retrieval now come from one run, so this records the
+    // per-source string both were measured on rather than a unified query that
+    // may never have been sent to anything.
+    countedPerDb: Object.fromEntries(planSources.map(src => [src, queryFor(src)])),
+    runId: planRun?.id ?? null,
+    runLabel: planRun?.label ?? null,
+    retrieved: { ...sourceCounts },
+    sourceStatus: { ...sourceStatus },
+    ranAt: new Date().toISOString(),
+  });
+
   const task = s.tasks["abstract-screen"];
   const running = task?.status === "running";
+  // Retrieval is its own task so a retry never masquerades as a screening run.
+  const fetchTask = s.tasks["retrieval"];
+  const fetching = fetchTask?.status === "running";
 
   // mode "full" re-screens the whole corpus and replaces the results; mode
   // "incremental" only screens papers not already in results (e.g. records added
   // later from citation snowballing), leaving existing decisions + overrides
   // untouched. Either way the pass is archived so prior runs can be restored.
+  const [retrying, setRetrying] = useState(false);
+
+  // What the pane counts. "Ready to screen" is the number that will actually
+  // cost a model call, so Quality-Assessment exclusions come off it.
+  const readyToScreen = (s.uniquePapers || []).filter(p => !s.excludedByQuality.has(p.id)).length;
+  const totalRetrieved = s.rawPapers?.length ?? s.uniquePapers?.length ?? 0;
+
   async function runSearch(mode: "full" | "incremental" = "full") {
     if (!s.query) { toast.error("Define a research goal on the Home page first."); return; }
 
@@ -125,7 +301,7 @@ export function AbstractPage() {
         // A missing simulation is not a harmless default: fetchForScreening then
         // falls back to a fixed per-source budget and the curated yields are
         // silently ignored. Stop and say so instead.
-        if (!s.simulation || !Object.keys(s.simulation).length) {
+        if (!planCounts || !Object.keys(planCounts).length) {
           s.updateTask("abstract-screen", {
             status: "error",
             detail: "No planning yields — run the simulation on the Planning tab first.",
@@ -135,7 +311,7 @@ export function AbstractPage() {
           );
           return;
         }
-        const unplanned = planSources.filter(src => !(src in (s.simulation || {})));
+        const unplanned = planSources.filter(src => !(src in (planCounts || {})));
         if (unplanned.length) {
           toast.warning(
             `${unplanned.join(", ")} ${unplanned.length === 1 ? "was" : "were"} never simulated on the Planning tab. ` +
@@ -145,28 +321,15 @@ export function AbstractPage() {
 
         // Pull the FULL planning corpus: every source's own query, up to its
         // planning yield, so all found papers are screened, not a small sample.
-        const { papers: all, truncated, sourceCounts } = await DataAggregator.fetchForScreening(
-          planSources,
-          s.perDbQueries,
-          s.unifiedSearchQuery || s.query,
-          s.simulation,
-          s.pico,
-          { signal },
+        const { papers: all, truncated, sourceCounts, sourceStatus } = await DataAggregator.fetchForScreening(
+          planSources, planQueries, planBase, planCounts, s.pico, { signal },
         );
         if (signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
 
         // Record which plan produced this corpus. PRISMA has to report the search
         // per database, and without this the link between the planning run and
         // the screened set exists nowhere.
-        s.setScreeningPlan({
-          sources: planSources,
-          perDbQueries: Object.fromEntries(
-            planSources.map(src => [src, s.perDbQueries[src] || s.unifiedSearchQuery || s.query || ""]),
-          ),
-          counts: s.simulation ? { ...s.simulation } : null,
-          retrieved: { ...sourceCounts },
-          ranAt: new Date().toISOString(),
-        });
+        s.setScreeningPlan(buildPlan(planSources, sourceCounts, sourceStatus));
         if (truncated.length > 0) {
           toast.info(`Large result set: capped ${truncated.join(", ")} for screening.`);
         }
@@ -357,10 +520,13 @@ export function AbstractPage() {
       if (gone.length) drift.push(`${gone.join(", ")} removed`);
       if (added.length) drift.push(`${added.join(", ")} added`);
       const edited = now.filter(
-        src => plan.perDbQueries[src] !== undefined &&
-               plan.perDbQueries[src] !== (s.perDbQueries[src] || s.unifiedSearchQuery || s.query || ""),
+        src => plan.perDbQueries[src] !== undefined && plan.perDbQueries[src] !== queryFor(src),
       );
       if (edited.length) drift.push(`${edited.join(", ")} query changed`);
+      // Switching which planning run is in use changes every query at once.
+      if (planRun && plan.runId && plan.runId !== planRun.id && !edited.length) {
+        drift.push(`planning run changed to ${planRun.label}`);
+      }
     } else {
       const orphans = Array.from(
         new Set(s.uniquePapers.map(p => p.source).filter(src => src && !now.includes(src))),
@@ -368,6 +534,60 @@ export function AbstractPage() {
       if (orphans.length) drift.push(`${orphans.join(", ")} no longer in the plan`);
     }
     return drift;
+  }
+
+  /** Re-fetch the corpus from the selected databases and record the plan.
+   *
+   *  Shared by the manual path and the Retry control. Retrying matters most
+   *  when a source under-delivered: a transient API failure looks identical to
+   *  a genuinely small result set, and the only way to tell them apart is to
+   *  ask again. Screening is NOT run here, so a retry costs database calls
+   *  rather than a model call per article. */
+  async function refetchCorpus(): Promise<boolean> {
+    if (!s.query) { toast.error("Define a research goal on the Home page first."); return false; }
+    const planSources = s.sources.filter(x => x !== "Local PDFs");
+    // A retrieval-only task id, NOT "abstract-screen": this path makes database
+    // calls and no model calls, so labelling it as a screening run would hide
+    // the control pane behind a progress card that claims articles are being
+    // judged. The screening task stays whatever it was.
+    const { abort } = s.startTask("retrieval", [
+      { id: "fetch", label: "Retrieving from databases", status: "running" },
+    ]);
+    s.updateTask("retrieval", {
+      detail: `Querying ${planSources.length} ${planSources.length === 1 ? "database" : "databases"}: ${planSources.join(", ")}`,
+    });
+    try {
+      const { papers: all, sourceCounts, sourceStatus } = await DataAggregator.fetchForScreening(
+        planSources, planQueries, planBase, planCounts, s.pico, { signal: abort.signal },
+      );
+      if (abort.signal.aborted) { s.updateTask("retrieval", { status: "canceled" }); return false; }
+      // Retry is exactly when the per-source diagnostics matter, so the new
+      // plan carries them rather than dropping back to "no status recorded".
+      s.setScreeningPlan(buildPlan(planSources, sourceCounts, sourceStatus));
+      const { unique, duplicates } = Deduplicator.run(all);
+      s.setRawPapers(all); s.setUniquePapers(unique); s.setDuplicatesCount(duplicates.length);
+      s.updateTask("retrieval", { status: "done" });
+      return true;
+    } catch (e: any) {
+      s.updateTask("retrieval", { status: "error", detail: e?.message || "Fetch failed" });
+      toast.error(`Search failed: ${e?.message?.slice(0, 100) || "unknown error"}`);
+      return false;
+    }
+  }
+
+  async function retrySearch() {
+    setRetrying(true);
+    try {
+      const before = s.uniquePapers?.length ?? 0;
+      if (await refetchCorpus()) {
+        const after = s.uniquePapers?.length ?? 0;
+        toast.success(after === before
+          ? `Search re-run: ${after.toLocaleString()} unique articles, unchanged.`
+          : `Search re-run: ${after.toLocaleString()} unique articles.`);
+      }
+    } finally {
+      setRetrying(false);
+    }
   }
 
   async function startManual() {
@@ -383,19 +603,11 @@ export function AbstractPage() {
         // Same source filter and provenance as the AI path, so a manually
         // screened corpus is traceable to its planning run too.
         const planSources = s.sources.filter(x => x !== "Local PDFs");
-        const { papers: all, sourceCounts } = await DataAggregator.fetchForScreening(
-          planSources, s.perDbQueries, s.unifiedSearchQuery || s.query, s.simulation, s.pico, { signal: abort.signal },
+        const { papers: all, sourceCounts, sourceStatus } = await DataAggregator.fetchForScreening(
+          planSources, planQueries, planBase, planCounts, s.pico, { signal: abort.signal },
         );
         if (abort.signal.aborted) { s.updateTask("abstract-screen", { status: "canceled" }); return; }
-        s.setScreeningPlan({
-          sources: planSources,
-          perDbQueries: Object.fromEntries(
-            planSources.map(src => [src, s.perDbQueries[src] || s.unifiedSearchQuery || s.query || ""]),
-          ),
-          counts: s.simulation ? { ...s.simulation } : null,
-          retrieved: { ...sourceCounts },
-          ranAt: new Date().toISOString(),
-        });
+        s.setScreeningPlan(buildPlan(planSources, sourceCounts, sourceStatus));
         const { unique, duplicates } = Deduplicator.run(all);
         s.setRawPapers(all); s.setUniquePapers(unique); s.setDuplicatesCount(duplicates.length);
         corpus = unique.filter(p => !s.excludedByQuality.has(p.id));
@@ -519,76 +731,7 @@ export function AbstractPage() {
           </AlertDescription>
         </Alert>
       )}
-      {!r && s.uniquePapers && (
-        <Alert>
-          <AlertDescription>
-            {s.uniquePapers.length - s.excludedByQuality.size} of {s.uniquePapers.length} unique articles ready for screening{s.excludedByQuality.size > 0 ? ` (${s.excludedByQuality.size} excluded in Quality Assessment)` : ""}.
-          </AlertDescription>
-        </Alert>
-      )}
 
-      {/* Provenance: what the Planning tab curated versus what screening actually
-          retrieved, per database. A planned/retrieved mismatch is the signal that
-          the curation did not track over — a source erroring out, or a query the
-          target database silently interpreted differently. */}
-      {s.screeningPlan && (
-        <div className="rounded-xl border overflow-hidden">
-          <div className="flex items-center justify-between px-3 py-2 border-b bg-muted/30">
-            <span className="text-xs font-medium">Search per database</span>
-            <span className="text-[11px] text-muted-foreground">
-              from the planning run of {new Date(s.screeningPlan.ranAt).toLocaleString()}
-            </span>
-          </div>
-          <div className="divide-y">
-            {s.screeningPlan.sources.map(src => {
-              const planned = s.screeningPlan!.counts?.[src];
-              const got = s.screeningPlan!.retrieved?.[src] ?? 0;
-              const short = planned != null && got < planned;
-              const q = s.screeningPlan!.perDbQueries[src] || "";
-              const custom = q !== (s.unifiedSearchQuery || s.query);
-              return (
-                <div key={src} className="px-3 py-2">
-                  <div className="flex items-center justify-between gap-2 text-xs">
-                    <span className="font-medium">
-                      {src}
-                      {custom && <span className="ml-1.5 text-[10px] text-muted-foreground">(custom query)</span>}
-                    </span>
-                    <span className="tabular-nums text-muted-foreground">
-                      planned {planned != null ? planned.toLocaleString() : "—"} · retrieved{" "}
-                      <span className={short ? "text-amber-600 font-medium" : ""}>{got.toLocaleString()}</span>
-                    </span>
-                  </div>
-                  {short && (
-                    <div className="mt-1 text-[11px] text-amber-600">
-                      Retrieved fewer than planned. The source may have errored, or it interprets this query
-                      differently from the database the plan was counted against.
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {/* Reconcile retrieved -> unique on screen. Without this the panel sums
-              to one number while the header shows another, and the reader is left
-              to work out that the gap is deduplication. */}
-          {(() => {
-            const totalRetrieved = Object.values(s.screeningPlan!.retrieved || {}).reduce((a, b) => a + b, 0);
-            const dupes = s.duplicatesCount ?? 0;
-            const uniq = s.uniquePapers?.length ?? Math.max(0, totalRetrieved - dupes);
-            return (
-              <div className="flex items-center justify-between gap-2 px-3 py-2 border-t bg-muted/20 text-xs">
-                <span className="text-muted-foreground">Total retrieved</span>
-                <span className="tabular-nums">
-                  <span className="font-medium">{totalRetrieved.toLocaleString()}</span>
-                  <span className="text-muted-foreground"> − {dupes.toLocaleString()} duplicates = </span>
-                  <span className="font-medium">{uniq.toLocaleString()}</span>
-                  <span className="text-muted-foreground"> unique</span>
-                </span>
-              </div>
-            );
-          })()}
-        </div>
-      )}
 
       {r && (
         <>
@@ -807,10 +950,15 @@ export function AbstractPage() {
                   </div>
                   <div className="ml-auto flex items-center gap-1 shrink-0">
                     {tableQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleRows.length}/{r.length}</span>}
-                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides, s.framework)} className="h-8 px-2" title="Download results as Excel (XLSX)">
-                      <Download className="size-4" />
+<AbstractExportMenu
+                      rows={r} overrides={s.abstractOverrides} framework={s.framework}
+                      meta={{ framework: s.framework, pico: s.pico, inclusion: s.inclusion, exclusion: s.exclusion }}
+                      className="h-8 px-2"
+                    />
+                    <Button size="sm" variant="ghost" onClick={() => setMaxOpen(false)}
+                      className="h-8 px-2" title="Exit full screen" aria-label="Exit full screen">
+                      <Minimize2 className="size-4" />
                     </Button>
-                    <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
                   </div>
                 </div>
               ) : (
@@ -827,9 +975,11 @@ export function AbstractPage() {
                     <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Expand the table to full screen">
                       <Maximize2 className="size-4" />
                     </Button>
-                    <Button size="sm" variant="ghost" onClick={() => downloadAbstractXlsx(r, s.abstractOverrides, s.framework)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
-                      <Download className="size-4" />
-                    </Button>
+<AbstractExportMenu
+                      rows={r} overrides={s.abstractOverrides} framework={s.framework}
+                      meta={{ framework: s.framework, pico: s.pico, inclusion: s.inclusion, exclusion: s.exclusion }}
+                      className="h-7 px-2 text-muted-foreground hover:text-foreground"
+                    />
                   </div>
                 </div>
               )}
@@ -1000,15 +1150,71 @@ export function AbstractPage() {
         </Button>
       )}
 
+      {/* Counts and every action in one bar, the same shape the other working
+          tabs use. The run controls used to float free at the bottom of the
+          page, below a card that already described what they would do. */}
       {s.query && !r && !running && (
-        <div className="flex gap-2">
-          <Button onClick={() => runSearch("full")} size="lg" className="flex-1">
-            <Search className="size-4 mr-2" />Run AI screening
-          </Button>
-          <Button onClick={startManual} size="lg" variant="outline" title="Fetch the articles and review them yourself, no AI required">
-            <Zap className="size-4 mr-2" />Screen manually
-          </Button>
-        </div>
+        <ControlPane
+          stats={<>
+            <InlineStat icon={FileText} value={readyToScreen} label="Ready to screen" />
+            {s.uniquePapers && <>
+              <PaneDivider />
+              <InlineStat icon={Search} value={totalRetrieved} label="Retrieved" />
+              {s.duplicatesCount > 0 && (
+                <InlineStat icon={Minus} tone="neutral" value={s.duplicatesCount} label="Duplicates" />
+              )}
+              {s.excludedByQuality.size > 0 && (
+                <InlineStat icon={XCircle} tone="amber" value={s.excludedByQuality.size} label="Excluded" />
+              )}
+            </>}
+          </>}
+          actions={<>
+            {s.uniquePapers && (
+              <Button size="sm" variant="outline" className="h-8 shadow-sm" onClick={retrySearch} disabled={retrying}
+                      title="Query the databases again. Costs database calls, not model calls.">
+                <RotateCcw className={`size-3.5 mr-1.5 ${retrying ? "animate-spin" : ""}`} />
+                {retrying ? "Retrying…" : "Retry retrieval"}
+              </Button>
+            )}
+            {/* The same amber as Rapid screen in the results pane below. Both
+                are the human-review action, both carry the Zap icon, and giving
+                them one colour makes "review it yourself" recognisable wherever
+                it appears rather than a different button each time. */}
+            <Button size="sm" onClick={startManual}
+                    className="h-8 shadow-sm bg-amber-400 hover:bg-amber-500 text-amber-950 border-amber-400 dark:bg-amber-500 dark:hover:bg-amber-400 dark:text-amber-950"
+                    title="Fetch the articles and review them yourself, no AI required">
+              <Zap className="size-3.5 mr-1.5" />Screen manually
+            </Button>
+            <Button size="sm" className="h-8 shadow-sm" onClick={() => runSearch("full")}>
+              <Search className="size-3.5 mr-1.5" />Run AI screening
+            </Button>
+          </>}
+        />
+      )}
+
+      {/* Retrieval progress. The control pane above stays mounted throughout,
+          so the button that started this is still where it was, and the counts
+          update in place when the fetch lands. */}
+      {fetching && (
+        <TaskProgressCard
+          task={fetchTask}
+          title="Retrieving from databases"
+          onCancel={() => s.cancelTask("retrieval")}
+        />
+      )}
+
+      {s.query && !r && !running && s.uniquePapers && (
+        <ScreeningPreview
+          papers={s.uniquePapers}
+          excludedIds={s.excludedByQuality}
+          framework={s.framework}
+          pico={s.pico}
+          inclusion={s.inclusion}
+          exclusion={s.exclusion}
+          plan={s.screeningPlan}
+          activeQuery={s.unifiedSearchQuery || s.query}
+          countedQuery={s.screeningPlan?.countedQuery ?? s.simulationQuery}
+        />
       )}
     </div>
   );
@@ -1094,153 +1300,216 @@ function DecisionCell({ value, overridden, aiValue }: { value: string; overridde
 // decision cells, wrapped text in long quote columns, and frozen headers.
 
 import ExcelJS from "exceljs";
+import {
+  XL, ExportCol, tidyEvidence, quoteOnce, rowHeightFor, writeGroupHeader,
+  styleDataRow, paintVerdict, markReviewerEdit, addSummarySheet,
+  saveBlob, saveCsv, stamp,
+} from "../lib/exportStyle";
 
+// Abstract screening votes are PASS / PARTIAL / FAIL / NA rather than the
+// full-text yes / partial / no, but they mean the same thing and now wear the
+// same colours.
 const PICO_VOTE_FILL: Record<string, string> = {
-  PASS:    "C8F2D4",   // green-100
-  PARTIAL: "FEEBC8",   // amber-100
-  FAIL:    "FED7DA",   // rose-100
-  NA:      "F1F5F9",   // slate-100
+  PASS:    XL.greenTint,
+  PARTIAL: XL.amberTint,
+  FAIL:    XL.redTint,
+  NA:      XL.slateTint,
 };
-
 const PICO_VOTE_TEXT: Record<string, string> = {
-  PASS:    "065F46",
-  PARTIAL: "92400E",
-  FAIL:    "9F1239",
-  NA:      "475569",
+  PASS:    XL.green,
+  PARTIAL: XL.amber,
+  FAIL:    XL.red,
+  NA:      XL.slate,
 };
 
-async function downloadAbstractXlsx(
+export type AbstractExportMeta = {
+  framework: FrameworkId;
+  pico: Record<string, string>;
+  inclusion: string[];
+  exclusion: string[];
+};
+
+export function abstractColumns(framework: FrameworkId): ExportCol[] {
+  const els = frameworkOf(framework).elements;
+  return [
+    { header: "Decision",      key: "decision",    width: 12, group: "Decision" },
+    { header: "AI decision",   key: "ai_decision", width: 12, group: "Decision" },
+    { header: "Reviewer edit", key: "rev_edit",    width: 13, group: "Decision" },
+    { header: "Title",         key: "title",       width: 52, group: "Article" },
+    { header: "Source",        key: "source",      width: 14, group: "Article" },
+    { header: "URL",           key: "url",         width: 34, group: "Article" },
+    { header: "Reasoning",     key: "reasoning",   width: 60, group: "Assessment" },
+    ...els.flatMap(el => {
+      const h = framework === "pico" ? el.letter : el.label;
+      const group = el.label;
+      return [
+        { header: `${h} · vote`,      key: `${el.id}_vote`,   width: 11, group },
+        { header: `${h} · quote`,     key: `${el.id}_quote`,  width: 52, group },
+        { header: `${h} · reasoning`, key: `${el.id}_reason`, width: 44, group },
+      ];
+    }),
+  ];
+}
+
+export function abstractRow(
+  r: ScreenResult,
+  overrides: Record<string, "INCLUDE" | "EXCLUDE">,
+  framework: FrameworkId,
+): Record<string, any> {
+  const els = frameworkOf(framework).elements;
+  const pa = (r.Pico_Assessment || {}) as any;
+  const overrideVal = overrides[r.paper_id];
+  const effective = overrideVal ?? r.Decision;
+  const out: Record<string, any> = {
+    decision:    effective,
+    ai_decision: r.Decision,
+    rev_edit:    overrideVal && overrideVal !== r.Decision ? "yes" : "",
+    title:       r.Title,
+    source:      r.Source,
+    url:         r.URL,
+    reasoning:   tidyEvidence(r.Reason || ""),
+  };
+  for (const el of els) {
+    const f = pa?.[el.id];
+    out[`${el.id}_vote`]   = f?.vote ?? "";
+    out[`${el.id}_quote`]  = quoteOnce(f?.evidence ?? "");
+    out[`${el.id}_reason`] = tidyEvidence(f?.reasoning ?? "");
+  }
+  return out;
+}
+
+export async function downloadAbstractXlsx(
   rows: ScreenResult[],
   overrides: Record<string, "INCLUDE" | "EXCLUDE"> = {},
   framework: FrameworkId = "pico",
+  meta?: AbstractExportMeta,
 ) {
-  const els = frameworkOf(framework).elements;
+  const cols = abstractColumns(framework);
   const wb = new ExcelJS.Workbook();
   wb.creator = "Evidence Engine";
   wb.created = new Date();
 
+  if (meta) {
+    const included = rows.filter(r => (overrides[r.paper_id] ?? r.Decision) === "INCLUDE").length;
+    const edited = rows.filter(r => overrides[r.paper_id] && overrides[r.paper_id] !== r.Decision).length;
+    const els = frameworkOf(meta.framework).elements.filter(el => (meta.pico?.[el.id] || "").trim());
+    addSummarySheet(wb, "Abstract screening", [
+      { heading: "Result", pairs: [
+        ["Articles screened", String(rows.length)],
+        ["Included", String(included)],
+        ["Excluded", String(rows.length - included)],
+        ["Reviewer edits to AI decisions", String(edited)],
+      ] },
+      { heading: "Review question",
+        pairs: els.length ? els.map(el => [el.label, meta.pico[el.id]] as [string, string])
+                          : [["Not set", ""]] },
+      { heading: "Inclusion criteria",
+        pairs: meta.inclusion.length ? meta.inclusion.map((c, i) => [String(i + 1), c] as [string, string])
+                                     : [["None set", ""]] },
+      { heading: "Exclusion criteria",
+        pairs: meta.exclusion.length ? meta.exclusion.map((c, i) => [String(i + 1), c] as [string, string])
+                                     : [["None set", ""]] },
+    ]);
+  }
+
   const ws = wb.addWorksheet("Abstract screening", {
-    views: [{ state: "frozen", xSplit: 2, ySplit: 1 }],
+    views: [{ state: "frozen", xSplit: 3, ySplit: 2 }],
   });
+  ws.columns = cols.map(c => ({ key: c.key, width: c.width }));
+  writeGroupHeader(ws, cols);
 
-  // One vote / quote / reasoning triple per element of the ACTIVE framework.
-  // PICO keeps its P/I/C/O column headers; other frames use the element label.
-  ws.columns = [
-    { header: "Decision",      key: "decision",   width: 12 },
-    { header: "AI Decision",   key: "ai_decision", width: 12 },
-    { header: "Reviewer Edit", key: "rev_edit",   width: 14 },
-    { header: "Title",         key: "title",      width: 48 },
-    { header: "Source",        key: "source",     width: 14 },
-    { header: "URL",           key: "url",        width: 38 },
-    { header: "Reasoning",     key: "reasoning",  width: 60 },
-    ...els.flatMap(el => {
-      const h = framework === "pico" ? el.letter : el.label;
-      return [
-        { header: `${h} · vote`,      key: `${el.id}_vote`,   width: 12 },
-        { header: `${h} · quote`,     key: `${el.id}_quote`,  width: 48 },
-        { header: `${h} · reasoning`, key: `${el.id}_reason`, width: 40 },
-      ];
-    }),
-  ];
+  rows.forEach((r, idx) => {
+    const values = abstractRow(r, overrides, framework);
+    const row = ws.addRow(values);
+    styleDataRow(row, cols, idx % 2 === 1);
 
-  // Header styling: dark band with white bold text.
-  const header = ws.getRow(1);
-  header.height = 26;
-  header.eachCell((cell) => {
-    cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F2937" } };
-    cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
-    cell.border = { bottom: { style: "thin", color: { argb: "FF374151" } } };
-  });
-
-  for (const r of rows) {
-    const pa = r.Pico_Assessment;
     const overrideVal = overrides[r.paper_id];
     const effective = overrideVal ?? r.Decision;
-    const rowData: Record<string, any> = {
-      decision:    effective,
-      ai_decision: r.Decision,
-      rev_edit:    overrideVal && overrideVal !== r.Decision ? "yes" : "",
-      title:    r.Title,
-      source:   r.Source,
-      url:      r.URL,
-      reasoning: r.Reason,
-    };
-    for (const el of els) {
-      const f = pa?.[el.id];
-      rowData[`${el.id}_vote`]   = f?.vote ?? "";
-      rowData[`${el.id}_quote`]  = f?.evidence ?? "";
-      rowData[`${el.id}_reason`] = f?.reasoning ?? "";
-    }
-    const row = ws.addRow(rowData);
-
-    // Default to top-aligned wrapped text everywhere, quotes are often long.
-    row.eachCell((cell) => {
-      cell.alignment = { vertical: "top", wrapText: true };
-      cell.font = { size: 10 };
-    });
-
-    // Colour-coded Decision cell, uses the EFFECTIVE decision. The AI's
-    // original verdict stays available in the adjacent "AI Decision" column
-    // for audit purposes.
-    const decCell = row.getCell("decision");
-    decCell.fill = {
-      type: "pattern", pattern: "solid",
-      fgColor: { argb: effective === "INCLUDE" ? "FFDCFCE7" : "FFFEE2E2" },
-    };
-    decCell.font = {
-      size: 10, bold: true,
-      color: { argb: effective === "INCLUDE" ? "FF065F46" : "FF991B1B" },
-    };
+    // Every column in the Decision group carries its verdict's colour, so the
+    // reviewer's call and the model's can be compared without reading them.
+    paintVerdict(row.getCell("decision"), effective === "INCLUDE", true);
+    paintVerdict(row.getCell("ai_decision"), r.Decision === "INCLUDE", false);
     if (overrideVal && overrideVal !== r.Decision) {
-      decCell.border = {
-        top: { style: "thin", color: { argb: "FFD97706" } },
-        bottom: { style: "thin", color: { argb: "FFD97706" } },
-        left: { style: "thin", color: { argb: "FFD97706" } },
-        right: { style: "thin", color: { argb: "FFD97706" } },
-      };
+      markReviewerEdit(row.getCell("decision"), row.getCell("rev_edit"));
     }
-    decCell.alignment = { vertical: "top", horizontal: "center", wrapText: true };
 
-    // Colour each element's vote cell by judgment.
-    for (const el of els) {
+    for (const el of frameworkOf(framework).elements) {
       const cell = row.getCell(`${el.id}_vote`);
       const v = String(cell.value || "").toUpperCase();
       if (v && PICO_VOTE_FILL[v]) {
-        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF" + PICO_VOTE_FILL[v] } };
-        cell.font = { size: 10, bold: true, color: { argb: "FF" + PICO_VOTE_TEXT[v] } };
-        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: PICO_VOTE_FILL[v] } };
+        cell.font = { size: 10, bold: true, color: { argb: PICO_VOTE_TEXT[v] } };
+        cell.alignment = { vertical: "top", horizontal: "center", wrapText: false };
       }
     }
 
-    // URL as a hyperlink in the URL cell.
     if (r.URL) {
       const urlCell = row.getCell("url");
       urlCell.value = { text: r.URL, hyperlink: r.URL };
-      urlCell.font = { size: 10, color: { argb: "FF1D4ED8" }, underline: true };
+      urlCell.font = { size: 10, color: { argb: XL.blue }, underline: true };
     }
 
-    // Reasonable minimum row height, let Excel auto-grow when needed.
-    row.height = 60;
-  }
+    row.height = rowHeightFor(values, cols);
+  });
 
-  // Auto-filter on the header row so reviewers can sort/filter immediately.
-  ws.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: ws.columnCount },
-  };
+  ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: cols.length } };
 
   const buf = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buf], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  a.href = url;
-  a.download = `abstract-screening-${stamp}.xlsx`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  saveBlob(
+    new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+    `abstract-screening-${stamp()}.xlsx`,
+  );
+}
+
+/** One download control, two formats, the same shape full-text screening uses. */
+function AbstractExportMenu({
+  rows, overrides, framework, meta, className,
+}: {
+  rows: ScreenResult[];
+  overrides: Record<string, "INCLUDE" | "EXCLUDE">;
+  framework: FrameworkId;
+  meta: AbstractExportMeta;
+  className?: string;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" variant="ghost" className={className} title="Download the results">
+          <Download className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          {rows.length} {rows.length === 1 ? "article" : "articles"}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => downloadAbstractXlsx(rows, overrides, framework, meta)}
+          className="flex-col items-start gap-0.5 py-2">
+          <span className="font-medium">Excel</span>
+          <span className="text-xs text-muted-foreground">
+            Formatted, with a summary sheet of the question and criteria
+          </span>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => downloadAbstractCsv(rows, overrides, framework)}
+          className="flex-col items-start gap-0.5 py-2">
+          <span className="font-medium">CSV</span>
+          <span className="text-xs text-muted-foreground">
+            Plain text, for R, Python or another tool
+          </span>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+export function downloadAbstractCsv(
+  rows: ScreenResult[],
+  overrides: Record<string, "INCLUDE" | "EXCLUDE"> = {},
+  framework: FrameworkId = "pico",
+) {
+  const cols = abstractColumns(framework);
+  saveCsv(cols, rows.map(r => abstractRow(r, overrides, framework)),
+          `abstract-screening-${stamp()}.csv`);
 }

@@ -16,6 +16,11 @@ import { PopoverContent, PopoverTrigger, PopoverClose, ScrollAwarePopover } from
 import { FlaskConical, Check, Minus, X as XIcon, Download, Zap, FileSearch, ChevronRight, ChevronDown, Maximize2, Minimize2, FileText, CheckCircle2, XCircle, Clock, Sparkles, GripVertical, Plus, Search, CircleDashed } from "lucide-react";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
 import { EmptyState } from "../components/EmptyState";
+import { CriteriaColumns } from "../components/CriteriaColumns";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent,
+  DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator,
+} from "../components/ui/dropdown-menu";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
   AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
@@ -23,6 +28,87 @@ import {
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { frameworkOf, labelFor, type FrameworkId } from "../lib/frameworks";
+
+/** What this run will actually read, and what it will judge against.
+ *
+ *  The full-text counterpart of the abstract stage's preview. The question it
+ *  answers is specific to this stage: a record whose full text was never
+ *  acquired gets screened on its abstract, and calling that a full-text
+ *  decision misstates the review. That has to be visible BEFORE the run, not
+ *  discovered in the results table afterwards. */
+export function FullTextPreview({
+  queue, fullTexts, framework, pico, inclusion, exclusion, onAcquire,
+}: {
+  queue: { paper_id: string; Title: string }[];
+  fullTexts: Record<string, { status?: string; source?: string; text?: string }>;
+  framework: FrameworkId;
+  pico: Record<string, string>;
+  inclusion: string[];
+  exclusion: string[];
+  onAcquire?: () => void;
+}) {
+  if (queue.length === 0) return null;
+
+  // Group by what each record will be read from, so "full text" is a claim the
+  // reviewer can check rather than take on trust.
+  const bySource = new Map<string, number>();
+  let withText = 0;
+  for (const p of queue) {
+    const ft = fullTexts[p.paper_id];
+    if (ft?.status === "found" && (ft.text || "").trim()) {
+      withText++;
+      const src = ft.source || "Acquired";
+      bySource.set(src, (bySource.get(src) || 0) + 1);
+    }
+  }
+  const abstractOnly = queue.length - withText;
+
+  return (
+    <Card className="p-0 overflow-hidden">
+      <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/10">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Evidence per article</span>
+        <span className="text-[11px] text-muted-foreground">
+          {withText.toLocaleString()} of {queue.length.toLocaleString()} have full text
+        </span>
+      </div>
+
+      <div className="divide-y">
+        {[...bySource.entries()].sort((a, b) => b[1] - a[1]).map(([src, n]) => (
+          <div key={src} className="flex items-center justify-between gap-2 px-3 py-2 text-xs">
+            <span className="min-w-0 truncate font-medium">{src}</span>
+            <span className="tabular-nums text-muted-foreground">{n.toLocaleString()}</span>
+          </div>
+        ))}
+        {abstractOnly > 0 && (
+          <div className="px-3 py-2">
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="font-medium">Abstract only</span>
+              <span className="tabular-nums font-medium text-amber-600">{abstractOnly.toLocaleString()}</span>
+            </div>
+            <div className="mt-1 text-[11px] text-amber-600">
+              No full text was acquired for {abstractOnly === 1 ? "this article" : `these ${abstractOnly.toLocaleString()} articles`},
+              so {abstractOnly === 1 ? "it" : "they"} will be judged on the abstract alone. Acquire the full
+              text first if the decision depends on the methods or results.
+              {/* Explicit size and weight on the button: a bare <button> does
+                  not inherit the surrounding text style, so it would render a
+                  size up and heavier than the sentence it sits in. */}
+              {onAcquire && (
+                <button onClick={onAcquire} className="ml-1 text-[11px] font-normal underline hover:no-underline">
+                  Go to Full-Text Acquisition
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <CriteriaColumns
+        framework={framework} pico={pico} inclusion={inclusion} exclusion={exclusion}
+        emptyHint="No criteria set. Define the question on the Home page first, or full-text screening has nothing to judge each article against."
+      />
+    </Card>
+  );
+}
 
 // PICO match → pill styling for the expanded evidence boxes.
 const matchTone = (m?: string) =>
@@ -160,6 +246,13 @@ export function FullTextPage() {
   // Papers in the queue that haven't been screened at full text yet (e.g. added
   // later via snowball). Offer to screen just these without redoing the rest.
   const newPapers = ft ? passed.filter(p => !ft.some(r => r.paper_id === p.paper_id)) : [];
+  // How much of the queue will actually be read at full length. A record with
+  // no acquired text is screened on its abstract, which is a different claim.
+  const ftReady = passed.filter(p => {
+    const rec = s.fullTexts[p.paper_id];
+    return rec?.status === "found" && (rec.text || "").trim().length > 0;
+  }).length;
+  const ftMissing = passed.length - ftReady;
 
   const movableCols = colOrder.map(id => {
     if (id === "reason") return { id, label: "Reason", title: "" };
@@ -243,7 +336,32 @@ export function FullTextPage() {
     <div className="space-y-4">
       {!ft && (
         <>
-          <Alert><AlertDescription>{passed.length} articles ready for full-text analysis.</AlertDescription></Alert>
+          {/* Counts and the run control in one bar, the shape every other
+              working tab uses. This was an alert restating a number and a
+              full-width button, with nothing said about what would be read. */}
+          {!running && (
+            <ControlPane
+              stats={<>
+                <InlineStat icon={FileText} value={passed.length} label="Ready to screen" />
+                <PaneDivider />
+                <InlineStat icon={CheckCircle2} tone="success" value={ftReady} label="Full text" />
+                {ftMissing > 0 && (
+                  <InlineStat icon={CircleDashed} tone="amber" value={ftMissing} label="Abstract only" />
+                )}
+              </>}
+              actions={<>
+                {ftMissing > 0 && (
+                  <Button size="sm" variant="outline" className="h-8 shadow-sm" onClick={() => s.setPage("acquisition")}
+                          title="Collect the missing full texts before judging them">
+                    <FileSearch className="size-3.5 mr-1.5" />Acquire full texts
+                  </Button>
+                )}
+                <Button size="sm" className="h-8 shadow-sm" onClick={() => run()}>
+                  <FlaskConical className="size-3.5 mr-1.5" />Run full-text screening
+                </Button>
+              </>}
+            />
+          )}
           {task && task.status === "running" && (
             <TaskProgressCard
               task={task}
@@ -251,9 +369,17 @@ export function FullTextPage() {
               onCancel={() => s.cancelTask("full-text-screen")}
             />
           )}
-          <Button onClick={() => run()} disabled={running} size="lg" className="w-full">
-            <FlaskConical className="size-4 mr-2" />{running ? "Analyzing..." : "Begin Full-Text Screening"}
-          </Button>
+          {!running && (
+            <FullTextPreview
+              queue={passed}
+              fullTexts={s.fullTexts}
+              framework={s.framework}
+              pico={s.pico}
+              inclusion={s.inclusion}
+              exclusion={s.exclusion}
+              onAcquire={() => s.setPage("acquisition")}
+            />
+          )}
         </>
       )}
 
@@ -351,10 +477,16 @@ export function FullTextPage() {
                 </div>
                 <div className="ml-auto flex items-center gap-1 shrink-0">
                   {ftQuery && <span className="text-[11px] text-muted-foreground tabular-nums">{visibleFt.length}/{ft.length}</span>}
-                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides, s.framework)} className="h-8 px-2" title="Download results as Excel (XLSX)">
-                    <Download className="size-4" />
+<ExportMenu
+                    rows={ft} criteria={allCriteria} overrides={s.fullTextOverrides}
+                    framework={s.framework}
+                    meta={{ framework: s.framework, pico: s.pico, inclusion: s.inclusion, exclusion: s.exclusion }}
+                    className="h-8 px-2"
+                  />
+                  <Button size="sm" variant="ghost" onClick={() => setMaxOpen(false)}
+                    className="h-8 px-2" title="Exit full screen" aria-label="Exit full screen">
+                    <Minimize2 className="size-4" />
                   </Button>
-                  <Button size="sm" variant="outline" onClick={() => setMaxOpen(false)}><Minimize2 className="size-4 mr-1.5" />Close</Button>
                 </div>
               </div>
             ) : (
@@ -371,9 +503,12 @@ export function FullTextPage() {
                   <Button size="sm" variant="ghost" onClick={() => setMaxOpen(true)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Expand the table to full screen">
                     <Maximize2 className="size-4" />
                   </Button>
-                  <Button size="sm" variant="ghost" onClick={() => downloadFullTextXlsx(ft, allCriteria, s.fullTextOverrides, s.framework)} className="h-7 px-2 text-muted-foreground hover:text-foreground" title="Download results as Excel (XLSX)">
-                    <Download className="size-4" />
-                  </Button>
+<ExportMenu
+                    rows={ft} criteria={allCriteria} overrides={s.fullTextOverrides}
+                    framework={s.framework}
+                    meta={{ framework: s.framework, pico: s.pico, inclusion: s.inclusion, exclusion: s.exclusion }}
+                    className="h-7 px-2 text-muted-foreground hover:text-foreground"
+                  />
                 </div>
               </div>
             )}
@@ -537,185 +672,256 @@ export function FullTextPage() {
   );
 }
 
-// ---- XLSX export ----------------------------------------------------------
+// ---- Export ---------------------------------------------------------------
+//
+// Layout and values only. Everything about how the workbook LOOKS lives in
+// lib/exportStyle, shared with abstract screening so the two cannot drift.
 
 import ExcelJS from "exceljs";
+import {
+  XL, ExportCol, tidyEvidence, quoteOnce, rowHeightFor, writeGroupHeader,
+  styleDataRow, paintVerdict, markReviewerEdit, addSummarySheet,
+  saveBlob, saveCsv, stamp,
+} from "../lib/exportStyle";
+
+export { tidyEvidence, rowHeightFor };
 
 const PICO_MATCH_FILL: Record<string, string> = {
-  yes:     "FFDCFCE7",
-  partial: "FFFEF3C7",
-  no:      "FFFEE2E2",
+  yes:     XL.greenTint,
+  partial: XL.amberTint,
+  no:      XL.redTint,
 };
 const PICO_MATCH_TEXT: Record<string, string> = {
-  yes:     "FF065F46",
-  partial: "FF92400E",
-  no:      "FF9F1239",
+  yes:     XL.green,
+  partial: XL.amber,
+  no:      XL.red,
 };
 
-async function downloadFullTextXlsx(
+/** The column layout, shared by both formats so the two exports cannot drift. */
+export function exportColumns(criteria: string[], framework: FrameworkId): ExportCol[] {
+  const els = frameworkOf(framework).elements;
+  return [
+    { header: "Decision",         key: "decision",    width: 12, group: "Decision" },
+    { header: "AI decision",      key: "ai_decision", width: 12, group: "Decision" },
+    { header: "Reviewer edit",    key: "rev_edit",    width: 13, group: "Decision" },
+    { header: "Title",            key: "title",       width: 52, group: "Article" },
+    { header: "Source",           key: "source",      width: 14, group: "Article" },
+    { header: "URL",              key: "url",         width: 34, group: "Article" },
+    { header: "Reason",           key: "reason",      width: 60, group: "Assessment" },
+    { header: "Inclusion met",    key: "inc",         width: 13, group: "Assessment" },
+    { header: "Excl. violations", key: "exc",         width: 15, group: "Assessment" },
+    ...els.flatMap(el => {
+      const h = framework === "pico" ? el.letter : el.label;
+      const group = el.label;
+      return [
+        { header: `${h} · match`,    key: `${el.id}_match`,    width: 11, group },
+        { header: `${h} · value`,    key: `${el.id}_value`,    width: 30, group },
+        { header: `${h} · evidence`, key: `${el.id}_evidence`, width: 52, group },
+      ];
+    }),
+    ...criteria.map((c, i) => ({ header: c, key: `crit_${i}`, width: 40, group: "Criteria" })),
+  ];
+}
+
+/** One row's worth of values, keyed by column. Shared by XLSX and CSV. */
+export function exportRow(
+  r: FullTextResult,
+  criteria: string[],
+  overrides: Record<string, "Include" | "Exclude">,
+  framework: FrameworkId,
+): Record<string, any> {
+  const els = frameworkOf(framework).elements;
+  const pe = (r.picoEvidence || {}) as any;
+  const overrideVal = overrides[r.paper_id];
+  const effective = overrideVal ?? r.Decision;
+  const out: Record<string, any> = {
+    decision:    effective,
+    ai_decision: r.Decision,
+    rev_edit:    overrideVal && overrideVal !== r.Decision ? "yes" : "",
+    title:       r.Title,
+    source:      r.Source,
+    url:         r.URL,
+    reason:      tidyEvidence(r.Reason || ""),
+    inc:         r.inclusion_score,
+    exc:         r.exclusion_violations,
+  };
+  for (const el of els) {
+    const cell = pe[el.id];
+    out[`${el.id}_match`]    = cell?.match || "";
+    out[`${el.id}_value`]    = tidyEvidence(cell?.value || "");
+    out[`${el.id}_evidence`] = tidyEvidence(cell?.evidence || "");
+  }
+  criteria.forEach((c, i) => {
+    const vote = r.criteriaEval?.[c] ?? "";
+    const ev = r.criteriaEvidence?.[c];
+    // Newlines so wrapText puts the vote, the quote and the reasoning on
+    // separate visual lines inside one cell.
+    const parts = [vote, quoteOnce(ev?.evidence || ""), tidyEvidence(ev?.reasoning || "")];
+    out[`crit_${i}`] = parts.filter(Boolean).join("\n\n");
+  });
+  return out;
+}
+
+type ExportMeta = {
+  framework: FrameworkId;
+  pico: Record<string, string>;
+  inclusion: string[];
+  exclusion: string[];
+};
+
+export async function downloadFullTextXlsx(
   rows: FullTextResult[],
   criteria: string[],
   overrides: Record<string, "Include" | "Exclude"> = {},
   framework: FrameworkId = "pico",
+  meta?: ExportMeta,
 ) {
-  const els = frameworkOf(framework).elements;
+  const cols = exportColumns(criteria, framework);
   const wb = new ExcelJS.Workbook();
   wb.creator = "Evidence Engine";
   wb.created = new Date();
 
+  if (meta) {
+    const included = rows.filter(r => (overrides[r.paper_id] ?? r.Decision) === "Include").length;
+    const edited = rows.filter(r => overrides[r.paper_id] && overrides[r.paper_id] !== r.Decision).length;
+    const els = frameworkOf(meta.framework).elements.filter(el => (meta.pico?.[el.id] || "").trim());
+    addSummarySheet(wb, "Full-text screening", [
+      { heading: "Result", pairs: [
+        ["Articles screened", String(rows.length)],
+        ["Included", String(included)],
+        ["Excluded", String(rows.length - included)],
+        ["Reviewer edits to AI decisions", String(edited)],
+      ] },
+      { heading: "Review question",
+        pairs: els.length ? els.map(el => [el.label, meta.pico[el.id]] as [string, string])
+                          : [["Not set", ""]] },
+      { heading: "Inclusion criteria",
+        pairs: meta.inclusion.length ? meta.inclusion.map((c, i) => [String(i + 1), c] as [string, string])
+                                     : [["None set", ""]] },
+      { heading: "Exclusion criteria",
+        pairs: meta.exclusion.length ? meta.exclusion.map((c, i) => [String(i + 1), c] as [string, string])
+                                     : [["None set", ""]] },
+    ]);
+  }
+
   const ws = wb.addWorksheet("Full-text screening", {
-    views: [{ state: "frozen", xSplit: 2, ySplit: 1 }],
+    // Freeze the decision block and both header rows, so the verdict stays
+    // beside the evidence however far right you scroll.
+    views: [{ state: "frozen", xSplit: 3, ySplit: 2 }],
   });
+  ws.columns = cols.map(c => ({ key: c.key, width: c.width }));
+  writeGroupHeader(ws, cols);
 
-  // Static columns + one match/value/evidence triple per element of the ACTIVE
-  // framework (PICO keeps P/I/C/O headers; other frames use the element label)
-  // + one column per criterion.
-  const baseCols = [
-    { header: "Decision",      key: "decision",  width: 12 },
-    { header: "AI Decision",   key: "ai_decision", width: 12 },
-    { header: "Reviewer Edit", key: "rev_edit",  width: 14 },
-    { header: "Title",         key: "title",     width: 48 },
-    { header: "Source",        key: "source",    width: 14 },
-    { header: "URL",           key: "url",       width: 38 },
-    { header: "Reason",        key: "reason",    width: 60 },
-    ...els.flatMap(el => {
-      const h = framework === "pico" ? el.letter : el.label;
-      return [
-        { header: `${h} · match`,    key: `${el.id}_match`,    width: 12 },
-        { header: `${h} · value`,    key: `${el.id}_value`,    width: 28 },
-        { header: `${h} · evidence`, key: `${el.id}_evidence`, width: 48 },
-      ];
-    }),
-    { header: "Inclusion met", key: "inc",       width: 14 },
-    { header: "Excl. violations", key: "exc",    width: 16 },
-  ];
-  const critCols = criteria.map((c, i) => ({
-    header: c,
-    key: `crit_${i}`,
-    width: 36,
-  }));
-  ws.columns = [...baseCols, ...critCols];
+  rows.forEach((r, idx) => {
+    const values = exportRow(r, criteria, overrides, framework);
+    const row = ws.addRow(values);
+    styleDataRow(row, cols, idx % 2 === 1);
 
-  const header = ws.getRow(1);
-  header.height = 28;
-  header.eachCell((cell) => {
-    cell.font = { bold: true, color: { argb: "FFFFFFFF" }, size: 11 };
-    cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF1F2937" } };
-    cell.alignment = { vertical: "middle", horizontal: "left", wrapText: true };
-    cell.border = { bottom: { style: "thin", color: { argb: "FF374151" } } };
-  });
-
-  for (const r of rows) {
-    const pe = (r.picoEvidence || {}) as any;
     const overrideVal = overrides[r.paper_id];
     const effective = overrideVal ?? r.Decision;
-    const rowData: Record<string, any> = {
-      decision:    effective,
-      ai_decision: r.Decision,
-      rev_edit:    overrideVal && overrideVal !== r.Decision ? "yes" : "",
-      title:    r.Title,
-      source:   r.Source,
-      url:      r.URL,
-      reason:   r.Reason,
-      inc:      r.inclusion_score,
-      exc:      r.exclusion_violations,
-    };
-    for (const el of els) {
-      const cell = pe[el.id];
-      rowData[`${el.id}_match`]    = cell?.match || "";
-      rowData[`${el.id}_value`]    = cell?.value || "";
-      rowData[`${el.id}_evidence`] = cell?.evidence || "";
-    }
-    criteria.forEach((c, i) => {
-      const vote = r.criteriaEval?.[c] ?? "";
-      const ev = r.criteriaEvidence?.[c];
-      // Use newlines so wrapText puts the vote, the quote and the reasoning
-      // on separate visual lines inside a single cell.
-      const parts: string[] = [vote];
-      if (ev?.evidence) parts.push(`"${ev.evidence}"`);
-      if (ev?.reasoning) parts.push(ev.reasoning);
-      rowData[`crit_${i}`] = parts.join("\n\n");
-    });
-
-    const row = ws.addRow(rowData);
-    row.eachCell((cell) => {
-      cell.alignment = { vertical: "top", wrapText: true };
-      cell.font = { size: 10 };
-    });
-
-    // Decision cell colour reflects the EFFECTIVE decision; AI Decision column
-    // separately preserves the AI's original verdict for the audit trail.
-    const decCell = row.getCell("decision");
-    decCell.fill = {
-      type: "pattern", pattern: "solid",
-      fgColor: { argb: effective === "Include" ? "FFDCFCE7" : "FFFEE2E2" },
-    };
-    decCell.font = {
-      size: 10, bold: true,
-      color: { argb: effective === "Include" ? "FF065F46" : "FF991B1B" },
-    };
-    decCell.alignment = { vertical: "top", horizontal: "center", wrapText: true };
+    // Every column in the Decision group carries its verdict's colour, so the
+    // reviewer's call and the model's can be compared without reading them.
+    paintVerdict(row.getCell("decision"), effective === "Include", true);
+    paintVerdict(row.getCell("ai_decision"), r.Decision === "Include", false);
     if (overrideVal && overrideVal !== r.Decision) {
-      // Faint amber border on overridden Decision cells so reviewers can spot
-      // their own edits at a glance.
-      decCell.border = {
-        top: { style: "thin", color: { argb: "FFD97706" } },
-        bottom: { style: "thin", color: { argb: "FFD97706" } },
-        left: { style: "thin", color: { argb: "FFD97706" } },
-        right: { style: "thin", color: { argb: "FFD97706" } },
-      };
+      markReviewerEdit(row.getCell("decision"), row.getCell("rev_edit"));
     }
 
-    // Colour each element's match cell.
-    for (const el of els) {
+    for (const el of frameworkOf(framework).elements) {
       const cell = row.getCell(`${el.id}_match`);
       const v = String(cell.value || "").toLowerCase();
       if (v && PICO_MATCH_FILL[v]) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: PICO_MATCH_FILL[v] } };
         cell.font = { size: 10, bold: true, color: { argb: PICO_MATCH_TEXT[v] } };
-        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: false };
+        cell.alignment = { vertical: "top", horizontal: "center", wrapText: false };
       }
     }
 
-    // Colour each criterion cell by the first line (INCLUDE / EXCLUDE).
-    criteria.forEach((_, i) => {
-      const cell = row.getCell(`crit_${i}`);
+    criteria.forEach((_, ci) => {
+      const cell = row.getCell(`crit_${ci}`);
       const firstLine = String(cell.value || "").split("\n", 1)[0].toUpperCase();
       if (firstLine === "INCLUDE") {
-        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFECFCCB" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.greenTint } };
       } else if (firstLine === "EXCLUDE") {
-        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFEE2E2" } };
+        cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: XL.redTint } };
       }
     });
 
-    // URL hyperlink.
     if (r.URL) {
       const urlCell = row.getCell("url");
       urlCell.value = { text: r.URL, hyperlink: r.URL };
-      urlCell.font = { size: 10, color: { argb: "FF1D4ED8" }, underline: true };
+      urlCell.font = { size: 10, color: { argb: XL.blue }, underline: true };
     }
 
-    row.height = 78;
-  }
+    // Tall enough for the longest cell in the row, rather than a fixed height.
+    row.height = rowHeightFor(values, cols);
+  });
 
-  ws.autoFilter = {
-    from: { row: 1, column: 1 },
-    to: { row: 1, column: ws.columnCount },
-  };
+  ws.autoFilter = { from: { row: 2, column: 1 }, to: { row: 2, column: cols.length } };
 
   const buf = await wb.xlsx.writeBuffer();
-  const blob = new Blob([buf], {
-    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
-  a.href = url;
-  a.download = `fulltext-screening-${stamp}.xlsx`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+  saveBlob(
+    new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+    `fulltext-screening-${stamp()}.xlsx`,
+  );
+}
+
+/** The same table as plain CSV, for R, Python, or a reviewer without Excel. */
+export function downloadFullTextCsv(
+  rows: FullTextResult[],
+  criteria: string[],
+  overrides: Record<string, "Include" | "Exclude"> = {},
+  framework: FrameworkId = "pico",
+) {
+  const cols = exportColumns(criteria, framework);
+  saveCsv(cols, rows.map(r => exportRow(r, criteria, overrides, framework)),
+          `fulltext-screening-${stamp()}.csv`);
+}
+
+/** One download control, two formats. Which one you want depends on where the
+ *  results are going, so the choice belongs in the menu rather than as two
+ *  buttons competing for the same slot in a crowded toolbar. */
+function ExportMenu({
+  rows, criteria, overrides, framework, meta, className,
+}: {
+  rows: FullTextResult[];
+  criteria: string[];
+  overrides: Record<string, "Include" | "Exclude">;
+  framework: FrameworkId;
+  meta: ExportMeta;
+  className?: string;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" variant="ghost" className={className} title="Download the results">
+          <Download className="size-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          {rows.length} {rows.length === 1 ? "article" : "articles"}
+        </DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => downloadFullTextXlsx(rows, criteria, overrides, framework, meta)}
+          className="flex-col items-start gap-0.5 py-2">
+          <span className="font-medium">Excel</span>
+          <span className="text-xs text-muted-foreground">
+            Formatted, with a summary sheet of the question and criteria
+          </span>
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => downloadFullTextCsv(rows, criteria, overrides, framework)}
+          className="flex-col items-start gap-0.5 py-2">
+          <span className="font-medium">CSV</span>
+          <span className="text-xs text-muted-foreground">
+            Plain text, for R, Python or another tool
+          </span>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 function PicoBadge({ match }: { match: "yes" | "partial" | "no" }) {

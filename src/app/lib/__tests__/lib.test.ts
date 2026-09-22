@@ -6,7 +6,7 @@
 // and the audit trail. Export and audit bugs are the dangerous ones: a malformed
 // RIS file or a missing decision row is only noticed downstream, in a reference
 // manager or a journal's reproducibility check.
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 
 import {
   isFrameworkId,
@@ -17,6 +17,7 @@ import {
   FRAMEWORK_IDS,
 } from "../frameworks";
 import { tokenize, activeRank } from "../activeLearning";
+import { openUrlFor, setResolverBase } from "../dbKeys";
 import { refKey, toRis, toBibTeX, serializeReferences, dedupeAgainstLibrary } from "../references";
 import { formatNumber, timeAgo } from "../format";
 import { biasCsv } from "../biasPlot";
@@ -248,5 +249,57 @@ describe("timeAgo", () => {
     const out = timeAgo(v as any);
     expect(typeof out).toBe("string");
     expect(out).not.toContain("Invalid Date");
+  });
+});
+
+// --------------------------------------------------------------------------
+// Library link resolver.
+//
+// Most of a clinical corpus cannot be downloaded automatically, so the value
+// of these links is the difference between a dead end and one click through to
+// the copy the institution already pays for.
+// --------------------------------------------------------------------------
+
+describe("openUrlFor", () => {
+  beforeEach(() => setResolverBase(""));
+
+  it("returns nothing when no resolver is configured", () => {
+    /* Every caller renders the result directly, so a half-built URL would ship
+       a broken link to every missing record. */
+    expect(openUrlFor({ doi: "10.1000/x", title: "T" })).toBe("");
+  });
+
+  it("builds an OpenURL carrying the DOI", () => {
+    setResolverBase("https://lib.example.edu/openurl");
+    const u = new URL(openUrlFor({ doi: "10.1000/x" }));
+    expect(u.origin + u.pathname).toBe("https://lib.example.edu/openurl");
+    expect(u.searchParams.get("rft_id")).toBe("info:doi/10.1000/x");
+    expect(u.searchParams.get("ctx_ver")).toBe("Z39.88-2004");
+  });
+
+  it("falls back to the PMID when there is no DOI", () => {
+    setResolverBase("https://lib.example.edu/openurl");
+    const u = new URL(openUrlFor({ pmid: "31234567" }));
+    expect(u.searchParams.get("rft_id")).toBe("info:pmid/31234567");
+  });
+
+  it("carries title and year, which resolvers use for citation matching", () => {
+    setResolverBase("https://lib.example.edu/openurl");
+    const u = new URL(openUrlFor({ doi: "10.1000/x", title: "A trial", year: 2021 }));
+    expect(u.searchParams.get("rft.atitle")).toBe("A trial");
+    expect(u.searchParams.get("rft.date")).toBe("2021");
+  });
+
+  it("appends to a base that already carries query parameters", () => {
+    /* Ex Libris and SFX bases routinely include an institution segment. */
+    setResolverBase("https://lib.example.edu/openurl?institution=UCSF");
+    const u = new URL(openUrlFor({ doi: "10.1000/x" }));
+    expect(u.searchParams.get("institution")).toBe("UCSF");
+    expect(u.searchParams.get("rft_id")).toBe("info:doi/10.1000/x");
+  });
+
+  it("returns nothing when there is no identifier or title to resolve", () => {
+    setResolverBase("https://lib.example.edu/openurl");
+    expect(openUrlFor({})).toBe("");
   });
 });

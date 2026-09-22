@@ -12,10 +12,11 @@
 //      than showing a confusing blank or, worse, letting the reviewer act on
 //      an empty corpus and believe the result.
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, waitFor, fireEvent } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { StoreProvider, useStore } from "../../lib/store";
+import { setResolverBase } from "../../lib/dbKeys";
 import { HomePage } from "../HomePage";
 import { SimulationPage } from "../SimulationPage";
 import { AbstractPage } from "../AbstractPage";
@@ -72,6 +73,14 @@ const result = (id: string, decision: "INCLUDE" | "EXCLUDE" = "INCLUDE") => ({
   Decision: decision, Reason: "because", Agent_Trace: {},
   Pico_Assessment: { population: { vote: "PASS", evidence: "", reasoning: "" } },
 });
+
+/** Seed the state the meta page requires before it renders anything: screening
+ *  has run and included at least one study. Without this the page correctly
+ *  short-circuits to its "screen abstracts first" empty state. */
+function seedMetaReady(s: any, extractions: any[]) {
+  s.setResults([result("p1", "INCLUDE")]);
+  s.setMetaExtractions(extractions);
+}
 
 const PAGES: [string, () => JSX.Element][] = [
   ["HomePage", HomePage],
@@ -160,6 +169,280 @@ describe("stage gating", () => {
   it("ExtractionPage points back to abstract screening when nothing is included", () => {
     const { container } = renderPage(ExtractionPage);
     expect((container.textContent ?? "").toLowerCase()).toMatch(/abstract|screen/);
+  });
+
+  // ── Planning: collapsible run history ──────────────────────────────────
+  const planningState = (s: any) => {
+    s.setHistory([{ goal: "g", query: "q", formal_question: "fq", ts: 1 }] as any);
+    s.setSimulation({ PubMed: 47 } as any);
+    // addSimulationRun stamps id/timestamp/label itself.
+    s.addSimulationRun({
+      unifiedQuery: "q", perDbQueries: { PubMed: "q" },
+      counts: { PubMed: 47 }, totalYield: 47, source: "manual",
+    } as any);
+  };
+
+  it("SimulationPage shows the run history expanded by default", async () => {
+    localStorage.removeItem("ee:planning-history-collapsed");
+    const view = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Run history/i));
+    expect(view.container.querySelector('[aria-label="Collapse run history"]')).not.toBeNull();
+  });
+
+  it("SimulationPage collapses the run history to a rail", async () => {
+    /* The point is the space: the middle column holds boolean query strings
+       that wrap badly, and the history is reference material you consult
+       occasionally rather than read continuously. */
+    localStorage.setItem("ee:planning-history-collapsed", "1");
+    const view = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(
+      view.container.querySelector('[aria-label="Show run history"]')).not.toBeNull());
+    expect(view.container.querySelector('[aria-label="Collapse run history"]')).toBeNull();
+  });
+
+  it("SimulationPage keeps the history reachable while collapsed", async () => {
+    /* A rail, not a hidden panel: the label and the run count stay on screen so
+       nobody has to remember the feature exists. */
+    localStorage.setItem("ee:planning-history-collapsed", "1");
+    const view = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Run history/i));
+    expect(view.container.textContent).toContain("1");
+  });
+
+  it("SimulationPage remembers the collapsed choice across mounts", async () => {
+    /* Someone who wants the query editor wide wants it wide every time. */
+    localStorage.setItem("ee:planning-history-collapsed", "1");
+    const first = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(
+      first.container.querySelector('[aria-label="Show run history"]')).not.toBeNull());
+    first.unmount();
+    const second = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(
+      second.container.querySelector('[aria-label="Show run history"]')).not.toBeNull());
+  });
+
+  it("SimulationPage gives every run its own delete button", async () => {
+    /* Until now the only way to remove one bad run was Clear, which takes the
+       good ones with it. A run is a dead end often enough (a query that
+       over-broadened, a typo) that this matters. */
+    const view = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Run history/i));
+    expect(view.container.querySelector('[aria-label^="Delete Run"]')).not.toBeNull();
+  });
+
+  it("SimulationPage removes only the run whose delete was clicked", async () => {
+    const view = renderPage(SimulationPage, s => {
+      planningState(s);
+      s.addSimulationRun({
+        unifiedQuery: "q2", perDbQueries: { PubMed: "q2" },
+        counts: { PubMed: 99 }, totalYield: 99, source: "manual",
+      } as any);
+    });
+    await waitFor(() => expect(view.container.querySelectorAll('[aria-label^="Delete Run"]').length).toBe(2));
+    act(() => {
+      (view.container.querySelector('[aria-label="Delete Run 1"]') as HTMLElement).click();
+    });
+    await waitFor(() => expect(view.container.querySelectorAll('[aria-label^="Delete Run"]').length).toBe(1));
+    expect(view.store().simulationRuns.map((r: any) => r.label)).toEqual(["Run 2"]);
+  });
+
+  it("SimulationPage renames a run inline", async () => {
+    const view = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Run 1/));
+    act(() => { (screen.getByTitle("Rename this run") as HTMLElement).click(); });
+    const input = await screen.findByLabelText(/Rename Run 1/i);
+    fireEvent.change(input, { target: { value: "Dropped population block" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(view.store().simulationRuns[0].label).toBe("Dropped population block"));
+  });
+
+  it("SimulationPage abandons a rename on Escape", async () => {
+    /* Blur commits, so Escape has to bail out before the blur fires or a
+       half-typed name gets saved on the way out. */
+    const view = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Run 1/));
+    act(() => { (screen.getByTitle("Rename this run") as HTMLElement).click(); });
+    const input = await screen.findByLabelText(/Rename Run 1/i);
+    fireEvent.change(input, { target: { value: "half-typed" } });
+    fireEvent.keyDown(input, { key: "Escape" });
+    await waitFor(() => expect(view.store().simulationRuns[0].label).toBe("Run 1"));
+  });
+
+  it("SimulationPage no longer shows a query preview on each run", async () => {
+    /* The query is identical across runs often enough that a 60-character
+       prefix distinguished nothing while taking a line per row. */
+    const view = renderPage(SimulationPage, planningState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Run history/i));
+    const history = view.container.querySelector('[aria-label^="Delete Run"]')?.closest("div")?.parentElement;
+    expect(history?.textContent ?? "").not.toContain("[tiab]");
+  });
+
+  // ── Abstract screening: the control pane ───────────────────────────────
+  const screeningReady = (st: any) => {
+    st.setQuery("q");
+    st.setRawPapers([1, 2, 3, 4, 5, 6, 7, 8].map(i => ({
+      id: `p${i}`, paper_id: `p${i}`, title: `Study ${i}`,
+      abstract: "a", source: "PubMed", url: "",
+    })) as any);
+    st.setUniquePapers([1, 2, 3, 4, 5, 6, 7].map(i => ({
+      id: `p${i}`, paper_id: `p${i}`, title: `Study ${i}`,
+      abstract: "a", source: "PubMed", url: "",
+    })) as any);
+    st.setDuplicatesCount(1);
+  };
+
+  it("AbstractPage puts counts and every action in one control pane", async () => {
+    /* The run controls used to float free at the bottom of the page, below a
+       card that already described what they would do. */
+    const view = renderPage(AbstractPage, screeningReady);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Ready to screen/i));
+    expect(view.container.textContent).toMatch(/Retrieved/i);
+    expect(view.container.textContent).toMatch(/Run AI screening/i);
+    expect(view.container.textContent).toMatch(/Screen manually/i);
+    expect(view.container.textContent).toMatch(/Retry retrieval/i);
+  });
+
+  it("AbstractPage keeps retrieval separate from screening while a retry runs", async () => {
+    /* Retry retrieval used to run under the "abstract-screen" task id, so the
+       page believed a screening pass had started: the control pane and the
+       preview both unmounted, and a card announced per-PICO appraisal while
+       nothing but database calls were in flight. */
+    const view = renderPage(AbstractPage, st => {
+      screeningReady(st);
+      st.startTask("retrieval", [
+        { id: "fetch", label: "Retrieving from databases", status: "running" },
+      ]);
+    });
+    await waitFor(() => expect(view.container.textContent).toMatch(/Retrieving from databases/i));
+    // The pane that owns the button stays put, so the counts update in place.
+    expect(view.container.textContent).toMatch(/Retry retrieval/i);
+    expect(view.container.textContent).toMatch(/Ready to screen/i);
+    // And nothing claims the model is reading anything.
+    expect(view.container.textContent).not.toMatch(/per-PICO appraisal/i);
+    expect(view.container.textContent).not.toMatch(/Cancel screening/i);
+  });
+
+  it("AbstractPage still shows the screening card for a real screening run", async () => {
+    /* The other half of the gate: separating the two task ids must not stop a
+       genuine screening pass from reporting itself. */
+    const view = renderPage(AbstractPage, st => {
+      screeningReady(st);
+      st.startTask("abstract-screen", [
+        { id: "screen", label: "Screening abstracts", status: "running" },
+      ]);
+    });
+    await waitFor(() => expect(view.container.textContent).toMatch(/per-PICO appraisal/i));
+    expect(view.container.textContent).toMatch(/Cancel screening/i);
+  });
+
+  it("AbstractPage counts only what will actually cost a model call", async () => {
+    /* Quality-Assessment exclusions never reach the model, so they come off
+       "Ready to screen" and are reported separately. */
+    const view = renderPage(AbstractPage, st => {
+      screeningReady(st);
+      st.setExcludedByQuality?.(new Set(["p1", "p2"]));
+    });
+    await waitFor(() => expect(view.container.textContent).toMatch(/Ready to screen/i));
+    // textContent runs the value straight into its label, so assert the pair.
+    expect(view.container.textContent).toMatch(/5\s*Ready to screen/);
+    expect(view.container.textContent).toMatch(/2\s*Excluded/);
+  });
+
+  it("AbstractPage reports duplicates removed", async () => {
+    const view = renderPage(AbstractPage, screeningReady);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Duplicates/i));
+  });
+
+  it("MetaAnalysisPage asks for screening before showing any controls", () => {
+    /* Every stage does this: until there is work to do, the only useful thing on
+       screen is the way to go and get it. Controls greyed out beside an empty
+       state say the same thing twice. */
+    const view = renderPage(MetaAnalysisPage);
+    expect(view.container.textContent).toMatch(/Screening not complete/i);
+    expect(view.container.textContent).not.toMatch(/Analysis settings/i);
+    expect(view.container.textContent).not.toMatch(/Ready to extract/i);
+  });
+
+  it("MetaAnalysisPage distinguishes 'not screened' from 'screened, nothing included'", () => {
+    const view = renderPage(MetaAnalysisPage, s => s.setResults([result("p1", "EXCLUDE")]));
+    expect(view.container.textContent).toMatch(/No included articles/i);
+  });
+
+  it("MetaAnalysisPage shows the controls once studies are included", async () => {
+    const view = renderPage(MetaAnalysisPage, s => s.setResults([result("p1", "INCLUDE")]));
+    await waitFor(() => expect(view.container.textContent).toMatch(/Analysis settings/i));
+  });
+
+  it("MetaAnalysisPage shows the evidence workspace even when nothing pools", async () => {
+    /* THE REGRESSION. The workspace was first nested inside the block gated on
+       a successful pool, so a reviewer whose extractions all failed saw none of
+       it. That is backwards: when the numbers are wrong, the source document
+       and the reason each study was rejected are the whole point. */
+    const unpoolable = [{
+      paper_id: "p1", title: "A study", outcome: "mortality",
+      effect_measure: "MD", yi: null, vi: null,
+      error: "MD needs sd_t",
+    }] as any;
+    const view = renderPage(MetaAnalysisPage, s => seedMetaReady(s, unpoolable));
+    await waitFor(() => expect(view.container.textContent).toMatch(/A study/));
+  });
+
+  it("MetaAnalysisPage reuses tables already pulled by Table Extraction", async () => {
+    /* Re-extracting is not just slow. The LLM tier is non-deterministic, so a
+       second run can yield different tables from the ones the reviewer already
+       checked on the Table Extraction tab. */
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: any) => {
+      calls.push(String(url));
+      return { ok: true, status: 200, headers: new Headers(),
+               json: async () => ({}), text: async () => "{}" } as unknown as Response;
+    }));
+    const view = renderPage(MetaAnalysisPage, s => {
+      s.setExtractedPapers([{
+        Paper_Title: "A study", Paper_URL: "", Source: "PubMed",
+        Extracted_Tables: [{ title: "Table 2", type: "outcomes", page: 7,
+                             tier: "pdfplumber", deterministic: true,
+                             data: [["Outcome", "HR"], ["MACE", "0.74"]] }],
+      }] as any);
+      seedMetaReady(s, [{
+        paper_id: "p1", title: "A study", outcome: "MACE",
+        effect_measure: "HR", yi: -0.3, vi: 0.01,
+      }] as any);
+    });
+    await waitFor(() => expect(view.container.textContent).toMatch(/Table 2|MACE/));
+    expect(calls.filter(u => u.includes("/extract/tables"))).toHaveLength(0);
+  });
+
+  it("MetaAnalysisPage matches stored tables despite title whitespace drift", async () => {
+    const view = renderPage(MetaAnalysisPage, s => {
+      s.setExtractedPapers([{
+        Paper_Title: "  A   Study  ", Paper_URL: "", Source: "PubMed",
+        Extracted_Tables: [{ title: "Table 9", type: "outcomes",
+                             data: [["Outcome"], ["MACE"]] }],
+      }] as any);
+      seedMetaReady(s, [{
+        paper_id: "p1", title: "a study", outcome: "MACE",
+        effect_measure: "HR", yi: -0.3, vi: 0.01,
+      }] as any);
+    });
+    await waitFor(() => expect(view.container.textContent).toMatch(/Table 9/));
+  });
+
+  it("MetaAnalysisPage names why a study could not be pooled", async () => {
+    const unpoolable = [{
+      paper_id: "p1", title: "A study", outcome: "mortality",
+      effect_measure: "MD", yi: null, vi: null, error: "MD needs sd_t",
+    }] as any;
+    const view = renderPage(MetaAnalysisPage, s => {
+      seedMetaReady(s, unpoolable);
+      s.setMetaRun({ pool: { k: 0, valid_studies: [], invalid_studies: unpoolable,
+                             random: null, fixed: null, heterogeneity: null,
+                             prediction_interval: null, effect_measures: [],
+                             tau2_method: "DL", use_knapp_hartung: false } } as any);
+    });
+    await waitFor(() => expect(view.container.textContent).toMatch(/could not be pooled/i));
+    expect(view.container.textContent).toMatch(/MD needs sd_t/);
   });
 
   it("MetaAnalysisPage renders with no extracted data", () => {
@@ -300,5 +583,210 @@ describe("resilience to malformed session state", () => {
 
   it.each(PAGES)("%s survives an empty PICO", (_name, Page) => {
     expect(() => renderPage(Page, (s) => s.setPico({} as any))).not.toThrow();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Handing the unreachable papers to a human.
+//
+// Most of a clinical corpus cannot be downloaded programmatically, so the
+// acquisition stage always ends with a manual remainder. These assert the
+// handoff: a CSV a librarian can read and an RIS every interlibrary-loan
+// system and reference manager ingests.
+// --------------------------------------------------------------------------
+
+describe("exporting the missing full texts", () => {
+  const acquisitionState = (st: any) => {
+    st.setQuery("q");
+    st.setUniquePapers([
+      { id: "p1", paper_id: "p1", title: "Paywalled trial", abstract: "a", source: "PubMed",
+        url: "", year: 2021, authors: "Smith J; Okafor A" },
+      { id: "p2", paper_id: "p2", title: "Acquired trial", abstract: "a", source: "PubMed", url: "" },
+    ] as any);
+    st.setResults([
+      { paper_id: "p1", Source: "PubMed", Title: "Paywalled trial", URL: "", Abstract: "a",
+        Decision: "INCLUDE", Reason: "", Agent_Trace: {} },
+      { paper_id: "p2", Source: "PubMed", Title: "Acquired trial", URL: "", Abstract: "a",
+        Decision: "INCLUDE", Reason: "", Agent_Trace: {} },
+    ] as any);
+    st.setFullTexts({
+      p1: { paper_id: "p1", title: "Paywalled trial", url: "", source: "PubMed",
+            status: "missing", reason: "Paywalled. A publisher text-mining key, your library, or interlibrary loan can reach it.",
+            doi: "10.1000/paywalled", pmid: "31234567" },
+      p2: { paper_id: "p2", title: "Acquired trial", url: "", source: "PubMed",
+            status: "found", text: "full text here" },
+    });
+  };
+
+  /** Open the Export menu, choose a format, and return what it put in the Blob.
+   *  Both formats now live behind one control, so the test drives the menu the
+   *  way a reviewer does rather than calling the handler directly. */
+  async function capture(format: RegExp): Promise<string> {
+    let body = "";
+    const realCreate = URL.createObjectURL;
+    (URL as any).createObjectURL = (b: Blob) => { (b as any).text().then((t: string) => { body = t; }); return "blob:x"; };
+    (URL as any).revokeObjectURL = () => {};
+    const view = renderPage(AcquisitionPage, acquisitionState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Export/));
+    const trigger = [...view.container.querySelectorAll("button")]
+      .find(b => /^\s*Export\s*$/.test((b.textContent || "").trim()))!;
+    expect(trigger).toBeTruthy();
+    fireEvent.pointerDown(trigger, { button: 0, ctrlKey: false });
+    fireEvent.click(trigger);
+    // The menu renders in a portal, so look at the whole document.
+    const item = await waitFor(() => {
+      const el = [...document.querySelectorAll('[role="menuitem"]')]
+        .find(n => format.test(n.textContent || ""));
+      if (!el) throw new Error("menu item not rendered");
+      return el;
+    });
+    fireEvent.click(item);
+    await waitFor(() => expect(body).not.toBe(""));
+    (URL as any).createObjectURL = realCreate;
+    return body;
+  }
+
+  it("offers both formats behind a single Export control", async () => {
+    /* Two buttons competing for the same slot pushed the Missing count, the
+       number this page exists to drive down, out of the control pane. */
+    const view = renderPage(AcquisitionPage, acquisitionState);
+    await waitFor(() => expect(view.container.textContent).toMatch(/Export/));
+    const exportButtons = [...view.container.querySelectorAll("button")]
+      .filter(b => /Export/i.test(b.textContent || ""));
+    expect(exportButtons).toHaveLength(1);
+    expect(view.container.textContent).toMatch(/Missing/);
+  });
+
+  it("writes a CSV row for each missing paper and no row for an acquired one", async () => {
+    const csv = await capture(/^CSV/i);
+    expect(csv).toMatch(/Paywalled trial/);
+    expect(csv).not.toMatch(/Acquired trial/);
+    expect(csv).toMatch(/10\.1000\/paywalled/);
+  });
+
+  it("carries the reason into the CSV, so the request is self-explaining", async () => {
+    const csv = await capture(/^CSV/i);
+    expect(csv).toMatch(/interlibrary loan/i);
+  });
+
+  it("writes valid RIS: a tagged record per paper, each closed with ER", async () => {
+    const ris = await capture(/^RIS/i);
+    expect(ris).toMatch(/^TY {2}- JOUR/m);
+    expect(ris).toMatch(/^TI {2}- Paywalled trial/m);
+    expect(ris).toMatch(/^DO {2}- 10\.1000\/paywalled/m);
+    expect(ris).toMatch(/^AN {2}- 31234567/m);
+    expect(ris.match(/^ER {2}- ?$/gm)?.length).toBe(1);
+  });
+
+  it("gives every author its own AU line, as RIS requires", async () => {
+    const ris = await capture(/^RIS/i);
+    expect(ris).toMatch(/^AU {2}- Smith J$/m);
+    expect(ris).toMatch(/^AU {2}- Okafor A$/m);
+  });
+
+  it("notes why the paper is being requested", async () => {
+    const ris = await capture(/^RIS/i);
+    expect(ris).toMatch(/^N1 {2}- Full text not retrievable:/m);
+  });
+
+  // The point of the export is that someone finishes the job by hand, and the
+  // entitled copy is the one link that actually ends that job.
+  it("puts the library link in the CSV when a resolver is configured", async () => {
+    setResolverBase("https://lib.example.edu/openurl");
+    const csv = await capture(/^CSV/i);
+    setResolverBase("");
+    expect(csv).toMatch(/Library link/);
+    expect(csv).toMatch(/lib\.example\.edu\/openurl/);
+    expect(csv).toMatch(/info%3Adoi%2F10\.1000%2Fpaywalled/);
+  });
+
+  it("points RIS UR at the entitled copy, keeping the publisher link in L2", async () => {
+    /* UR is what an interlibrary-loan form and a reference manager follow. */
+    setResolverBase("https://lib.example.edu/openurl");
+    const ris = await capture(/^RIS/i);
+    setResolverBase("");
+    expect(ris).toMatch(/^UR {2}- https:\/\/lib\.example\.edu\/openurl/m);
+    expect(ris).toMatch(/^L2 {2}- https:\/\/doi\.org\/10\.1000\/paywalled/m);
+  });
+
+  it("falls back to the publisher link when no resolver is set", async () => {
+    setResolverBase("");
+    const ris = await capture(/^RIS/i);
+    expect(ris).toMatch(/^UR {2}- https:\/\/doi\.org\/10\.1000\/paywalled/m);
+    expect(ris).not.toMatch(/^L2 {2}- /m);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Full-text screening: what the run will read, before it runs.
+//
+// A record whose full text was never acquired is screened on its abstract, and
+// calling that a full-text decision misstates the review. The page used to say
+// only "N articles ready for full-text analysis" above a full-width button,
+// which hid exactly that.
+// --------------------------------------------------------------------------
+
+describe("FullTextPage before a run", () => {
+  const ftState = (withText: number, total = 5) => (st: any) => {
+    st.setQuery("q");
+    st.setPico({ population: "Adults with dental records", intervention: "ML model",
+                 comparator: "Clinician alone", outcome: "Caries at 24 months" });
+    st.setInclusion(["Reports a validated model"]);
+    st.setExclusion(["Conference abstracts"]);
+    const rows = Array.from({ length: total }, (_, i) => ({
+      paper_id: `p${i}`, Source: "PubMed", Title: `Study ${i}`, URL: "", Abstract: "a",
+      Decision: "INCLUDE", Reason: "", Agent_Trace: {},
+    }));
+    st.setResults(rows as any);
+    const fts: Record<string, any> = {};
+    rows.forEach((r, i) => {
+      fts[r.paper_id] = i < withText
+        ? { paper_id: r.paper_id, title: r.Title, url: "", source: "Europe PMC (XML)",
+            status: "found", text: "Methods and results. ".repeat(50) }
+        : { paper_id: r.paper_id, title: r.Title, url: "", source: "PubMed",
+            status: "missing", reason: "Paywalled." };
+    });
+    st.setFullTexts(fts);
+  };
+
+  it("counts what will be read at full length, not just the queue", async () => {
+    const view = renderPage(FullTextPage, ftState(3, 5));
+    await waitFor(() => expect(view.container.textContent).toMatch(/Ready to screen/i));
+    expect(view.container.textContent).toMatch(/3\s*Full text/);
+    expect(view.container.textContent).toMatch(/2\s*Abstract only/);
+  });
+
+  it("warns that abstract-only records are not full-text decisions", async () => {
+    const view = renderPage(FullTextPage, ftState(3, 5));
+    await waitFor(() => expect(view.container.textContent).toMatch(/Abstract only/i));
+    expect(view.container.textContent).toMatch(/judged on the abstract alone/i);
+  });
+
+  it("says nothing about abstract-only when every record has full text", async () => {
+    const view = renderPage(FullTextPage, ftState(5, 5));
+    await waitFor(() => expect(view.container.textContent).toMatch(/Ready to screen/i));
+    expect(view.container.textContent).not.toMatch(/Abstract only/i);
+    expect(view.container.textContent).not.toMatch(/Acquire full texts/i);
+  });
+
+  it("breaks the acquired text down by where it came from", async () => {
+    const view = renderPage(FullTextPage, ftState(3, 5));
+    await waitFor(() => expect(view.container.textContent).toMatch(/Evidence per article/i));
+    expect(view.container.textContent).toMatch(/Europe PMC \(XML\)/);
+  });
+
+  it("shows the criteria the run will judge against", async () => {
+    const view = renderPage(FullTextPage, ftState(3, 5));
+    await waitFor(() => expect(view.container.textContent).toMatch(/Inclusion criteria/i));
+    expect(view.container.textContent).toMatch(/Reports a validated model/);
+    expect(view.container.textContent).toMatch(/Conference abstracts/);
+    expect(view.container.textContent).toMatch(/Caries at 24 months/);
+  });
+
+  it("replaces the bare alert and full-width button with the shared control pane", async () => {
+    const view = renderPage(FullTextPage, ftState(3, 5));
+    await waitFor(() => expect(view.container.textContent).toMatch(/Ready to screen/i));
+    expect(view.container.textContent).not.toMatch(/articles ready for full-text analysis/i);
+    expect(view.container.textContent).toMatch(/Run full-text screening/i);
   });
 });
