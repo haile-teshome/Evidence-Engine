@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useRef, useState, ReactNode } from "react";
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride, GradeOutcome } from "./mockServices";
+import type { ExtractedTable } from "./apiClient";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method, SearchLogEntry, ReviewProtocol, ProtocolDeviation, SelectionStrategy, SearchFilters } from "./apiClient";
 import { FRESH_LAUNCH } from "./launchFlags";
 import { idbGet, idbSet, idbDel } from "./idb";
@@ -17,6 +18,41 @@ export type SimulationRun = {
   totalYield: number;
   source: "manual" | "ai-optimize";
 };
+
+/** The planning run screening should use.
+ *
+ *  One resolver, used by both the Planning page and Abstract Screening, so the
+ *  run shown as "in use" is provably the run screening retrieves with. It used
+ *  to be inferred by matching query text against the editor, which meant an
+ *  edit made after a run silently detached the counts from the retrieval and
+ *  the two pages could disagree about which plan was live.
+ *
+ *  Defaults to the most recent run; an explicit `inUseRunId` pins another. */
+export function resolveInUseRun(
+  runs: SimulationRun[] | null | undefined,
+  inUseRunId: string | null | undefined,
+): SimulationRun | null {
+  const list = runs || [];
+  if (!list.length) return null;
+  return (inUseRunId && list.find(r => r.id === inUseRunId)) || list[list.length - 1];
+}
+
+/** How a snowball run selected what it kept, and what it left behind. */
+export type SnowballPlan = {
+  /** Which ordering decided the survivors. */
+  sort: SnowballSort;
+  /** The per-seed cap the reviewer set. */
+  maxPerSeed: number;
+  direction: string;
+  sources: string[];
+  /** Per seed: how many its sources hold, how many were pulled, how many kept. */
+  seeds: { title: string; available: number; fetched: number; kept: number }[];
+  /** The backend's per-source fetch ceiling, so a capped pull is attributable. */
+  ceiling: number;
+  ranAt: string;
+};
+
+export type SnowballSort = "relevance" | "cited" | "recent" | "source";
 
 export type FullTextRecord = {
   paper_id: string;
@@ -93,7 +129,10 @@ export type HistoryEntry = {
 export type SummaryRow = { id: string; title: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string };
 export type DocQaTurn = { question: string; answer: string; sources: { n: number; id: string; title: string }[]; busy?: boolean; status?: string; note?: string; ts?: number; table?: SummaryRow[] };
 
-export type ExtractedTable = { title: string; type: string; data: string[][]; caption?: string };
+// Re-exported rather than redeclared. A second, narrower definition here would
+// typecheck fine and silently drop the page/tier provenance the backend now
+// sends, which is the whole point of extracting tables deterministically.
+export type { ExtractedTable } from "./apiClient";
 export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[] };
 
 // One archived title/abstract screening pass, kept so prior runs can be
@@ -126,6 +165,7 @@ export type TaskKind =
   | "ai-optimize"
   | "quality-assess"
   | "abstract-screen"
+  | "retrieval"
   | "fulltext-fetch"
   | "full-text-screen"
   | "snowball"
@@ -183,13 +223,24 @@ type Ctx = {
   unifiedSearchQuery: string; setUnifiedSearchQuery: (v: string) => void;
   perDbQueries: Record<string, string>; setPerDbQueries: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   simulation: Record<string, number> | null; setSimulation: (v: Record<string, number> | null) => void;
+  /** The query those yield counts were measured against.
+   *
+   *  Without it, a planned-vs-retrieved gap is unattributable: the counts are
+   *  frozen at Planning time while the fetch uses whatever query is current, so
+   *  editing the query afterwards makes every source look like it errored. */
+  simulationQuery: string | null; setSimulationQuery: (v: string | null) => void;
   dbTestResults: Record<string, { query: string; total_found: number; papers: { title: string; url: string }[] }> | null;
   setDbTestResults: React.Dispatch<React.SetStateAction<Record<string, { query: string; total_found: number; papers: { title: string; url: string }[] }> | null>>;
   agenticTrace: any[] | null; setAgenticTrace: (v: any[] | null) => void;
   agenticSummary: { iterations_run: number; total_papers_found: number; best_relevance: number } | null;
   setAgenticSummary: (v: { iterations_run: number; total_papers_found: number; best_relevance: number } | null) => void;
   simulationRuns: SimulationRun[];
+  /** Which planning run screening should use. `null` means "the most recent",
+   *  which is the default; an explicit id pins a specific run. */
+  inUseRunId: string | null; setInUseRunId: (id: string | null) => void;
   addSimulationRun: (run: Omit<SimulationRun, "id" | "timestamp" | "label">) => void;
+  removeSimulationRun: (id: string) => void;
+  renameSimulationRun: (id: string, label: string) => void;
   clearSimulationRuns: () => void;
 
   // Quality Assessment
@@ -270,6 +321,12 @@ type Ctx = {
   // Seed titles the last citation-snowball ran over (session-only), so a later
   // change to the included set can flag stale results and prompt a re-run.
   snowballSeeds: string[] | null; setSnowballSeeds: (v: string[] | null) => void;
+  /** What the snowball pull found against what it kept.
+   *
+   *  Snowballing truncates: a seed with 85 references, capped at 20, loses 65.
+   *  That was invisible, which made the search irreproducible from what the
+   *  app recorded and left PRISMA with nothing to state. */
+  snowballPlan: SnowballPlan | null; setSnowballPlan: (v: SnowballPlan | null) => void;
   // Citation ids the reviewer has selected to carry forward. Persisted (and null
   // until first seeded) so the selection survives tab switches and isn't re-seeded
   // from the AI verdicts on every remount.
@@ -328,6 +385,24 @@ export type ScreeningPlan = {
   counts: Record<string, number> | null;
   /** How many records each source actually returned. */
   retrieved: Record<string, number>;
+  /** Why each source returned what it did: ok / empty / error, the error text,
+   *  whether the result was capped, and how long the call took. Recorded so a
+   *  shortfall can be explained instead of guessed at. */
+  sourceStatus?: Record<string, {
+    status: "ok" | "empty" | "error"; count: number; requested: number;
+    capped: boolean; error?: string; error_type?: string; ms: number;
+  }>;
+  /** The query `counts` were measured against. Lets a planned-vs-retrieved gap
+   *  be attributed: a stale plan reads very differently from a source failing. */
+  countedQuery?: string | null;
+  /** The PER-SOURCE query each count in `counts` was measured against. Retrieval
+   *  is per-source, so a unified-query comparison could not see a per-database
+   *  edit and would blame the database for a gap the app itself created. */
+  countedPerDb?: Record<string, string>;
+  /** The planning run this plan was built from, so the provenance is nameable
+   *  rather than inferred by matching query text. */
+  runId?: string | null;
+  runLabel?: string | null;
   ranAt: string;
 };
 
@@ -396,19 +471,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [dbTestResults, setDbTestResults] = useState<Record<string, { query: string; total_found: number; papers: { title: string; url: string }[] }> | null>(null);
   const [agenticTrace, setAgenticTrace] = useState<any[] | null>(null);
   const [agenticSummary, setAgenticSummary] = useState<{ iterations_run: number; total_papers_found: number; best_relevance: number } | null>(null);
+  const [simulationQuery, setSimulationQuery] = useState<string | null>(null);
   const [simulationRuns, setSimulationRuns] = useState<SimulationRun[]>([]);
+  const [inUseRunId, setInUseRunId] = useState<string | null>(null);
   const addSimulationRun = (run: Omit<SimulationRun, "id" | "timestamp" | "label">) => {
-    setSimulationRuns(prev => {
-      const next = [...prev, {
-        ...run,
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-        label: `Run ${prev.length + 1}`,
-      }].slice(-20); // keep last 20
-      return next;
-    });
+    const id = crypto.randomUUID();
+    setSimulationRuns(prev => [...prev, {
+      ...run, id, timestamp: Date.now(), label: `Run ${prev.length + 1}`,
+    }].slice(-20)); // keep last 20
+    // A run the reviewer just executed becomes the one screening uses. Pinning
+    // an older run stays in effect only until the next run is made.
+    setInUseRunId(id);
   };
-  const clearSimulationRuns = () => setSimulationRuns([]);
+  // Labels are NOT renumbered after a removal. "Run 3" is how a reviewer refers
+  // to a run in their notes and in a comparison they have open; resequencing
+  // would silently rename every later run and make those references wrong.
+  const removeSimulationRun = (id: string) => {
+    setSimulationRuns(prev => prev.filter(r => r.id !== id));
+    // Fall back to "most recent" rather than pointing at a run that is gone.
+    setInUseRunId(prev => (prev === id ? null : prev));
+  };
+  // A run's label is how a reviewer identifies it later ("the one where I
+  // dropped the population block"), so it is editable. An empty rename is
+  // ignored rather than accepted: a blank row in the history is worse than the
+  // generated "Run 3".
+  const renameSimulationRun = (id: string, label: string) => {
+    const next = (label || "").trim().slice(0, 80);
+    if (!next) return;
+    setSimulationRuns(prev => prev.map(r => (r.id === id ? { ...r, label: next } : r)));
+  };
+  const clearSimulationRuns = () => { setSimulationRuns([]); setInUseRunId(null); };
 
   const [rawPapers, setRawPapers] = useState<Paper[] | null>(null);
   const [seedIds, setSeedIds] = useState<Set<string>>(new Set());
@@ -484,6 +576,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [snowballScreened, setSnowballScreened] = useState<ScreenResult[] | null>(null);
   const [snowballChosen, setSnowballChosen] = useState<string[] | null>(null);
   const [snowballSeeds, setSnowballSeeds] = useState<string[] | null>(null);
+  const [snowballPlan, setSnowballPlan] = useState<SnowballPlan | null>(null);
 
   const [extractedPapers, setExtractedPapers] = useState<ExtractedPaper[] | null>(null);
   const [fullTexts, setFullTexts] = useState<Record<string, FullTextRecord>>({});
@@ -583,14 +676,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     abstractOverrides,
     fullTextOverrides,
     rerankThreshold, rerankResults,
-    results, screeningArchive, screeningDuration, screeningPlan, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, extractedPapers, prisma,
+    results, screeningArchive, screeningDuration, screeningPlan, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, snowballPlan, extractedPapers, prisma,
     // Planning (search-design) outputs + per-tab run results so a session keeps
     // everything that's been run, including acquired full texts. The local
     // autosave drops fullTexts only as a fallback if it would exceed the
     // localStorage quota; backend sessions always keep them.
-    simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary,
+    simulation, simulationQuery, simulationRuns, inUseRunId, dbTestResults, agenticTrace, agenticSummary,
     textExtractions, fullTexts,
     writingEnriched, writingSummary, writingMethodsMain,
+    // Meta-analysis. These were absent, so every extraction and pooled result
+    // was discarded on reload or session switch: the reviewer paid for an LLM
+    // pass over every included study, edited the rows by hand, and lost all of
+    // it by opening another tab.
+    metaOutcome, metaMeasure, metaTau2Method, metaUseKnappHartung,
+    metaExtractions, metaRun,
   });
 
   // `authoritative` = true replaces every field outright (explicit session
@@ -645,6 +744,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (authoritative) setProtocol(d.protocol ?? null); else if (d.protocol) setProtocol(d.protocol);
     setProtocolDeviations(prev => pick(d.protocolDeviations, prev, []) ?? []);
     setPrismaChecklist(prev => pick(d.prismaChecklist, prev, {}) ?? {});
+    // Meta-analysis. metaExtractions carries hand-corrected numbers, so on a
+    // reconciliation it follows the same keep-what-is-populated rule as the
+    // other expensive collections.
+    if (typeof d.metaOutcome === "string") setMetaOutcome(d.metaOutcome);
+    if (typeof d.metaMeasure === "string") setMetaMeasure(d.metaMeasure as EffectMeasure | "");
+    if (d.metaTau2Method) setMetaTau2Method(d.metaTau2Method as Tau2Method);
+    if (typeof d.metaUseKnappHartung === "boolean") setMetaUseKnappHartung(d.metaUseKnappHartung);
+    setMetaExtractions(prev => pick(d.metaExtractions, prev));
+    if (authoritative) setMetaRun(d.metaRun ?? null); else if (d.metaRun) setMetaRun(d.metaRun);
     setAbstractOverrides(d.abstractOverrides && typeof d.abstractOverrides === "object" ? d.abstractOverrides : {});
     setFullTextOverrides(d.fullTextOverrides && typeof d.fullTextOverrides === "object" ? d.fullTextOverrides : {});
     if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
@@ -662,6 +770,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (authoritative) setFtDuration(typeof d.ftDuration === "number" ? d.ftDuration : 0);
     else if (typeof d.ftDuration === "number" && d.ftDuration > 0) setFtDuration(d.ftDuration);
     setSnowballResults(prev => pick(d.snowballResults, prev));
+    setSnowballPlan(pick(d.snowballPlan, snowballPlan, null) ?? null);
     setSnowballScreened(prev => pick(d.snowballScreened, prev));
     setSnowballChosen(Array.isArray(d.snowballChosen) ? d.snowballChosen : null);
     setExtractedPapers(prev => pick(d.extractedPapers, prev));
@@ -669,6 +778,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     // Planning + per-tab run outputs.
     setSimulation(prev => pick(d.simulation, prev));
     setSimulationRuns(prev => pick(d.simulationRuns, prev, []) ?? []);
+    if (typeof d.simulationQuery === "string") setSimulationQuery(d.simulationQuery);
+    if (typeof d.inUseRunId === "string" || d.inUseRunId === null) setInUseRunId(d.inUseRunId ?? null);
     setDbTestResults(prev => pick(d.dbTestResults, prev));
     setAgenticTrace(prev => pick(d.agenticTrace, prev));
     setAgenticSummary(prev => pick(d.agenticSummary, prev));
@@ -723,8 +834,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
       searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
       fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive, fullTextResults,
-      snowballResults, snowballScreened, snowballChosen, extractedPapers, prisma,
-      simulation, simulationRuns, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
+      snowballResults, snowballScreened, snowballChosen, snowballPlan, extractedPapers, prisma,
+      simulation, simulationRuns, inUseRunId, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
       writingEnriched, writingSummary, writingMethodsMain,
       currentSessionId, currentSessionTitle]);
 
@@ -770,7 +881,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setMetaUseKnappHartung(false);
     setMetaExtractions(null); setMetaRun(null);
     setResults(null); setScreeningArchive([]); setScreeningDuration(0); setFullTextResults(null); setFtDuration(0);
-    setSnowballResults(null); setSnowballScreened(null); setSnowballChosen(null); setSnowballSeeds(null); setExtractedPapers(null);
+    setSnowballResults(null); setSnowballScreened(null); setSnowballChosen(null); setSnowballSeeds(null); setSnowballPlan(null); setExtractedPapers(null);
     setFullTexts({}); setTextExtractions([]);
     setWritingEnriched({}); setWritingSummary(""); setWritingMethodsMain("");
     setPrisma({ identified: 0, source_counts: {}, duplicates_removed: 0, screened: 0, excluded_total: 0, exclusion_breakdown: {}, included_final: 0 });
@@ -783,8 +894,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, perSourceLimits, setPerSourceLimits, searchSelection, setSearchSelection, searchFilters, setSearchFilters, relevanceOverrides, setRelevanceOverrides, files, setFiles,
     history, setHistory, docQa, setDocQa, pico, setPico, framework, setFramework, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
     unifiedSearchQuery, setUnifiedSearchQuery, perDbQueries, setPerDbQueries, simulation, setSimulation,
+    simulationQuery, setSimulationQuery,
     dbTestResults, setDbTestResults, agenticTrace, setAgenticTrace, agenticSummary, setAgenticSummary,
-    simulationRuns, addSimulationRun, clearSimulationRuns,
+    simulationRuns, addSimulationRun, removeSimulationRun, renameSimulationRun, clearSimulationRuns,
+    inUseRunId, setInUseRunId,
     rawPapers, setRawPapers, seedIds, setSeedIds, uniquePapers, setUniquePapers, duplicatesCount, setDuplicatesCount,
     qualityReports, setQualityReports, qualityArchive, setQualityArchive, excludedByQuality, setExcludedByQuality,
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
@@ -799,6 +912,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     metaExtractions, setMetaExtractions, metaRun, setMetaRun,
     results, setResults, screeningArchive, setScreeningArchive, screeningDuration, setScreeningDuration, screeningPlan, setScreeningPlan, fullTextResults, setFullTextResults, ftDuration, setFtDuration,
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened, snowballChosen, setSnowballChosen, snowballSeeds, setSnowballSeeds,
+    snowballPlan, setSnowballPlan,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,
     writingMethodsMain, setWritingMethodsMain,

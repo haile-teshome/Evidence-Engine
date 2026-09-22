@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useStore, SimulationRun } from "../lib/store";
+import { useStore, SimulationRun, resolveInUseRun } from "../lib/store";
 import { AIService, DataAggregator } from "../lib/mockServices";
 import { Card } from "../components/ui/card";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -124,7 +124,11 @@ function HistoryColumn({
   activeRunId,
   onSelectCompare,
   onUse,
+  onDelete,
+  onRename,
   onClear,
+  collapsed,
+  onToggleCollapsed,
 }: {
   runs: SimulationRun[];
   compareA: string | null;
@@ -132,19 +136,67 @@ function HistoryColumn({
   activeRunId: string | null;
   onSelectCompare: (id: string) => void;
   onUse: (run: SimulationRun) => void;
+  onDelete: (run: SimulationRun) => void;
+  onRename: (run: SimulationRun, label: string) => void;
   onClear: () => void;
+  collapsed: boolean;
+  onToggleCollapsed: () => void;
 }) {
+  // Which row is being renamed, and its in-progress text. Held here rather than
+  // per row so opening one editor closes any other.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const commit = (run: SimulationRun) => {
+    const next = draft.trim();
+    if (next && next !== run.label) onRename(run, next);
+    setEditingId(null);
+  };
+  // Collapsed: a rail, not a hidden panel. The run count stays visible so the
+  // history is still discoverable, and the query editor beside it gets the
+  // ~17rem back, which is where the long boolean strings actually need to go.
+  if (collapsed) {
+    return (
+      <Card className="w-10 shrink-0 p-0 overflow-hidden flex flex-col items-center">
+        <button
+          onClick={onToggleCollapsed}
+          title={`Show run history${runs.length ? ` (${runs.length})` : ""}`}
+          aria-label="Show run history"
+          aria-expanded={false}
+          className="flex-1 w-full flex flex-col items-center gap-2 py-2 hover:bg-muted/60 transition-colors"
+        >
+          <ChevronLeft className="size-4 text-muted-foreground" />
+          <History className="size-3.5 text-muted-foreground" />
+          {runs.length > 0 && (
+            <span className="text-[10px] font-semibold tabular-nums text-primary">{runs.length}</span>
+          )}
+          <span
+            className="mt-1 text-[10px] uppercase tracking-wider text-muted-foreground whitespace-nowrap"
+            style={{ writingMode: "vertical-rl" }}
+          >
+            Run history
+          </span>
+        </button>
+      </Card>
+    );
+  }
+
   return (
     <Card className="w-72 shrink-0 p-0 overflow-hidden flex flex-col">
       <div className="px-3 py-2 border-b flex items-center justify-between">
         <span className="text-xs uppercase tracking-wide text-muted-foreground flex items-center gap-1.5">
           <History className="size-3.5" />Run history
         </span>
+        <div className="flex items-center gap-0.5">
+        <Button variant="ghost" size="sm" className="h-7 px-1.5" onClick={onToggleCollapsed}
+                title="Collapse run history" aria-label="Collapse run history" aria-expanded>
+          <ChevronRight className="size-3.5" />
+        </Button>
         {runs.length > 0 && (
           <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={onClear} title="Clear history">
             <Trash2 className="size-3.5" />
           </Button>
         )}
+        </div>
       </div>
 
       {runs.length === 0 ? (
@@ -163,18 +215,53 @@ function HistoryColumn({
                 className={`px-3 py-2.5 border-b transition-colors ${selected ? "bg-primary/5" : "hover:bg-muted/30"}`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-sm font-medium flex items-center gap-1.5">
-                    {run.label}
-                    {run.source === "ai-optimize" && <Badge variant="outline" className="text-[9px] px-1 py-0">AI</Badge>}
+                  <span className="text-sm font-medium flex items-center gap-1.5 min-w-0">
+                    {editingId === run.id ? (
+                      <input
+                        autoFocus
+                        value={draft}
+                        onChange={e => setDraft(e.target.value)}
+                        onBlur={() => commit(run)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") commit(run);
+                          // Escape abandons the edit; blur would otherwise save
+                          // a half-typed name on the way out.
+                          if (e.key === "Escape") setEditingId(null);
+                        }}
+                        aria-label={`Rename ${run.label}`}
+                        maxLength={80}
+                        className="w-full min-w-0 rounded border bg-background px-1 py-0.5 text-sm"
+                      />
+                    ) : (
+                      <button
+                        onClick={() => { setEditingId(run.id); setDraft(run.label); }}
+                        title="Rename this run"
+                        className="truncate text-left hover:text-primary hover:underline decoration-dotted underline-offset-2"
+                      >
+                        {run.label}
+                      </button>
+                    )}
+                    {run.source === "ai-optimize" && <Badge variant="outline" className="text-[9px] px-1 py-0 shrink-0">AI</Badge>}
                   </span>
-                  <span className="text-[10px] text-muted-foreground tabular-nums">{fmtTime(run.timestamp)}</span>
+                  <span className="flex items-center gap-1 shrink-0">
+                    <span className="text-[10px] text-muted-foreground tabular-nums">{fmtTime(run.timestamp)}</span>
+                    {/* Per-run delete. A run is a dead end more often than not
+                        (a query that over-broadened, a typo), and until now the
+                        only way to remove one was Clear, which takes the good
+                        runs with it. */}
+                    <button
+                      onClick={() => onDelete(run)}
+                      title={`Delete ${run.label}`}
+                      aria-label={`Delete ${run.label}`}
+                      className="rounded p-0.5 text-muted-foreground/60 hover:text-destructive hover:bg-destructive/10 transition-colors"
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </span>
                 </div>
                 <div className="mt-0.5">
                   <span className="font-semibold text-primary tabular-nums">{run.totalYield.toLocaleString()}</span>
                   <span className="text-xs text-muted-foreground"> articles</span>
-                </div>
-                <div className="font-mono text-[10px] text-muted-foreground truncate mt-1">
-                  {run.unifiedQuery.slice(0, 60)}{run.unifiedQuery.length > 60 ? "…" : ""}
                 </div>
                 <div className="flex gap-1.5 mt-1.5">
                   <Button
@@ -223,7 +310,6 @@ export function SimulationPage() {
   // Compare state: tracks which two run IDs are selected (A then B).
   const [compareA, setCompareA] = useState<string | null>(null);
   const [compareB, setCompareB] = useState<string | null>(null);
-  const [usedRunId, setUsedRunId] = useState<string | null>(null);
   // Two-pane workspace: which database's query is open on the right.
   const [selectedDb, setSelectedDb] = useState<string | null>(null);
   const [showTrace, setShowTrace] = useState(false);
@@ -297,10 +383,16 @@ export function SimulationPage() {
   // Default to the latest run; auto-switch to a newly created one. An explicit
   // "Use" on an older run overrides this until the next run is created.
   // (Must run before any early return so hook order stays stable.)
-  const newestRunId = s.simulationRuns.length ? s.simulationRuns[s.simulationRuns.length - 1].id : null;
+  // Collapsing the history is a layout preference, so it persists per device
+  // rather than per review: someone who wants the query editor wide wants it
+  // wide every time. Wrapped because storage throws in private windows.
+  const HISTORY_KEY = "ee:planning-history-collapsed";
+  const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch { return false; }
+  });
   useEffect(() => {
-    if (newestRunId) setUsedRunId(newestRunId);
-  }, [newestRunId]);
+    try { localStorage.setItem(HISTORY_KEY, historyCollapsed ? "1" : "0"); } catch { /* ignore */ }
+  }, [historyCollapsed]);
 
   if (s.history.length === 0) {
     return <EmptyState icon={ClipboardList} title="No research goal yet"
@@ -353,25 +445,32 @@ export function SimulationPage() {
     s.setUnifiedSearchQuery(run.unifiedQuery);
     s.setPerDbQueries({ ...run.perDbQueries });
     s.setSimulation(run.counts);
-    setUsedRunId(run.id);
+    s.setSimulationQuery(run.unifiedQuery);
+    s.setInUseRunId(run.id);
     setCompareA(null);
     setCompareB(null);
     toast.success(`Loaded ${run.label}: ${run.totalYield.toLocaleString()} articles`);
   }
 
-  // Does a run's queries still match what's currently in the editor?
-  const runMatchesActive = (run: SimulationRun) =>
-    run.unifiedQuery === s.unifiedSearchQuery &&
-    apiSources.every(
-      src => (run.perDbQueries[src] || run.unifiedQuery) === (s.perDbQueries[src] || s.unifiedSearchQuery),
-    );
+  function handleDeleteRun(run: SimulationRun) {
+    s.removeSimulationRun(run.id);
+    // Drop every reference to it. A comparison slot still pointing at a deleted
+    // run renders an empty half, and the "In use" marker would sit on a run the
+    // reviewer can no longer open to check. The queries already loaded into the
+    // editor are deliberately left alone: deleting the record of a run is not
+    // the same as undoing it.
+    if (compareA === run.id) setCompareA(null);
+    if (compareB === run.id) setCompareB(null);
+    // The store drops the in-use pin when its run is deleted, falling back to
+    // the most recent run.
+    toast.success(`Deleted ${run.label}`);
+  }
 
-  // The explicitly-selected run wins (runs can share identical queries); otherwise
-  // fall back to the most recent run matching the current editor state.
-  const activeRunId =
-    (usedRunId && s.simulationRuns.some(r => r.id === usedRunId && runMatchesActive(r)) ? usedRunId : null) ??
-    [...s.simulationRuns].reverse().find(runMatchesActive)?.id ??
-    null;
+  // Which run is in use is a stored fact, not a guess made by matching query
+  // text against the editor. Screening reads the SAME resolver, so the run
+  // marked "In use" here is provably the run it retrieves with. Defaults to the
+  // most recent; clicking "Use" on another pins it until the next run is made.
+  const activeRunId = resolveInUseRun(s.simulationRuns, s.inUseRunId)?.id ?? null;
 
   async function testDb(src: string) {
     setTesting(src);
@@ -401,6 +500,7 @@ export function SimulationPage() {
       out[src] = r[src] || 0;
     }
     s.setSimulation(out);
+    s.setSimulationQuery(s.unifiedSearchQuery || s.query || "");
     saveRun(out, "manual");
   }
 
@@ -465,6 +565,7 @@ export function SimulationPage() {
       const counts: Record<string, number> = {};
       Object.entries(last.sources).forEach(([k, v]: any) => { counts[k] = v.count; });
       s.setSimulation(counts);
+      s.setSimulationQuery(s.unifiedSearchQuery || s.query || "");
       saveRun(counts, "ai-optimize");
       s.updateTask("ai-optimize", { status: "done" });
       toast.success(`Optimization complete (${result.iterations_run} iterations)`);
@@ -711,6 +812,10 @@ export function SimulationPage() {
 
         {/* RIGHT-MOST: run history column */}
         <HistoryColumn
+          onDelete={handleDeleteRun}
+          onRename={(run, label) => s.renameSimulationRun(run.id, label)}
+          collapsed={historyCollapsed}
+          onToggleCollapsed={() => setHistoryCollapsed(v => !v)}
           runs={s.simulationRuns}
           compareA={compareA}
           compareB={compareB}

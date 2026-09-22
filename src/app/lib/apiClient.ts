@@ -253,6 +253,7 @@ const SOURCES_POOL = [
   "arXiv",
   "bioRxiv",
   "medRxiv",
+  "OpenReview",
   "DOAJ",
   "CORE",
   "ClinicalTrials.gov",
@@ -604,18 +605,31 @@ export const AIService = {
     return result;
   },
 
-  async fetchCitations(seedTitle: string, type: "Both" | "Backward (References)" | "Forward (Cited by)", maxPer: number, sources: string[], signal?: AbortSignal): Promise<any[]> {
-    const r = await postJSON<{ citations: any[] }>("/citations", {
-      paper_id: "", source: "", title: seedTitle, snowball_type: type, max_per: maxPer, sources,
-    }, signal);
-    return (r.citations || []).map((c: any) => ({
-      id: c.id || c.paper_id || `${(c.title || "").slice(0, 12)}-${Math.random().toString(36).slice(2, 6)}`,
-      title: c.title,
-      source: c.source,
-      abstract: c.abstract,
-      url: c.url,
-      citation_type: c.citation_type,
-    }));
+  // Returns the WHOLE reference / citation list, plus how many each source
+  // holds. The caller ranks and truncates; keeping whichever N an API returned
+  // first meant taking the papers printed earliest in a bibliography, and those
+  // skew to introduction and background rather than to the closest work.
+  async fetchCitations(seedTitle: string, type: "Both" | "Backward (References)" | "Forward (Cited by)", maxPer: number, sources: string[], signal?: AbortSignal): Promise<CitationHaul> {
+    const r = await postJSON<{ citations: any[]; available?: Record<string, number>; total_available?: number; ceiling?: number }>(
+      "/citations",
+      { paper_id: "", source: "", title: seedTitle, snowball_type: type, max_per: maxPer, sources, fetch_all: true },
+      signal,
+    );
+    return {
+      citations: (r.citations || []).map((c: any) => ({
+        id: c.id || c.paper_id || `${(c.title || "").slice(0, 12)}-${Math.random().toString(36).slice(2, 6)}`,
+        title: c.title,
+        source: c.source,
+        abstract: c.abstract,
+        url: c.url,
+        citation_type: c.citation_type,
+        year: c.year ?? null,
+        cited_by_count: c.cited_by_count ?? null,
+      })),
+      available: r.available || {},
+      totalAvailable: r.total_available ?? (r.citations || []).length,
+      ceiling: r.ceiling ?? 0,
+    };
   },
 
   // Semantic 'find similar' — the topical-similarity sibling of fetchCitations.
@@ -746,8 +760,8 @@ export const AIService = {
       paper_id?: string; Abstract?: string; full_text?: string;
     },
     signal?: AbortSignal,
-  ): Promise<{ title: string; type: string; data: string[][]; caption?: string }[]> {
-    const r = await postJSON<{ tables: { title: string; type: string; data: string[][]; caption?: string }[] }>("/extract/tables", {
+  ): Promise<ExtractedTable[]> {
+    const r = await postJSON<{ tables: ExtractedTable[] }>("/extract/tables", {
       Title: paper.Title,
       URL: paper.URL,
       Source: paper.Source,
@@ -820,6 +834,16 @@ export type RerankItem = {
   reason: string;
 };
 
+/** Everything one seed's snowball pull found, and what its sources hold. */
+export type CitationHaul = {
+  citations: any[];
+  /** "Europe PMC · backward" -> how many that source reports holding. */
+  available: Record<string, number>;
+  totalAvailable: number;
+  /** The per-source-and-direction fetch ceiling the backend applied. */
+  ceiling: number;
+};
+
 export type RerankResult = {
   ranked: RerankItem[];
   kept: RerankItem[];
@@ -838,8 +862,8 @@ export const DataAggregator = {
   // matters only insofar as LEADS can score it. Default raised to 50 so the
   // candidate pool is broad enough to find the natural break without missing
   // relevant papers from a single source.
-  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 50, signal?: AbortSignal, sort: SelectionStrategy = "relevance", filters?: SearchFilters): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
-    return postJSON<{ papers: Paper[]; sourceCounts: Record<string, number> }>(
+  async fetchAll(query: string, sources: string[], _pico: Pico, maxPerSource = 50, signal?: AbortSignal, sort: SelectionStrategy = "relevance", filters?: SearchFilters): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; sourceStatus?: Record<string, SourceStatus> }> {
+    return postJSON<{ papers: Paper[]; sourceCounts: Record<string, number>; sourceStatus?: Record<string, SourceStatus> }>(
       "/papers/fetch",
       { query, sources, max_per_source: maxPerSource, sort, year_from: filters?.yearFrom ?? null, year_to: filters?.yearTo ?? null },
       signal,
@@ -852,7 +876,7 @@ export const DataAggregator = {
   // `sort` is the selection strategy applied only when a source matches more
   // than its cap ("relevance" = best match, "recent" = newest); `filters`
   // restricts what is searched (e.g. publication-year window).
-  async fetchPerSource(query: string, sources: string[], pico: Pico, limits: Record<string, number>, defaultLimit = 50, signal?: AbortSignal, sort: SelectionStrategy = "relevance", filters?: SearchFilters): Promise<{ papers: Paper[]; sourceCounts: Record<string, number> }> {
+  async fetchPerSource(query: string, sources: string[], pico: Pico, limits: Record<string, number>, defaultLimit = 50, signal?: AbortSignal, sort: SelectionStrategy = "relevance", filters?: SearchFilters): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; sourceStatus: Record<string, SourceStatus> }> {
     // Group sources by their effective cap so identical caps batch into one request.
     const byCap = new Map<number, string[]>();
     for (const src of sources) {
@@ -861,13 +885,15 @@ export const DataAggregator = {
     }
     const papers: Paper[] = [];
     const sourceCounts: Record<string, number> = {};
+    const sourceStatus: Record<string, SourceStatus> = {};
     for (const [cap, srcs] of byCap) {
       if (signal?.aborted) break;
       const res = await DataAggregator.fetchAll(query, srcs, pico, cap, signal, sort, filters);
       papers.push(...(res.papers || []));
       Object.assign(sourceCounts, res.sourceCounts || {});
+      Object.assign(sourceStatus, res.sourceStatus || {});
     }
-    return { papers, sourceCounts };
+    return { papers, sourceCounts, sourceStatus };
   },
 
   // Fetch the FULL planning corpus for screening: for each source use its
@@ -882,7 +908,8 @@ export const DataAggregator = {
     yields: Record<string, number> | null,
     pico: Pico,
     opts: { cap?: number; signal?: AbortSignal } = {},
-  ): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; truncated: string[] }> {
+  ): Promise<{ papers: Paper[]; sourceCounts: Record<string, number>; truncated: string[];
+               sourceStatus: Record<string, SourceStatus> }> {
     // No implicit ceiling. Abstract screening must see every record the planning
     // stage said the query yields — silently screening the first 2000 of 12,000
     // and reporting PRISMA counts off that sample would misstate the review.
@@ -893,6 +920,7 @@ export const DataAggregator = {
     const UNPLANNED_BUDGET = 2000;
     const papers: Paper[] = [];
     const sourceCounts: Record<string, number> = {};
+    const sourceStatus: Record<string, SourceStatus> = {};
     const truncated: string[] = [];
     for (const src of sources) {
       if (opts.signal?.aborted) break;
@@ -906,8 +934,9 @@ export const DataAggregator = {
       const res = await DataAggregator.fetchAll(q, [src], pico, budget, opts.signal);
       papers.push(...res.papers);
       Object.assign(sourceCounts, res.sourceCounts);
+      Object.assign(sourceStatus, res.sourceStatus || {});
     }
-    return { papers, sourceCounts, truncated };
+    return { papers, sourceCounts, truncated, sourceStatus };
   },
 
   async simulateYield(query: string, sources: string[], signal?: AbortSignal): Promise<Record<string, number>> {
@@ -1066,6 +1095,19 @@ export type StudyEffect = {
   // LLM transparency
   extraction_quote?: string | null;
   extraction_confidence?: number | null;
+
+  /** A reported effect and its 95% CI, for any measure. Most trials publish
+   *  this and never publish per-arm SDs, so without it the study is not
+   *  poolable at all. */
+  effect?: number | null;
+  effect_ci_low?: number | null;
+  effect_ci_high?: number | null;
+
+  /** Provenance, so a pooled number can be traced back to the page it is on. */
+  units?: string | null;
+  timepoint?: string | null;
+  source_page?: number | null;
+  source_table?: string | null;
   extraction_notes?: string | null;
   error?: string | null;
   weight_fe?: number;
@@ -1168,17 +1210,78 @@ export type MetaRunResult = {
   meta_regression: MetaRegressionResult;
 };
 
+/** A table as the backend extracted it, with the provenance the UI cites.
+ *  `tier` names which extractor produced it: jats and pdfplumber are
+ *  deterministic and reproducible, llm is not, and the UI says which. */
+export type ExtractedTable = {
+  title: string;
+  type: string;
+  data: string[][];
+  caption?: string;
+  page?: number | null;
+  tier?: "jats" | "pdfplumber" | "unitable" | "llm";
+  deterministic?: boolean;
+};
+
+/** An answer located in one paper, with enough provenance to check it. */
+export type GroundedAnswer = {
+  found: boolean;
+  answer: string;
+  value: number | null;
+  units: string | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  timepoint: string | null;
+  source_page: number | null;
+  source_table: string | null;
+  quote: string | null;
+  /** Whether the quote was actually located in the supplied text. A false here
+   *  means the model produced a citation that does not exist, which is the one
+   *  failure the reader cannot detect unaided. */
+  quote_verified: boolean;
+  confidence: number | null;
+  model_used?: string;
+  error?: string;
+};
+
+export async function metaAsk(
+  paper: { id?: string; title?: string; abstract?: string },
+  question: string,
+  opts: { fullText?: string; tables?: ExtractedTable[] } = {},
+  signal?: AbortSignal,
+): Promise<GroundedAnswer> {
+  return postJSON<GroundedAnswer>("/meta/ask", {
+    paper,
+    question,
+    full_text: opts.fullText || null,
+    tables: opts.tables || null,
+    model: apiConfig.model,
+  }, signal);
+}
+
+/** URL of a PDF the backend cached during acquisition, optionally opened at a
+ *  page. Browser PDF viewers honour the #page fragment, which is what makes
+ *  "jump to p. 7" work without rendering the document ourselves. */
+export function cachedPdfUrl(pdfKey: string, page?: number | null): string {
+  const base = `${apiConfig.baseUrl}/fulltext/pdf/${encodeURIComponent(pdfKey)}`;
+  return page && page > 0 ? `${base}#page=${page}` : base;
+}
+
 export const MetaAnalysisService = {
   async extract(
     papers: Paper[],
     outcome: string,
     measure: string = "",
     fullTexts: Record<string, string> = {},
+    /** Tables already pulled by the Table Extraction stage, per paper id.
+     *  Effect sizes live in results tables, and PDF-derived prose loses their
+     *  column structure, so sending these beats making the model re-read it. */
+    tables: Record<string, ExtractedTable[]> = {},
     signal?: AbortSignal,
   ): Promise<{ extractions: StudyEffect[]; model_used: string; outcome: string }> {
     return postJSON<{ extractions: StudyEffect[]; model_used: string; outcome: string }>(
       "/meta/extract",
-      { papers, outcome, measure, full_texts: fullTexts, model: apiConfig.model },
+      { papers, outcome, measure, full_texts: fullTexts, tables, model: apiConfig.model },
       signal,
     );
   },
@@ -1251,6 +1354,22 @@ export function formatDuration(seconds: number): string {
 // fallback as though it were the benchmarked one.
 // ---------------------------------------------------------------------------
 
+/** Why a source returned what it did.
+ *
+ *  "empty" and "error" look identical in a bare count, and they call for
+ *  opposite responses: a genuinely small result set means the query is right
+ *  and narrow, while a failed call means nothing was searched at all. */
+export type SourceStatus = {
+  status: "ok" | "empty" | "error";
+  count: number;
+  requested: number;
+  /** The source returned exactly its cap, so there were probably more. */
+  capped: boolean;
+  error?: string;
+  error_type?: string;
+  ms: number;
+};
+
 export type RankTier = "bge+tfidf" | "tfidf" | "nb" | "cold";
 
 export type RankStatus = {
@@ -1271,8 +1390,12 @@ export type RankResult = {
   trained: boolean;
   reviewed: number;
   includes_found: number;
-  predicted_remaining: number;
-  est_recall: number | null;
+  predicted_remaining: number;      // unlabelled records the classifier scores as relevant; a count, not a recall estimate
+  since_last_include: number;       // decisions since the reviewer last included a record
+  likely_complete: boolean;         // heuristic: no include in the last max(10% of records, 200) after 20% screened
+  safe_to_stop: boolean;            // hypergeometric stopping test at 95% recall, alpha 0.05 (Callaghan and Mueller-Hansen 2020)
+  stop_p_value: number | null;
+  stop_detail: string;
   batch: number;
   detail: string;
 };
@@ -1291,6 +1414,9 @@ export async function rankRemote(
   labels: Record<string, 0 | 1>,
   tier: "auto" | "bge" | "tfidf" = "auto",
   signal?: AbortSignal,
+  history: string[] = [],
 ): Promise<RankResult> {
-  return postJSON<RankResult>("/rank", { records, labels, tier }, signal);
+  // `history` is the order in which the reviewer decided records (latest last);
+  // the stop indicators are functions of that sequence.
+  return postJSON<RankResult>("/rank", { records, labels, tier, history }, signal);
 }

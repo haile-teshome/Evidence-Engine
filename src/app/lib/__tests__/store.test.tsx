@@ -11,7 +11,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { StoreProvider, useStore } from "../store";
+import { StoreProvider, useStore, resolveInUseRun } from "../store";
 
 const wrapper = ({ children }: { children: ReactNode }) => (
   <StoreProvider>{children}</StoreProvider>
@@ -333,5 +333,174 @@ describe("task tracking", () => {
 describe("useStore outside a provider", () => {
   it("fails loudly rather than returning a silently broken store", () => {
     expect(() => renderHook(() => useStore())).toThrow();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Simulation runs. Each is an expensive yield estimate across every database,
+// so removing one has to be surgical rather than all-or-nothing.
+// --------------------------------------------------------------------------
+
+describe("simulation run history", () => {
+  const run = (yield_: number) => ({
+    unifiedQuery: `q${yield_}`, perDbQueries: { PubMed: `q${yield_}` },
+    counts: { PubMed: yield_ }, totalYield: yield_, source: "manual" as const,
+  });
+
+  // Which planning run is in use decides what Abstract Screening retrieves
+  // with. It used to be local component state on the Planning page inferred by
+  // matching query text, so screening could not see it and the two pages could
+  // disagree about which plan was live.
+  describe("the in-use run", () => {
+    it("defaults to the most recent run", () => {
+      const { result } = mount();
+      act(() => { result.current.addSimulationRun(run(10)); result.current.addSimulationRun(run(20)); });
+      const runs = result.current.simulationRuns;
+      expect(resolveInUseRun(runs, null)?.counts.PubMed).toBe(20);
+    });
+
+    it("honours an explicit pin over recency", () => {
+      const { result } = mount();
+      act(() => { result.current.addSimulationRun(run(10)); result.current.addSimulationRun(run(20)); });
+      const first = result.current.simulationRuns[0];
+      expect(resolveInUseRun(result.current.simulationRuns, first.id)?.counts.PubMed).toBe(10);
+    });
+
+    it("makes a newly executed run the one screening uses", () => {
+      const { result } = mount();
+      act(() => result.current.addSimulationRun(run(10)));
+      const first = result.current.simulationRuns[0].id;
+      expect(result.current.inUseRunId).toBe(first);
+      act(() => result.current.addSimulationRun(run(20)));
+      expect(result.current.inUseRunId).toBe(result.current.simulationRuns[1].id);
+    });
+
+    it("falls back to most recent when the pinned run is deleted", () => {
+      const { result } = mount();
+      act(() => { result.current.addSimulationRun(run(10)); result.current.addSimulationRun(run(20)); });
+      const [a, b] = result.current.simulationRuns;
+      act(() => result.current.setInUseRunId(a.id));
+      act(() => result.current.removeSimulationRun(a.id));
+      expect(result.current.inUseRunId).toBeNull();
+      expect(resolveInUseRun(result.current.simulationRuns, result.current.inUseRunId)?.id).toBe(b.id);
+    });
+
+    it("survives a snapshot round-trip", () => {
+      const { result } = mount();
+      act(() => { result.current.addSimulationRun(run(10)); result.current.addSimulationRun(run(20)); });
+      const first = result.current.simulationRuns[0].id;
+      act(() => result.current.setInUseRunId(first));
+      const snap = result.current.snapshot();
+      const fresh = mount();
+      act(() => fresh.result.current.hydrate(snap));
+      expect(fresh.result.current.inUseRunId).toBe(first);
+    });
+
+    it("resolves to null when no run exists", () => {
+      expect(resolveInUseRun([], null)).toBeNull();
+      expect(resolveInUseRun(null, "anything")).toBeNull();
+    });
+  });
+
+  it("stamps an id, timestamp and label so callers cannot fabricate them", () => {
+    const { result } = mount();
+    act(() => result.current.addSimulationRun(run(10)));
+    const r = result.current.simulationRuns[0];
+    expect(r.id).toBeTruthy();
+    expect(r.timestamp).toBeGreaterThan(0);
+    expect(r.label).toBe("Run 1");
+  });
+
+  it("removes exactly one run", () => {
+    const { result } = mount();
+    act(() => { result.current.addSimulationRun(run(10)); result.current.addSimulationRun(run(20)); });
+    const first = result.current.simulationRuns[0].id;
+    act(() => result.current.removeSimulationRun(first));
+    expect(result.current.simulationRuns).toHaveLength(1);
+    expect(result.current.simulationRuns[0].totalYield).toBe(20);
+  });
+
+  it("does NOT renumber the remaining runs", () => {
+    /* "Run 3" is how a reviewer refers to a run in their notes and in an open
+       comparison. Resequencing would silently rename every later run and make
+       those references point somewhere else. */
+    const { result } = mount();
+    act(() => {
+      result.current.addSimulationRun(run(10));
+      result.current.addSimulationRun(run(20));
+      result.current.addSimulationRun(run(30));
+    });
+    const second = result.current.simulationRuns[1].id;
+    act(() => result.current.removeSimulationRun(second));
+    expect(result.current.simulationRuns.map(r => r.label)).toEqual(["Run 1", "Run 3"]);
+  });
+
+  it("ignores an unknown id rather than clearing everything", () => {
+    const { result } = mount();
+    act(() => result.current.addSimulationRun(run(10)));
+    act(() => result.current.removeSimulationRun("no-such-run"));
+    expect(result.current.simulationRuns).toHaveLength(1);
+  });
+
+  it("renames a run", () => {
+    /* The generated "Run 3" says nothing. A reviewer identifies a run by what
+       they changed in it. */
+    const { result } = mount();
+    act(() => result.current.addSimulationRun(run(10)));
+    const id = result.current.simulationRuns[0].id;
+    act(() => result.current.renameSimulationRun(id, "Dropped the population block"));
+    expect(result.current.simulationRuns[0].label).toBe("Dropped the population block");
+  });
+
+  it("renames only the run asked for", () => {
+    const { result } = mount();
+    act(() => { result.current.addSimulationRun(run(10)); result.current.addSimulationRun(run(20)); });
+    const first = result.current.simulationRuns[0].id;
+    act(() => result.current.renameSimulationRun(first, "Renamed"));
+    expect(result.current.simulationRuns.map(r => r.label)).toEqual(["Renamed", "Run 2"]);
+  });
+
+  it("ignores an empty rename rather than blanking the row", () => {
+    const { result } = mount();
+    act(() => result.current.addSimulationRun(run(10)));
+    const id = result.current.simulationRuns[0].id;
+    act(() => result.current.renameSimulationRun(id, "   "));
+    expect(result.current.simulationRuns[0].label).toBe("Run 1");
+  });
+
+  it("trims and caps an over-long name", () => {
+    const { result } = mount();
+    act(() => result.current.addSimulationRun(run(10)));
+    const id = result.current.simulationRuns[0].id;
+    act(() => result.current.renameSimulationRun(id, "  " + "x".repeat(200) + "  "));
+    expect(result.current.simulationRuns[0].label).toHaveLength(80);
+  });
+
+  it("a rename survives the snapshot round trip", () => {
+    const { result } = mount();
+    act(() => result.current.addSimulationRun(run(10)));
+    act(() => result.current.renameSimulationRun(result.current.simulationRuns[0].id, "Kept"));
+    const snap = result.current.snapshot();
+
+    const fresh = mount();
+    act(() => fresh.result.current.hydrate(snap));
+    expect(fresh.result.current.simulationRuns[0].label).toBe("Kept");
+  });
+
+  it("clearing removes all of them", () => {
+    const { result } = mount();
+    act(() => { result.current.addSimulationRun(run(10)); result.current.addSimulationRun(run(20)); });
+    act(() => result.current.clearSimulationRuns());
+    expect(result.current.simulationRuns).toHaveLength(0);
+  });
+
+  it("round-trips the run history through a snapshot", () => {
+    const { result } = mount();
+    act(() => result.current.addSimulationRun(run(42)));
+    const snap = result.current.snapshot();
+
+    const fresh = mount();
+    act(() => fresh.result.current.hydrate(snap));
+    expect(fresh.result.current.simulationRuns[0].totalYield).toBe(42);
   });
 });
