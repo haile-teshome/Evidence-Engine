@@ -1,5 +1,7 @@
 from Bio import Entrez
 import re
+
+from query_translation import translate_query
 import requests
 import xml.etree.ElementTree as ET
 import urllib.parse
@@ -228,13 +230,24 @@ class PubMedService:
                 pmid = str(citation['PMID']) 
                 
                 abstract_text = entrez_abstract(citation['Article'])
+                art = citation['Article']
+                try:
+                    _issue = art.get('Journal', {}).get('JournalIssue', {}) or {}
+                    _year = str((_issue.get('PubDate', {}) or {}).get('Year', '') or (_issue.get('PubDate', {}) or {}).get('MedlineDate', ''))
+                    _authors = "; ".join(f"{a.get('LastName', '')} {a.get('Initials', '')}".strip() for a in (art.get('AuthorList') or []) if a.get('LastName'))
+                    _journal = str(art.get('Journal', {}).get('Title', '') or '')
+                    _pages = str((art.get('Pagination', {}) or {}).get('MedlinePgn', '') or '')
+                    _doi = next((str(i) for i in (article.get('PubmedData', {}) or {}).get('ArticleIdList', []) if getattr(i, 'attributes', {}).get('IdType') == 'doi'), '')
+                except Exception:
+                    _year = _authors = _journal = _pages = _doi = ""
 
                 papers.append(Paper(
                     source=DataSource.PUBMED.value,
                     id=pmid,
                     title=citation['Article']['ArticleTitle'],
                     abstract=abstract_text,
-                    url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+                    url=f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                    doi=_doi, year=_year, authors=_authors, journal=_journal, pages=_pages,
                 ))
             
             return papers
@@ -305,10 +318,13 @@ class ArXivService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         """Fetch papers from arXiv."""
-        from utils import QueryCleaner
-        clean_query = QueryCleaner.clean_for_general_search(query)
+        # arXiv has a real boolean parser (AND / OR / ANDNOT, parentheses,
+        # ti:/abs:/all: prefixes). The previous cleaner stripped the operators
+        # out, which collapsed every AND-ed block into one undifferentiated
+        # keyword soup and dropped the required-ness that makes a block a block.
+        clean_query = translate_query(query, "arXiv")
         params = {
-            'search_query': f'all:{clean_query}',
+            'search_query': clean_query or f'all:{query}',
             'start': 0,
             'max_results': max_results
         }
@@ -424,8 +440,11 @@ class PDFService:
 class SemanticScholarService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
+        # Raw PubMed syntax used to go straight out here: this endpoint
+        # relevance-ranks a plain phrase, so "[Mesh]" and the booleans were
+        # matched as literal text.
         params = {
-            "query": query,
+            "query": translate_query(query, "Semantic Scholar") or query,
             "limit": max_results,
             "fields": "title,abstract,paperId"
         }
@@ -461,7 +480,9 @@ class SemanticScholarService:
 class COREService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
-        params = {"q": query, "limit": max_results}
+        # CORE v3 accepts field-qualified Elasticsearch syntax, so the blocks
+        # keep their title/abstract scoping instead of matching full text.
+        params = {"q": translate_query(query, "CORE") or query, "limit": max_results}
         # CORE is the only source that genuinely requires a key. Without one
         # (per-request or env) we skip it quietly so the rest of the search still
         # runs, rather than erroring on a 401.
@@ -612,12 +633,16 @@ class OpenAlexService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            # title_and_abstract.search, not `search`: the bare search parameter
+            # also matches full text, so a block meant as [tiab] quietly widens
+            # to "mentioned anywhere, including the reference list". OpenAlex
+            # parses AND/OR/NOT inside this filter when they are uppercase.
+            clean = translate_query(query, "OpenAlex")
             url = "https://api.openalex.org/works"
             params = {
-                "search": clean or query,
+                "filter": f"title_and_abstract.search:{clean}" if clean else None,
                 "per_page": min(max(max_results, 1), 200),
-                "select": "id,title,abstract_inverted_index,doi,open_access,publication_year",
+                "select": "id,title,abstract_inverted_index,doi,open_access,publication_year,authorships,primary_location,biblio",
             }
             resp = throttled_request(url, params=params).json()
             papers: List[Paper] = []
@@ -628,12 +653,18 @@ class OpenAlexService:
                 oa = w.get("open_access", {}) or {}
                 paper_id = (w.get("id") or "").split("/")[-1] or doi
                 paper_url = oa.get("oa_url") or (f"https://doi.org/{doi}" if doi else (w.get("id") or ""))
+                _src = ((w.get("primary_location") or {}).get("source") or {}) or {}
                 papers.append(Paper(
                     source="OpenAlex",
                     id=str(paper_id),
                     title=w.get("title", "") or "",
                     abstract=abstract,
                     url=paper_url,
+                    doi=doi,
+                    year=str(w.get("publication_year") or ""),
+                    authors="; ".join(((a.get("author") or {}).get("display_name") or "") for a in (w.get("authorships") or [])),
+                    journal=str(_src.get("display_name") or ""),
+                    pages=str((w.get("biblio") or {}).get("first_page") or ""),
                 ))
             return papers[:max_results]
         except Exception as e:
@@ -690,7 +721,9 @@ class CrossRefService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "CrossRef") or query
             url = "https://api.crossref.org/works"
             params = {
                 "query": clean or query,
@@ -726,7 +759,9 @@ class MedRxivService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "medRxiv") or query
             epmc_query = f"({clean}) AND SRC:PPR"
             url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
             params = {
@@ -753,6 +788,8 @@ class MedRxivService:
                     title=it.get("title", "") or "",
                     abstract=it.get("abstractText", "") or "",
                     url=(f"https://www.medrxiv.org/content/{doi}" if doi else f"https://europepmc.org/article/PPR/{pid}"),
+                    doi=doi, year=str(it.get("pubYear") or ""), authors=str(it.get("authorString") or ""),
+                    journal=str(it.get("journalTitle") or ""), pages=str(it.get("pageInfo") or ""),
                 ))
                 if len(papers) >= max_results:
                     break
@@ -762,6 +799,72 @@ class MedRxivService:
             return []
 
 
+class OpenReviewService:
+    """OpenReview — conference submissions, reviews and camera-ready papers.
+
+    Covers ICLR, NeurIPS, ACL-adjacent workshops and much of the machine
+    learning literature that never reaches a MEDLINE-indexed journal, including
+    work that is under review and therefore invisible to every other source
+    here. For a review of methods that is a real gap; for a clinical review it
+    usually is not, which is why it is off by default.
+
+    Uses `/notes/search`, which is open. The `/notes` endpoint is gated behind
+    a challenge and is deliberately not touched.
+
+    Ref: https://docs.openreview.net/reference/api-v2
+    """
+
+    BASE = "https://api2.openreview.net/notes/search"
+    PAGE = 100
+
+    @staticmethod
+    def _value(content: dict, key: str) -> str:
+        """API v2 wraps every field as {"value": ...}; v1 did not."""
+        v = (content or {}).get(key)
+        if isinstance(v, dict):
+            v = v.get("value")
+        return str(v).strip() if v not in (None, "") else ""
+
+    @staticmethod
+    def fetch(query: str, max_results: int) -> List[Paper]:
+        from ratelimit import limited_get
+        papers: List[Paper] = []
+        try:
+            # A term search, not a boolean one: OpenReview has no field tags,
+            # so a PubMed string would be searched for its own brackets.
+            term = translate_query(query, "OpenReview") or query
+            offset = 0
+            while len(papers) < max_results:
+                r = limited_get(OpenReviewService.BASE, params={
+                    "term": term, "type": "terms", "content": "all",
+                    "group": "all", "source": "forum",
+                    "limit": min(OpenReviewService.PAGE, max_results - len(papers)),
+                    "offset": offset,
+                }, timeout=25)
+                if r is None or not r.ok:
+                    break
+                notes = (r.json() or {}).get("notes", []) or []
+                if not notes:
+                    break
+                for n in notes:
+                    c = n.get("content", {}) or {}
+                    nid = str(n.get("id") or "")
+                    papers.append(Paper(
+                        source="OpenReview",
+                        id=nid,
+                        title=OpenReviewService._value(c, "title") or "Untitled",
+                        abstract=OpenReviewService._value(c, "abstract"),
+                        url=f"https://openreview.net/forum?id={nid}" if nid else "",
+                    ))
+                if len(notes) < OpenReviewService.PAGE:
+                    break
+                offset += len(notes)
+            return papers[:max_results]
+        except Exception as e:
+            print(f"OpenReview fetch error: {e}")
+            return papers[:max_results]
+
+
 class DOAJService:
     """DOAJ — Directory of Open Access Journals; all articles are open access."""
 
@@ -769,7 +872,9 @@ class DOAJService:
     def fetch(query: str, max_results: int) -> List[Paper]:
         try:
             from urllib.parse import quote
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "DOAJ") or query
             url = f"https://doaj.org/api/v2/search/articles/{quote(clean or query)}"
             params = {"pageSize": min(max_results, 100)}
             resp = throttled_request(url, params=params).json()
@@ -810,7 +915,9 @@ class ClinicalTrialsService:
     @staticmethod
     def fetch(query: str, max_results: int) -> List[Paper]:
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "ClinicalTrials.gov") or query
             url = "https://clinicaltrials.gov/api/v2/studies"
             params = {"query.term": clean, "pageSize": min(max(max_results, 1), 100)}
             resp = throttled_request(url, params=params).json()
@@ -853,7 +960,9 @@ class SpringerService:
         if not key:
             return []
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "Springer Nature") or query
             url = "https://api.springernature.com/meta/v2/json"
             params = {"q": clean, "api_key": key, "p": min(max(max_results, 1), 50)}
             resp = throttled_request(url, params=params).json()
@@ -887,7 +996,9 @@ class IEEEService:
         if not key:
             return []
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "IEEE Xplore") or query
             url = "https://ieeexploreapi.ieee.org/api/v1/search/articles"
             params = {"apikey": key, "querytext": clean, "max_records": min(max(max_results, 1), 50), "format": "json"}
             resp = throttled_request(url, params=params).json()
@@ -920,7 +1031,9 @@ class ScopusService:
         if not key:
             return []
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "Scopus") or query
             url = "https://api.elsevier.com/content/search/scopus"
             headers = {"X-ELS-APIKey": key, "Accept": "application/json"}
             params = {"query": clean, "count": min(max(max_results, 1), 25)}
@@ -960,7 +1073,9 @@ class WebOfScienceService:
         if not key:
             return []
         try:
-            clean = re.sub(r"\[[^\]]+\]", "", query).strip() or query
+            # Rendered in this database's own query language rather than having
+            # its field tags deleted. See query_translation.py.
+            clean = translate_query(query, "Web of Science") or query
             url = "https://api.clarivate.com/apis/wos-starter/v1/documents"
             headers = {"X-ApiKey": key, "Accept": "application/json"}
             params = {"q": f"TS=({clean})", "limit": min(max(max_results, 1), 50), "db": "WOS", "page": 1}
@@ -1003,6 +1118,7 @@ class DataAggregator:
         "IEEE Xplore": IEEEService.fetch,
         "Scopus": ScopusService.fetch,
         "Web of Science": WebOfScienceService.fetch,
+        "OpenReview": OpenReviewService.fetch,
     }
 
     @staticmethod
@@ -1015,10 +1131,21 @@ class DataAggregator:
         cap ("relevance" = keep the best matches, "recent" = keep the newest).
         ``year_from`` / ``year_to`` restrict by publication year. Both are forwarded
         only to sources whose fetch() accepts them; the rest are unaffected.
+
+        Returns ``(papers, counts, status)``. ``status`` carries per-source
+        diagnostics -- ok / empty / error, the error text, whether the result was
+        capped, and how long the call took -- so a caller can say WHY a source
+        returned little instead of guessing at it.
         """
         import inspect
+        import time as _time
         all_papers = []
         source_counts = {}
+        # Per-source diagnostics. The failure used to be printed to the server
+        # log and the count set to 0, which left the UI unable to distinguish
+        # "this database is down" from "this query genuinely matches 7 papers"
+        # and reduced to telling the reviewer it might be either.
+        source_status: Dict[str, Dict[str, Any]] = {}
 
         search_count = limit if limit is not None else max_per_source
         # Extra kwargs forwarded per source only when its fetch() declares them.
@@ -1026,6 +1153,7 @@ class DataAggregator:
 
         for source in active_sources:
             papers = []
+            t0 = _time.monotonic()
             try:
                 if source == DataSource.LOCAL_PDF.value:
                     if uploaded_files:
@@ -1040,15 +1168,41 @@ class DataAggregator:
                 count = len(papers)
                 all_papers.extend(papers)
                 source_counts[source] = count
+                source_status[source] = {
+                    "status": "ok" if count else "empty",
+                    "count": count,
+                    "requested": search_count,
+                    # A source that returned exactly what was asked for probably
+                    # had more; the reviewer needs to know the set is truncated
+                    # rather than complete.
+                    "capped": count >= search_count > 0,
+                    "ms": int((_time.monotonic() - t0) * 1000),
+                }
 
             except Exception as e:
-                print(f"Error fetching from {source}: {str(e)}")
+                msg = str(e) or e.__class__.__name__
+                print(f"Error fetching from {source}: {msg}")
                 source_counts[source] = 0
+                source_status[source] = {
+                    "status": "error",
+                    "count": 0,
+                    "requested": search_count,
+                    "capped": False,
+                    # Kept verbatim and surfaced to the reviewer: "HTTP 429" and
+                    # "invalid query syntax" call for completely different
+                    # responses, and only the caller can tell them apart.
+                    "error": msg[:200],
+                    "error_type": e.__class__.__name__,
+                    "ms": int((_time.monotonic() - t0) * 1000),
+                }
 
+        # Returned, never stashed on the class. A module-level cache would be
+        # shared across concurrently served requests and two searches would
+        # overwrite each other's diagnostics.
         if limit is not None:
-            return all_papers[:limit], source_counts
+            return all_papers[:limit], source_counts, source_status
 
-        return all_papers, source_counts
+        return all_papers, source_counts, source_status
 
     @staticmethod
     def simulate_yield(query: str, active_sources: List[str]) -> Dict[str, int]:
@@ -1213,7 +1367,9 @@ class DataAggregator:
                 # 4d. medRxiv (via Europe PMC preprint source filter)
                 elif source == "medRxiv":
                     try:
-                        clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+                        # Rendered in this database's own query language rather than having
+                        # its field tags deleted. See query_translation.py.
+                        clean = translate_query(query, "medRxiv") or query
                         epmc_query = f"({clean}) AND SRC:PPR AND (publisher:medRxiv OR journal:medRxiv)"
                         url = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
                         params = {"query": epmc_query, "format": "json", "pageSize": 1}
@@ -1225,10 +1381,29 @@ class DataAggregator:
                         results[source] = 0
 
                 # 4e. DOAJ (uses 'total' in JSON response)
+                elif source == "OpenReview":
+                    try:
+                        from ratelimit import limited_get
+                        term = translate_query(query, "OpenReview") or query
+                        r = limited_get(OpenReviewService.BASE, params={
+                            "term": term, "type": "terms", "content": "all",
+                            "group": "all", "source": "forum", "limit": 1,
+                        }, timeout=25)
+                        total = (r.json() or {}).get("count", 0) if (r is not None and r.ok) else 0
+                        # OpenReview reports `count` a page at a time and caps
+                        # it at 10,000, so a big result set reads as exactly
+                        # 10,000. Treat the number as a floor, never a total.
+                        results[source] = int(total) if str(total).isdigit() else 0
+                    except Exception as e:
+                        print(f"OpenReview count error: {e}")
+                        results[source] = 0
+
                 elif source == "DOAJ":
                     try:
                         from urllib.parse import quote
-                        clean = re.sub(r"\[[^\]]+\]", "", query).strip()
+                        # Rendered in this database's own query language rather than having
+                        # its field tags deleted. See query_translation.py.
+                        clean = translate_query(query, "DOAJ") or query
                         url = f"https://doaj.org/api/v2/search/articles/{quote(clean or query)}"
                         params = {"pageSize": 1}
                         resp = throttled_request(url, params=params).json()

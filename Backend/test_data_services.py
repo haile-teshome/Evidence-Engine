@@ -305,3 +305,66 @@ class TestThrottle:
         monkeypatch.setattr(ds.requests, "get", always_timeout)
         with pytest.raises(ds.requests.exceptions.Timeout):
             ds.throttled_request("https://example.org/a", max_retries=2)
+
+
+# ---------------------------------------------------------------------------
+# OpenReview.
+# ---------------------------------------------------------------------------
+
+class _ORResponse:
+    def __init__(self, notes, status=200):
+        self._notes = notes
+        self.status_code = status
+        self.ok = 200 <= status < 400
+
+    def json(self):
+        return {"notes": self._notes, "count": len(self._notes)}
+
+
+def _note(i):
+    """API v2 wraps every content field as {"value": ...}; v1 did not."""
+    return {"id": f"id{i}", "content": {
+        "title": {"value": f"Paper {i}"},
+        "abstract": {"value": f"Abstract {i}"},
+        "venue": {"value": "ICLR 2025"},
+    }}
+
+
+class TestOpenReviewService:
+    def test_unwraps_the_v2_value_envelope(self, monkeypatch):
+        import data_services, ratelimit
+        monkeypatch.setattr(ratelimit, "limited_get", lambda *a, **k: _ORResponse([_note(1)]))
+        papers = data_services.OpenReviewService.fetch("machine learning", 5)
+        assert [p.title for p in papers] == ["Paper 1"]
+        assert papers[0].abstract == "Abstract 1"
+
+    def test_links_to_the_forum_page(self, monkeypatch):
+        import data_services, ratelimit
+        monkeypatch.setattr(ratelimit, "limited_get", lambda *a, **k: _ORResponse([_note(7)]))
+        papers = data_services.OpenReviewService.fetch("x", 5)
+        assert papers[0].url == "https://openreview.net/forum?id=id7"
+
+    def test_never_returns_more_than_asked_for(self, monkeypatch):
+        import data_services, ratelimit
+        monkeypatch.setattr(ratelimit, "limited_get",
+                            lambda *a, **k: _ORResponse([_note(i) for i in range(50)]))
+        assert len(data_services.OpenReviewService.fetch("x", 3)) == 3
+
+    def test_a_refusal_yields_nothing_rather_than_raising(self, monkeypatch):
+        """A source that is down must not take the whole search with it."""
+        import data_services, ratelimit
+        monkeypatch.setattr(ratelimit, "limited_get", lambda *a, **k: None)
+        assert data_services.OpenReviewService.fetch("x", 5) == []
+
+    def test_sends_a_term_with_no_pubmed_syntax(self, monkeypatch):
+        import data_services, ratelimit
+        seen = {}
+
+        def spy(url, **kw):
+            seen.update(kw.get("params") or {})
+            return _ORResponse([])
+        monkeypatch.setattr(ratelimit, "limited_get", spy)
+        data_services.OpenReviewService.fetch('("a b"[tiab] OR "c d"[tiab]) AND ("e f"[tiab])', 5)
+        assert "[tiab]" not in seen["term"]
+        assert '"' not in seen["term"]
+        assert seen["type"] == "terms"
