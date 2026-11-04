@@ -63,8 +63,8 @@ from urllib.parse import quote, urljoin
 
 app = FastAPI(title="Evidence Engine API", version="0.1.0")
 
-# Local persistence (sessions + multi-reviewer projects), backed by SQLite.
-# Replaces the former Supabase edge function so the app stays fully local.
+# Local persistence (sessions + multi-reviewer projects), backed by SQLite, so the
+# app needs no external service.
 from store import router as store_router  # noqa: E402
 
 # Screening prioritisation. Kept in its own module because it is the one

@@ -1,8 +1,7 @@
 // Local backend client.
 //
 // Talks to the Evidence Engine FastAPI backend at `/api` (Vite proxies this to
-// http://localhost:8000). This replaces the former Supabase edge-function
-// transport so the whole app runs locally with no external service.
+// http://localhost:8000), so the whole app runs locally with no external service.
 //
 // "Users" are local reviewer profiles rather than authenticated accounts. The
 // active profile id is sent in the `X-Reviewer-Id` header so the backend can

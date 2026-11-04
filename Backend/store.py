@@ -1,18 +1,15 @@
 """Local persistence layer for Evidence Engine.
 
-Replaces the former Supabase edge function + Postgres KV store with a
-zero-install SQLite database served directly by the FastAPI backend. This keeps
-the app fully local ("double-click and go"): sessions, projects, and the
+A zero-install SQLite database served directly by the FastAPI backend, so the
+app runs fully local ("double-click and go"): sessions, projects, and the
 multi-reviewer collaboration data all live in a single file at
 ``~/.evidence-engine/evidence.db`` (override with ``EE_DB_PATH``).
 
 Design notes
 ------------
-* The data model is an exact port of the edge function's KV layout, so the
-  frontend contract is unchanged — only the transport (Supabase functions URL
-  → local ``/api``) and the identity source (Supabase auth → local reviewer
-  profile) differ.
-* "Users" are now local *reviewer profiles*: a name (+ optional email) with a
+* The data model is a key-value layout, which is why the records read as JSON
+  blobs under composite keys rather than relational rows.
+* "Users" are local *reviewer profiles*: a name (+ optional email) with a
   generated id. There are no passwords or accounts. The frontend sends the
   active profile id in the ``X-Reviewer-Id`` header; ``current_user`` reads it
   and falls back to ``"local"`` (the default single-user profile).
@@ -232,7 +229,7 @@ def current_user(x_reviewer_id: Optional[str] = Header(default=None)) -> str:
 router = APIRouter(prefix="/api")
 
 
-# ---- Reviewer profiles (replaces Supabase auth / signup) ------------------
+# ---- Reviewer profiles -----------------------------------------------------
 
 class ReviewerCreate(BaseModel):
     name: Optional[str] = None
