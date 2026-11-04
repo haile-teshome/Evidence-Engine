@@ -6819,3 +6819,16 @@ def integrity_check(req: IntegrityRequest):
             except Exception as e:
                 results.append({"paper_id": p.paper_id, "status": "unknown", "detail": str(e), "source": "", "doi": ""})
     return {"results": results}
+
+
+# ---------------------------------------------------------------------------
+# Built frontend
+# ---------------------------------------------------------------------------
+# Serving the Vite build from this process makes `uvicorn api:app` the whole
+# application, with no Node server at runtime. This has to be the LAST thing the
+# module registers: the fallback route matches any unclaimed path, so anything
+# registered after it would be unreachable. Harmless when dist/ is absent, which
+# is the case for backend-only development and the test suite.
+import webapp  # noqa: E402
+
+_SERVING_FRONTEND = webapp.mount_frontend(app)
