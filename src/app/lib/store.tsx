@@ -4,6 +4,8 @@ import type { ExtractedTable } from "./apiClient";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method, SearchLogEntry, ReviewProtocol, ProtocolDeviation, SelectionStrategy, SearchFilters } from "./apiClient";
 import { FRESH_LAUNCH } from "./launchFlags";
 import { idbGet, idbSet, idbDel } from "./idb";
+import { compactFullTexts, compactArchive, expandArchive, compactRawPapers, expandRawPapers } from "./snapshotCompact";
+import { fetchFullTextBody, putFullTextBody } from "./fulltextCache";
 import type { FrameworkId } from "./frameworks";
 
 export type PageId = "home" | "simulation" | "quality" | "abstract" | "acquisition" | "fulltext" | "snowball" | "extraction" | "textextraction" | "prisma" | "meta" | "projects" | "writing";
@@ -61,10 +63,18 @@ export type FullTextRecord = {
   source: string;                       // paper's originating database
   status: "found" | "missing" | "pending";
   text?: string;
+  /** Key of this body in the backend text cache. When set, the saved session omits
+   *  `text` and the store pulls the body back from the cache after a load. */
+  text_key?: string;
   reason?: string;
   /** Path to the acquired PDF cached by the backend (relative to the API base),
    *  when the full text came from a real PDF source. Absent for XML/HTML tiers. */
   pdf_url?: string;
+  /** Tables recognised in this full text, when a caller has attached them. Nothing
+   *  populates this yet: tables come from the separate /extract/tables endpoint and
+   *  live on ExtractedPaper, so ExtractionWorkspace's table context is always empty.
+   *  Declared so that call site type-checks; wiring it up is a behaviour change. */
+  tables?: ExtractedTable[];
   /** Where the full text was retrieved from on this fetch: e.g.
    *  "Europe PMC (XML)", "PMC PDF (PMC1234567)", "Open access (nature.com)",
    *  "arXiv PDF (2304.12345)", "HTML scrape (publisher.com)". Different from
@@ -150,6 +160,9 @@ export type ScreeningPass = {
   excluded: number;
   durationSec: number;
   results: ScreenResult[];       // snapshot of the full set (for restore/compare)
+  /** Set only inside a saved session: this pass's results ARE the live results
+   *  table, so the copy is left out and put back on load (see snapshotCompact). */
+  resultsRef?: "current";
   label?: string;                // optional user nickname for the run
 };
 
@@ -282,7 +295,6 @@ type Ctx = {
   protocol: ReviewProtocol | null; setProtocol: (v: ReviewProtocol | null) => void;
   protocolDeviations: ProtocolDeviation[]; setProtocolDeviations: React.Dispatch<React.SetStateAction<ProtocolDeviation[]>>;
   prismaChecklist: Record<string, { status: string; note: string }>; setPrismaChecklist: React.Dispatch<React.SetStateAction<Record<string, { status: string; note: string }>>>;
-  lastSavedAt: number | null;
 
   // Relevance reranking: LEADS-scored papers from the home-analysis pipeline.
   // Threshold is user-tunable in the sidebar; rerankResults holds the full
@@ -418,6 +430,9 @@ export type PrismaCounts = {
 };
 
 const StoreCtx = createContext<Ctx | null>(null);
+// The "Saved" indicator has its own context: it updates after every autosave, and
+// in the data context that update re-rendered every page and table for a timestamp.
+const SaveStatusCtx = createContext<number | null>(null);
 
 const PAGE_STORAGE_KEY = "ee:page";
 export const SESSION_STORAGE_KEY = "ee:sessionId";
@@ -668,7 +683,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const snapshot = () => ({
     history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
     sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model,
-    rawPapers, uniquePapers, duplicatesCount, qualityReports, qualityArchive,
+    // rawPapers repeats uniquePapers almost record for record; shared abstracts go once.
+    rawPapers: compactRawPapers(rawPapers, uniquePapers), uniquePapers, duplicatesCount, qualityReports, qualityArchive,
     excludedByQuality: Array.from(excludedByQuality),
     qualityOverrides,
     gradeOutcomes,
@@ -676,13 +692,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     abstractOverrides,
     fullTextOverrides,
     rerankThreshold, rerankResults,
-    results, screeningArchive, screeningDuration, screeningPlan, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, snowballPlan, extractedPapers, prisma,
+    // The newest pass's results copy is the live table itself; store a marker.
+    results, screeningArchive: compactArchive(screeningArchive, results), screeningDuration, screeningPlan, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, snowballPlan, extractedPapers, prisma,
     // Planning (search-design) outputs + per-tab run results so a session keeps
-    // everything that's been run, including acquired full texts. The local
-    // autosave drops fullTexts only as a fallback if it would exceed the
-    // localStorage quota; backend sessions always keep them.
+    // everything that's been run, including acquired full texts. Full-text BODIES
+    // stay in the backend text cache and only their keys are saved; the store
+    // pulls the bodies back after a load. Bodies without a key are kept as-is.
     simulation, simulationQuery, simulationRuns, inUseRunId, dbTestResults, agenticTrace, agenticSummary,
-    textExtractions, fullTexts,
+    textExtractions, fullTexts: compactFullTexts(fullTexts),
     writingEnriched, writingSummary, writingMethodsMain,
     // Meta-analysis. These were absent, so every extraction and pooled result
     // was discarded on reload or session switch: the reviewer paid for an LLM
@@ -732,7 +749,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (d.relevanceOverrides && typeof d.relevanceOverrides === "object") setRelevanceOverrides(d.relevanceOverrides);
     setPerSourceLimits(d.perSourceLimits && typeof d.perSourceLimits === "object" ? d.perSourceLimits : {});
     if (d.model) setModel(d.model);
-    setRawPapers(prev => pick(d.rawPapers, prev));
+    setRawPapers(prev => pick(expandRawPapers(d.rawPapers, d.uniquePapers) ?? null, prev));
     setUniquePapers(prev => pick(d.uniquePapers, prev));
     setDuplicatesCount(d.duplicatesCount ?? 0);
     setQualityReports(prev => pick(d.qualityReports, prev));
@@ -758,7 +775,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (typeof d.rerankThreshold === "number") setRerankThreshold(d.rerankThreshold);
     setRerankResults(prev => pick(d.rerankResults, prev));
     setResults(prev => pick(d.results, prev));
-    setScreeningArchive(prev => pick(d.screeningArchive, prev, []) ?? []);
+    setScreeningArchive(prev => pick(expandArchive(d.screeningArchive, d.results) ?? null, prev, []) ?? []);
     // Run timings. On an authoritative load the incoming session is the truth,
     // so take its value (0 if the session predates this field). On a
     // reconciliation, a positive incoming duration fills in a missing one but a
@@ -790,14 +807,64 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setFullTexts(prev => pick(d.fullTexts, prev, {}) ?? {});
   };
 
+  // ── Full-text bodies ──────────────────────────────────────────────────────
+  // The saved session carries a cache key per acquired paper, not the text. After
+  // a load, pull the bodies back in the background in small batches (one state
+  // update per batch); and push any body that predates the cache so the next save
+  // can drop it. Each id is attempted once per app run, so a miss never loops.
+  const textSync = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const recs = Object.values(fullTexts);
+    const pull = recs.filter(r => r.status === "found" && r.text_key && r.text === undefined && !textSync.current.has(`get:${r.paper_id}`));
+    const push = recs.filter(r => r.status === "found" && !r.text_key && r.text && !textSync.current.has(`put:${r.paper_id}`));
+    if (!pull.length && !push.length) return;
+    (async () => {
+      for (let i = 0; i < pull.length; i += 20) {
+        const batch = pull.slice(i, i + 20);
+        batch.forEach(r => textSync.current.add(`get:${r.paper_id}`));
+        const got = await Promise.all(batch.map(async r => {
+          try { return [r.paper_id, await fetchFullTextBody(r.text_key!)] as const; }
+          catch { return [r.paper_id, null] as const; }
+        }));
+        const found = got.filter(([, t]) => typeof t === "string" && t);
+        if (found.length) setFullTexts(prev => {
+          const next = { ...prev };
+          for (const [id, t] of found) if (next[id] && next[id].text === undefined) next[id] = { ...next[id], text: t! };
+          return next;
+        });
+      }
+      for (let i = 0; i < push.length; i += 10) {
+        const batch = push.slice(i, i + 10);
+        batch.forEach(r => textSync.current.add(`put:${r.paper_id}`));
+        const keys = await Promise.all(batch.map(async r => {
+          try { return [r.paper_id, await putFullTextBody(r.paper_id, r.text!)] as const; }
+          catch { return [r.paper_id, null] as const; }
+        }));
+        const stored = keys.filter(([, k]) => k);
+        if (stored.length) setFullTexts(prev => {
+          const next = { ...prev };
+          for (const [id, k] of stored) if (next[id] && !next[id].text_key) next[id] = { ...next[id], text_key: k! };
+          return next;
+        });
+      }
+    })();
+  }, [fullTexts]);
+
   // ── Local persistence ─────────────────────────────────────────────────────
   // Restore the locally-saved snapshot once on mount, then keep it in sync
   // (debounced) so a refresh lands the user back in their review. Guarded so
   // the first empty render never wipes the saved snapshot before it's read.
   const localRestored = useRef(false);
+  const lastSavedJson = useRef<string | null>(null);
   useEffect(() => {
     if (!localRestored.current) return;          // wait until restore has run
-    const t = setTimeout(() => {
+    // Debounce, then wait for an idle moment: serialising the session is main-
+    // thread work of the size that drops frames if it lands mid-animation.
+    const w = window as any;
+    let idleId: number | null = null;
+    const hasIdle = typeof w.requestIdleCallback === "function";
+    const t = setTimeout(() => { if (hasIdle) idleId = w.requestIdleCallback(save, { timeout: 4000 }); else save(); }, 600);
+    function save() {
       if (history.length === 0) {
         try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ }
         idbDel(LOCAL_SNAPSHOT_KEY).catch(() => { /* ignore */ });
@@ -806,10 +873,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Envelope keeps the session identity with the data, so a refresh keeps
       // editing the SAME session instead of spawning a duplicate.
       const env = { data: snapshot(), sessionId: currentSessionId, sessionTitle: currentSessionTitle };
+      // Serialise once. A save whose bytes equal the last one is skipped, so a tab
+      // that re-sets identical state on mount costs nothing; storing the string
+      // rather than the object graph also spares IndexedDB a deep structured clone.
+      let json: string;
+      try { json = JSON.stringify(env); } catch { return; }
+      if (json === lastSavedJson.current) return;
       // Primary store: IndexedDB, a much larger quota than localStorage (~5 MB),
       // so big full-text sets (many uploaded PDFs) persist intact across reloads.
-      idbSet(LOCAL_SNAPSHOT_KEY, env)
-        .then(() => { setLastSavedAt(Date.now()); try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } })
+      idbSet(LOCAL_SNAPSHOT_KEY, json)
+        .then(() => { lastSavedJson.current = json; setLastSavedAt(Date.now()); try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ } })
         .catch(() => {
           // IndexedDB unavailable (rare) → fall back to localStorage, shedding the
           // heaviest re-derivable fields one tier at a time so structured stage
@@ -827,8 +900,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             catch { /* over quota, try the next, leaner tier */ }
           }
         });
-    }, 600);
-    return () => clearTimeout(t);
+    }
+    return () => { clearTimeout(t); if (idleId != null && hasIdle) w.cancelIdleCallback(idleId); };
   }, [history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
       sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model, rawPapers, uniquePapers, duplicatesCount,
       qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
@@ -850,6 +923,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       try {
         // Prefer IndexedDB; fall back to (and migrate from) an old localStorage snapshot.
         let parsed: any = await idbGet(LOCAL_SNAPSHOT_KEY).catch(() => undefined);
+        if (typeof parsed === "string") {            // newer snapshots are stored serialised
+          try { parsed = JSON.parse(parsed); } catch { parsed = undefined; }
+        }
         if (!parsed) {
           try {
             const raw = localStorage.getItem(LOCAL_SNAPSHOT_KEY);
@@ -903,7 +979,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     qualityOverrides, setQualityOverrides, addQualityOverride, clearQualityOverrides,
     gradeOutcomes, setGradeOutcomes,
     searchLog, setSearchLog, protocol, setProtocol, protocolDeviations, setProtocolDeviations,
-    prismaChecklist, setPrismaChecklist, lastSavedAt,
+    prismaChecklist, setPrismaChecklist,
     abstractOverrides, setAbstractOverride, clearAbstractOverride, setAbstractOverrides,
     fullTextOverrides, setFullTextOverride, clearFullTextOverride, setFullTextOverrides,
     rerankThreshold, setRerankThreshold, rerankResults, setRerankResults,
@@ -924,11 +1000,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     snapshot, hydrate, reset,
     tasks, startTask, updateTask, updateTaskStage, appendTaskLog, cancelTask, clearTask,
   };
-  return <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>;
+  return (
+    <SaveStatusCtx.Provider value={lastSavedAt}>
+      <StoreCtx.Provider value={value}>{children}</StoreCtx.Provider>
+    </SaveStatusCtx.Provider>
+  );
 }
 
 export function useStore() {
   const c = useContext(StoreCtx);
   if (!c) throw new Error("StoreProvider missing");
   return c;
+}
+
+/** When the working snapshot was last written locally (ms epoch), or null. */
+export function useSaveStatus() {
+  return useContext(SaveStatusCtx);
 }

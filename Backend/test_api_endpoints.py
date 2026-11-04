@@ -459,3 +459,40 @@ class TestTaskAndMeta:
 
     def test_sessions_listing_does_not_500(self, client):
         assert client.get("/api/sessions").status_code != 500
+
+
+class TestFullTextCache:
+    """The saved session keeps only a key per acquired paper; the body lives here."""
+
+    def test_put_then_get_roundtrip(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(api, "_TEXT_CACHE_DIR", tmp_path)
+        r = client.put("/api/fulltext/text/p1", json={"text": "body of the paper"})
+        assert r.status_code == 200
+        assert r.json()["key"] == "p1"
+        g = client.get("/api/fulltext/text/p1")
+        assert g.status_code == 200
+        assert g.json()["text"] == "body of the paper"
+
+    def test_unknown_key_is_404(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(api, "_TEXT_CACHE_DIR", tmp_path)
+        assert client.get("/api/fulltext/text/nope").status_code == 404
+
+    def test_empty_body_is_rejected(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(api, "_TEXT_CACHE_DIR", tmp_path)
+        assert client.put("/api/fulltext/text/p1", json={"text": ""}).status_code == 400
+
+    def test_fetch_caches_a_found_body_and_returns_its_key(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(api, "_TEXT_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(api, "_fulltext_fetch_impl",
+                            lambda req: {"status": "found", "text": "cached body", "source": "stub"})
+        r = client.post("/api/fulltext/fetch", json={"Title": "T", "URL": "", "Source": "PubMed", "paper_id": "p2"})
+        assert r.status_code == 200
+        assert r.json()["text_key"] == "p2"
+        assert (tmp_path / "p2.txt").read_text() == "cached body"
+
+    def test_fetch_miss_carries_no_key(self, client, tmp_path, monkeypatch):
+        monkeypatch.setattr(api, "_TEXT_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(api, "_fulltext_fetch_impl",
+                            lambda req: {"status": "missing", "reason": "paywalled"})
+        r = client.post("/api/fulltext/fetch", json={"Title": "T", "URL": "", "Source": "PubMed", "paper_id": "p3"})
+        assert "text_key" not in r.json()

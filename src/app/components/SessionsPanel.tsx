@@ -3,7 +3,7 @@ import { useStore, SESSION_STORAGE_KEY } from "../lib/store";
 import { useAuth } from "../lib/auth";
 import { useBackendReady } from "../lib/backendReady";
 import { FRESH_LAUNCH } from "../lib/launchFlags";
-import { listSessions, loadSession, saveSession, deleteSession, SessionMeta } from "../lib/sessions";
+import { listSessions, loadSession, saveSession, saveSessionRaw, deleteSession, SessionMeta } from "../lib/sessions";
 import { AIService } from "../lib/mockServices";
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
@@ -96,6 +96,7 @@ export function SessionsPanel() {
   // Debounce auto-saves so a flurry of state changes during one analysis run
   // collapses into a single write.
   const saveTimer = useRef<number | null>(null);
+  const lastSavedBody = useRef<string | null>(null);
   // Track which session ids we've already kicked off an LLM title for, so we
   // don't fire the title call repeatedly during the analysis.
   const titledRef = useRef<Set<string>>(new Set());
@@ -240,7 +241,15 @@ export function SessionsPanel() {
     if (s.history.length === 0) return;
 
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
-    saveTimer.current = window.setTimeout(async () => {
+    // Debounce, then wait for an idle moment so serialising the session never
+    // lands in the middle of a page transition.
+    const w = window as any;
+    const hasIdle = typeof w.requestIdleCallback === "function";
+    let idleId: number | null = null;
+    saveTimer.current = window.setTimeout(() => {
+      if (hasIdle) idleId = w.requestIdleCallback(runSave, { timeout: 4000 }); else void runSave();
+    }, 1500);
+    async function runSave() {
       setSyncStatus("saving");
       try {
         const id = s.currentSessionId || genId();
@@ -255,7 +264,13 @@ export function SessionsPanel() {
           s.setCurrentSessionId(id);
           s.setCurrentSessionTitle(title);
         }
-        await saveSession(id, title, s.snapshot());
+        // Serialise once and skip the round trip when nothing changed since the
+        // last save: a tab that re-sets identical state must not re-upload the review.
+        const body = JSON.stringify({ title, data: s.snapshot() });
+        if (body !== lastSavedBody.current) {
+          await saveSessionRaw(id, body);
+          lastSavedBody.current = body;
+        }
         setSyncStatus("synced");
         setSyncError(null);
         setLastSyncedAt(Date.now());
@@ -288,10 +303,11 @@ export function SessionsPanel() {
           );
         }
       }
-    }, 1500);
+    }
 
     return () => {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
+      if (idleId != null && hasIdle) w.cancelIdleCallback(idleId);
     };
     // Re-run when any major piece of the snapshot changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -4133,6 +4133,72 @@ def _found(text: str, source: str, paper_id: Optional[str] = None,
     return resp
 
 
+# Extracted full text is cached on disk as well, keyed like the PDF cache. The
+# frontend keeps only the key in its saved session and pulls the body back on
+# load, so a review with a few hundred acquired papers does not rewrite tens of
+# megabytes of article text into IndexedDB and SQLite on every autosave.
+_TEXT_CACHE_DIR = _Path(os.path.expanduser("~")) / ".evidence-engine" / "textcache"
+
+
+def _cache_text(paper_id: Optional[str], url: Optional[str], text: str) -> Optional[str]:
+    if not text:
+        return None
+    try:
+        _TEXT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        key = _pdf_cache_key(paper_id, url)
+        (_TEXT_CACHE_DIR / f"{key}.txt").write_text(text, encoding="utf-8")
+        return key
+    except Exception as e:
+        print(f"[cache_text] {e}")
+        return None
+
+
+def _read_cached_text(key: str) -> Optional[str]:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", key or "")[:80].strip("_.")
+    if not safe:
+        return None
+    path = _TEXT_CACHE_DIR / f"{safe}.txt"
+    try:
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+    except Exception as e:
+        print(f"[read_cached_text] {e}")
+        return None
+
+
+@app.get("/api/fulltext/text/{key}")
+def fulltext_text(key: str):
+    """Return a cached full-text body by its key (from /api/fulltext/fetch or a PUT here)."""
+    text = _read_cached_text(key)
+    if text is None:
+        raise HTTPException(status_code=404, detail="No cached text for that key")
+    return {"key": key, "text": text}
+
+
+class FullTextPutRequest(BaseModel):
+    text: str
+
+
+@app.put("/api/fulltext/text/{key}")
+def fulltext_text_put(key: str, req: FullTextPutRequest):
+    """Store a body the client extracted itself (an uploaded PDF, say) so the saved
+    session can carry the key instead of the text. Returns the key actually used."""
+    stored = _cache_text(key, None, req.text)
+    if not stored:
+        raise HTTPException(status_code=400, detail="Empty text or cache unavailable")
+    return {"key": stored}
+
+
+@app.post("/api/fulltext/fetch")
+def fulltext_fetch(req: FullTextRequest):
+    """Run the retrieval ladder, then cache any body found and hand back its key."""
+    resp = _fulltext_fetch_impl(req)
+    if isinstance(resp, dict) and resp.get("status") == "found" and resp.get("text"):
+        key = _cache_text(req.paper_id, req.URL, resp["text"])
+        if key:
+            resp["text_key"] = key
+    return resp
+
+
 @app.get("/api/fulltext/pdf/{key}")
 def fulltext_pdf(key: str):
     """Serve a cached acquired PDF for inline display in the UI."""
@@ -4147,8 +4213,7 @@ def fulltext_pdf(key: str):
     )
 
 
-@app.post("/api/fulltext/fetch")
-def fulltext_fetch(req: FullTextRequest):
+def _fulltext_fetch_impl(req: FullTextRequest) -> dict:
     """Strategy ladder, in order of decreasing reliability:
       1. Europe PMC JATS fullTextXML   (best — structured text)
       2. NCBI E-utilities PMC full text (structured, and not rate-blocked)

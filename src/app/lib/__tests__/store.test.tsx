@@ -166,6 +166,53 @@ describe("snapshot and hydrate", () => {
     expect(fresh.result.current.exclusion).toEqual(["Animal studies"]);
   });
 
+  it("saves only a cache key for a full text the backend already holds, and the body otherwise", () => {
+    const { result } = mount();
+    act(() => result.current.setFullTexts({
+      keyed:  { paper_id: "keyed",  title: "T", url: "", source: "PubMed", status: "found", text: "body", text_key: "keyed" },
+      legacy: { paper_id: "legacy", title: "T", url: "", source: "PubMed", status: "found", text: "body" },
+    } as any));
+    const snap = result.current.snapshot();
+    expect(snap.fullTexts.keyed.text).toBeUndefined();
+    expect(snap.fullTexts.keyed.text_key).toBe("keyed");
+    expect(snap.fullTexts.legacy.text).toBe("body");
+    // In memory the body is still there for every synchronous reader.
+    expect(result.current.fullTexts.keyed.text).toBe("body");
+  });
+
+  it("stores the newest screening pass as a marker and restores it as the live results array", () => {
+    const { result } = mount();
+    const results = [screenResult("a"), screenResult("b", "EXCLUDE")];
+    act(() => {
+      result.current.setResults(results);
+      result.current.setScreeningArchive([{
+        id: "r1", ranAt: "t", mode: "full", model: "m", screenedNow: 2, totalAfter: 2,
+        included: 1, excluded: 1, durationSec: 3, results,
+      }]);
+    });
+    const snap = JSON.parse(JSON.stringify(result.current.snapshot()));
+    expect(snap.screeningArchive[0].results).toEqual([]);
+    expect(snap.screeningArchive[0].resultsRef).toBe("current");
+
+    const fresh = mount();
+    act(() => fresh.result.current.hydrate(snap));
+    expect(fresh.result.current.screeningArchive[0].results).toBe(fresh.result.current.results);
+    expect(fresh.result.current.screeningArchive[0].results).toHaveLength(2);
+  });
+
+  it("stores shared raw-paper abstracts once and restores them", () => {
+    const { result } = mount();
+    const unique = [paper("1"), paper("2")];
+    const raw = [paper("1"), paper("1"), paper("2")];
+    act(() => { result.current.setUniquePapers(unique as any); result.current.setRawPapers(raw as any); });
+    const snap = JSON.parse(JSON.stringify(result.current.snapshot()));
+    expect(snap.rawPapers[0].abstract).toBeUndefined();
+
+    const fresh = mount();
+    act(() => fresh.result.current.hydrate(snap));
+    expect(fresh.result.current.rawPapers).toEqual(raw);
+  });
+
   it("round-trips acquired full texts", () => {
     const { result } = mount();
     act(() => result.current.setFullTexts({
