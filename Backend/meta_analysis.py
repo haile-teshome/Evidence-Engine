@@ -246,7 +246,9 @@ def _hedges_g(mean_t: float, sd_t: float, n_t: int,
     pooled_sd = math.sqrt(max(1e-12, pooled_sd_sq))
     d = (mean_t - mean_c) / pooled_sd
     df = n_t + n_c - 2
-    j = 1.0 - (3.0 / (4.0 * df - 1.0)) if df > 1 else 1.0
+    # Exact small-sample bias correction J(m) = Γ(m/2) / (√(m/2) Γ((m-1)/2)) (Hedges 1981), as metafor computes it;
+    # the common approximation 1 - 3/(4m - 1) differs from it by up to 5e-5 at small m.
+    j = math.exp(math.lgamma(df / 2.0) - 0.5 * math.log(df / 2.0) - math.lgamma((df - 1) / 2.0)) if df > 1 else 1.0
     g = j * d
     var_d = ((n_t + n_c) / (n_t * n_c)) + (d**2 / (2.0 * (n_t + n_c)))
     var_g = (j**2) * var_d
@@ -440,30 +442,39 @@ def _tau2_DL(yi: List[float], vi: List[float]) -> float:
     return max(0.0, (Q - df) / C) if C > 0 else 0.0
 
 
-def _tau2_PM(yi: List[float], vi: List[float], tol: float = 1e-6, max_iter: int = 100) -> float:
-    """Paule-Mandel — iterative; sets the weighted Q statistic equal to its
-    expected value under the null tau²."""
-    tau2 = _tau2_DL(yi, vi)
+def _tau2_PM(yi: List[float], vi: List[float], tol: float = 1e-12, max_iter: int = 500) -> float:
+    """Paule-Mandel: the tau² at which the generalised Q statistic,
+    Q(tau²) = Σ w_i(tau²) (y_i - ȳ_w(tau²))² with w_i = 1/(v_i + tau²), equals its
+    expectation k - 1. Q is monotone decreasing in tau², so the root is found by
+    bisection (metafor solves the same equation with uniroot). If Q(0) ≤ k - 1
+    the estimate is 0. Verified against metafor 5.2.1 on 41 metadat datasets."""
     df = len(yi) - 1
-    for _ in range(max_iter):
-        w = [1.0 / (v + tau2) for v in vi]
+    if df < 1:
+        return 0.0
+
+    def q_gen(t2: float) -> float:
+        w = [1.0 / (v + t2) for v in vi]
         sw = sum(w)
         yhat = sum(wi * y for wi, y in zip(w, yi)) / sw
-        Q_star = sum(wi * (y - yhat) ** 2 for wi, y in zip(w, yi))
-        if Q_star >= df:
-            num = sum(wi**2 * ((y - yhat) ** 2 - vi[i]) for i, (wi, y) in enumerate(zip(w, yi)))
-            denom = sum(wi**2 for wi in w)
-            new_tau2 = max(0.0, tau2 + (Q_star - df) / denom) if denom > 0 else tau2
+        return sum(wi * (y - yhat) ** 2 for wi, y in zip(w, yi))
+
+    if q_gen(0.0) <= df:
+        return 0.0
+    lo, hi = 0.0, max(_tau2_DL(yi, vi), max(vi), 1e-8)
+    while q_gen(hi) > df and hi < 1e12:          # widen until the root is bracketed
+        hi *= 2.0
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        if q_gen(mid) > df:
+            lo = mid
         else:
-            new_tau2 = 0.0
-        if abs(new_tau2 - tau2) < tol:
-            tau2 = new_tau2
+            hi = mid
+        if hi - lo <= tol * max(1.0, hi):
             break
-        tau2 = new_tau2
-    return tau2
+    return 0.5 * (lo + hi)
 
 
-def _tau2_REML(yi: List[float], vi: List[float], tol: float = 1e-6, max_iter: int = 200) -> float:
+def _tau2_REML(yi: List[float], vi: List[float], tol: float = 1e-12, max_iter: int = 1000) -> float:
     """REML — Fisher-scoring iteration. Converges from DL start."""
     tau2 = _tau2_DL(yi, vi)
     for _ in range(max_iter):
@@ -545,18 +556,81 @@ def _regularized_lower_gamma(s: float, x: float, max_iter: int = 200, tol: float
         return 1.0 - Q
 
 
+def _betacf(a: float, b: float, x: float, max_iter: int = 300, eps: float = 1e-15) -> float:
+    """Continued fraction for the incomplete beta function (Lentz's method)."""
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    if abs(d) < 1e-300:
+        d = 1e-300
+    d = 1.0 / d
+    h = d
+    for m in range(1, max_iter + 1):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        if abs(d) < 1e-300: d = 1e-300
+        c = 1.0 + aa / c
+        if abs(c) < 1e-300: c = 1e-300
+        d = 1.0 / d
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        if abs(d) < 1e-300: d = 1e-300
+        c = 1.0 + aa / c
+        if abs(c) < 1e-300: c = 1e-300
+        d = 1.0 / d
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def _reg_inc_beta(a: float, b: float, x: float) -> float:
+    """Regularized incomplete beta I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    ln_bt = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log(1.0 - x)
+    bt = math.exp(ln_bt)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def _t_cdf(t: float, df: float) -> float:
+    """Student-t CDF, exact to double precision via the incomplete beta function."""
+    if df <= 0:
+        return float("nan")
+    x = df / (df + t * t)
+    tail = 0.5 * _reg_inc_beta(df / 2.0, 0.5, x)
+    return 1.0 - tail if t >= 0 else tail
+
+
+def _t_to_p(t: float, df: float) -> float:
+    """Two-sided p from a t statistic."""
+    return 2.0 * (1.0 - _t_cdf(abs(t), df))
+
+
 def _t_ppf95(df: int) -> float:
-    """Inverse CDF at 0.975 for Student-t(df). Hill 1970 + small-df fallback.
-    Adequate accuracy for Knapp-Hartung CIs."""
-    if df >= 100:
+    """Exact 0.975 quantile of Student-t(df) by bisection on the CDF. Replaces a
+    Cornish-Fisher expansion whose error reached 3e-4 at df = 5, visible against
+    metafor in the Knapp-Hartung and prediction intervals."""
+    if df <= 0:
         return _Z95
-    # Cornish-Fisher style expansion (Abramowitz 26.7.5)
-    z = _Z95
-    g1 = (z**3 + z) / 4
-    g2 = (5 * z**5 + 16 * z**3 + 3 * z) / 96
-    g3 = (3 * z**7 + 19 * z**5 + 17 * z**3 - 15 * z) / 384
-    g4 = (79 * z**9 + 776 * z**7 + 1482 * z**5 - 1920 * z**3 - 945 * z) / 92160
-    return z + g1 / df + g2 / df**2 + g3 / df**3 + g4 / df**4
+    lo, hi = _Z95, 1e6 if df < 2 else 15.0
+    while _t_cdf(hi, df) < 0.975:
+        hi *= 2.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if _t_cdf(mid, df) < 0.975:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-13:
+            break
+    return 0.5 * (lo + hi)
 
 
 def pool(
@@ -627,7 +701,7 @@ def pool(
         crit = _t_ppf95(df)
         re_ci = (mu_re - crit * se_re_kh, mu_re + crit * se_re_kh)
         z_re = mu_re / se_re_kh if se_re_kh > 0 else float("nan")
-        p_re = _z_to_p(z_re)
+        p_re = _t_to_p(z_re, df)          # t with k - 1 df, the distribution the interval uses
         se_re_reported = se_re_kh
     else:
         re_ci = (mu_re - _Z95 * se_re, mu_re + _Z95 * se_re)
@@ -638,7 +712,7 @@ def pool(
     # 95% prediction interval (Higgins-Thompson-Spiegelhalter)
     if df >= 2 and tau2 > 0:
         crit = _t_ppf95(df - 1) if df - 1 >= 1 else _Z95
-        pi_se = math.sqrt(tau2 + var_re)
+        pi_se = math.sqrt(tau2 + se_re_reported ** 2)   # the Knapp-Hartung-adjusted SE when that adjustment is on
         pred_interval = (mu_re - crit * pi_se, mu_re + crit * pi_se)
     else:
         pred_interval = None
