@@ -56,7 +56,77 @@ export type Invite = {
   expires_at: string | null;
   used_at: string | null;
   used_by: string | null;
+  email?: string | null;        // set when the invite was addressed to someone
+  emailed_at?: string | null;   // set when the mail actually went out
 };
+
+/** Outcome of trying to email an invite. `sent: false` is not a failure of the invite
+ *  itself: the link in `url` always works, so the lead can fall back to sharing it. */
+export type InviteDelivery = {
+  sent: boolean;
+  transport: string;
+  error: string | null;
+  message_id?: string | null;
+};
+
+export type CreatedInvite = { invite: Invite; url: string; email: InviteDelivery };
+
+/** Whether the backend can send mail at all, so the UI can offer an address field
+ *  and explain itself when it cannot. */
+export type MailStatus = { configured: boolean; transport: string; from: string | null; missing: string[] };
+
+/** The address invitations are sent from. `effective_from` is what will actually appear:
+ *  the saved identity when there is one, otherwise the backend's configured default. */
+/** Where invite links point and how far they travel. `shareable` false means a reviewer on
+ *  another computer cannot open them, so sending the invitation is pointless until fixed. */
+export type LinkBase = {
+  url: string;
+  configured: string | null;
+  env_default: string | null;
+  browser_origin: string | null;
+  reach: "loopback" | "lan" | "public";
+  shareable: boolean;
+  lan_candidate: string | null;
+};
+
+export async function getLinkBase(): Promise<LinkBase> {
+  return apiFetch("/app/link-base");
+}
+
+export async function setLinkBase(url: string): Promise<LinkBase> {
+  return apiFetch("/app/link-base", { method: "PUT", body: JSON.stringify({ url: url.trim() || null }) });
+}
+
+export type MailIdentity = {
+  name: string | null;
+  email: string | null;             // the address invitations come from
+  login_email: string | null;       // the signed-in account's address, when there is one
+  from_login: boolean;              // true when `email` is that verified login address
+  signed_in: boolean;
+  saved: boolean;
+  env_default: string | null;
+  effective_from: string | null;
+};
+
+export async function getMailIdentity(): Promise<MailIdentity> {
+  return apiFetch("/mail/identity");
+}
+
+/** Save the sender. Clearing both fields restores the backend default. */
+export async function setMailIdentity(name: string, email: string): Promise<MailIdentity> {
+  return apiFetch("/mail/identity", {
+    method: "PUT",
+    body: JSON.stringify({ name: name.trim() || null, email: email.trim() || null }),
+  });
+}
+
+export async function getMailStatus(): Promise<MailStatus> {
+  try {
+    return await apiFetch("/mail/status");
+  } catch {
+    return { configured: false, transport: "unavailable", from: null, missing: [] };
+  }
+}
 
 export type ProjectPaper = {
   paper_id: string;
@@ -155,12 +225,58 @@ export async function setMemberRole(pid: string, userId: string, role: ProjectRo
   return r.member;
 }
 
-export async function createInvite(pid: string, role: ProjectRole, expiresAt?: string): Promise<Invite> {
+/** Create an invite. With `email`, the backend sends the link to that address and binds
+ *  the invite to it; without, the behaviour is the previous copy-a-link flow. `base_url`
+ *  is passed so the emailed link points at the origin the lead is actually using. */
+export async function createInvite(pid: string, role: ProjectRole, expiresAt?: string,
+                                   email?: string, note?: string): Promise<CreatedInvite> {
   const r = await apiFetch(`/projects/${pid}/invites`, {
     method: "POST",
-    body: JSON.stringify({ role, expires_at: expiresAt ?? null }),
+    body: JSON.stringify({
+      role,
+      expires_at: expiresAt ?? null,
+      email: email?.trim() || null,
+      note: note?.trim() || null,
+      base_url: typeof window !== "undefined" ? window.location.origin : null,
+    }),
   });
-  return r.invite;
+  return { invite: r.invite, url: r.url, email: r.email };
+}
+
+export type InviteRow = Invite & { state: "pending" | "accepted" | "expired"; resend_count?: number };
+
+/** The project's invitations with delivery state, so a lead can resend one after a
+ *  reload or a bounced address. Lead only. */
+export async function listInvites(pid: string): Promise<InviteRow[]> {
+  const r = await apiFetch(`/projects/${pid}/invites`);
+  return r.invites || [];
+}
+
+/** Send an existing invitation again. The token does not change, so links already
+ *  shared keep working; `email` corrects a wrong address. */
+export async function resendInvite(pid: string, token: string, email?: string,
+                                   note?: string): Promise<CreatedInvite> {
+  const r = await apiFetch(`/projects/${pid}/invites/${token}/resend`, {
+    method: "POST",
+    body: JSON.stringify({
+      email: email?.trim() || null,
+      note: note?.trim() || null,
+      base_url: typeof window !== "undefined" ? window.location.origin : null,
+    }),
+  });
+  return { invite: r.invite, url: r.url, email: r.email };
+}
+
+export type InviteMessage = {
+  to: string | null; subject: string; body: string; url: string; mailto: string;
+  sender?: string | null; reach?: "loopback" | "lan" | "public"; shareable?: boolean;
+};
+
+/** The composed invitation for sending from the lead's own mail client. Needs no mail
+ *  configuration, and the message then comes from their real address. */
+export async function getInviteMessage(pid: string, token: string, email?: string): Promise<InviteMessage> {
+  const q = email ? `?email=${encodeURIComponent(email)}` : "";
+  return apiFetch(`/projects/${pid}/invites/${token}/message${q}`);
 }
 
 export async function previewInvite(token: string): Promise<{ invite: Invite; project: { id: string; name: string } | null }> {

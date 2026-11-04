@@ -5,7 +5,9 @@ import {
   Project, ProjectMember, ScreeningMode, ProjectRole, Invite, AssignmentStrategy,
   listProjects, createProject, getProject, createInvite, setMemberRole,
   lockProject, acceptInvite, previewInvite, setProjectPapers, assignPapers, listProjectPapers,
-  importNewProject,
+  importNewProject, getMailStatus, MailStatus, listInvites, resendInvite, InviteRow,
+  getInviteMessage, getMailIdentity, setMailIdentity, MailIdentity,
+  getLinkBase, setLinkBase, LinkBase,
 } from "../lib/projects";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { ConflictsSection } from "../components/ConflictsSection";
@@ -20,12 +22,14 @@ import { Skeleton } from "../components/ui/skeleton";
 import { timeAgo } from "../lib/format";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Textarea } from "../components/ui/textarea";
-import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy, Upload } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../components/ui/dialog";
+import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy, Upload, Mail, Send, RefreshCw, Pencil, ExternalLink, Globe } from "lucide-react";
 import { toast } from "sonner";
 
 export function ProjectsPage() {
   const s = useStore();
   const { user } = useAuth();
+  const [pageCompose, setPageCompose] = useState<{ projectId: string; token: string; email: string } | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -163,7 +167,13 @@ export function ProjectsPage() {
         </div>
       </div>
 
-      {showCreate && <CreateProjectCard onCreated={(p) => { setShowCreate(false); refresh(); openProject(p); }} onCancel={() => setShowCreate(false)} />}
+      {showCreate && <CreateProjectCard
+        onCreated={(p) => { setShowCreate(false); refresh(); openProject(p); }}
+        onCancel={() => setShowCreate(false)}
+        onComposeNeeded={(x) => setPageCompose(x)} />}
+      <ComposeInviteDialog
+        request={pageCompose}
+        onClose={() => setPageCompose(null)} />
 
       {s.currentProjectId && (
         <>
@@ -278,9 +288,12 @@ export function ProjectsPage() {
 type SourceKind = "quality" | "unique" | "raw" | "screened" | "included" | "custom";
 
 function CreateProjectCard({
-  onCreated, onCancel,
+  onCreated, onCancel, onComposeNeeded,
 }: {
   onCreated: (p: Project) => void;
+  /** Called when invitations were addressed but nothing could send them, so the author is
+   *  handed the ready-made message instead of being left to find it. */
+  onComposeNeeded?: (x: { projectId: string; token: string; email: string }) => void;
   onCancel: () => void;
 }) {
   const s = useStore();
@@ -296,7 +309,7 @@ function CreateProjectCard({
   const [customCsv, setCustomCsv] = useState("");
 
   // Step 3
-  const [pendingInvites, setPendingInvites] = useState<{ role: ProjectRole; label: string }[]>([
+  const [pendingInvites, setPendingInvites] = useState<{ role: ProjectRole; label: string; email?: string }[]>([
     { role: "reviewer", label: "Reviewer #1" },
     { role: "reviewer", label: "Reviewer #2" },
     { role: "adjudicator", label: "Adjudicator" },
@@ -335,13 +348,29 @@ function CreateProjectCard({
       }
 
       // 3. Generate invite links
-      const links: { role: ProjectRole; url: string }[] = [];
+      const links: { role: ProjectRole; url: string; email?: string; sent?: boolean; error?: string | null }[] = [];
       for (const inv of pendingInvites) {
-        const created = await createInvite(project.id, inv.role);
+        const created = await createInvite(project.id, inv.role, undefined, inv.email);
         links.push({
           role: inv.role,
-          url: `${window.location.origin}/?invite=${created.token}`,
+          url: created.url,
+          email: created.invite.email || undefined,
+          sent: created.email.sent,
+          error: created.email.error,
         });
+      }
+      const mailed = links.filter(l => l.sent).length;
+      if (mailed) toast.success(`Invitation${mailed > 1 ? "s" : ""} emailed to ${mailed} reviewer${mailed > 1 ? "s" : ""}`);
+      const unsent = links.filter(l => l.email && !l.sent);
+      if (unsent.length) {
+        // Nothing sent automatically: hand the author the first invitation immediately rather
+        // than pointing them at a screen they have not seen yet. The rest wait in the pending
+        // list on the project, each with its own Email and Copy buttons.
+        onComposeNeeded?.({ projectId: project.id, token: unsent[0].url.split("invite=")[1], email: unsent[0].email! });
+        if (unsent.length > 1) {
+          toast.info(`${unsent.length - 1} further invitation${unsent.length > 2 ? "s are" : " is"} waiting in the project, `
+                     + `each with its own Email button.`, { duration: 9000 });
+        }
       }
 
       // 4. (Optional) materialise assignments. Note: only the *lead* exists
@@ -445,7 +474,7 @@ function CreateProjectCard({
 
       {step === 3 && (
         <div className="space-y-3">
-          <div className="text-sm">Invite reviewers. We generate one-time links you can share by email or Slack.</div>
+          <div className="text-sm">Invite reviewers. Give an address and the invitation opens in your mail app ready to send; leave it blank for a link you share yourself.</div>
           <div className="space-y-2">
             {pendingInvites.map((inv, i) => (
               <div key={i} className="flex items-center gap-2">
@@ -457,6 +486,17 @@ function CreateProjectCard({
                     setPendingInvites(next);
                   }}
                   placeholder="Reviewer label (e.g. 'Jane', for your tracking only)"
+                  className="flex-1"
+                />
+                <Input
+                  type="email"
+                  value={inv.email || ""}
+                  onChange={(e) => {
+                    const next = [...pendingInvites];
+                    next[i] = { ...next[i], email: e.target.value };
+                    setPendingInvites(next);
+                  }}
+                  placeholder="Email (optional: sends the invite)"
                   className="flex-1"
                 />
                 <Select
@@ -760,7 +800,20 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
   const [project, setProject] = useState<Project | null>(null);
   const [members, setMembers] = useState<ProjectMember[]>([]);
   const [inviteRole, setInviteRole] = useState<ProjectRole>("reviewer");
+  const [inviteEmail, setInviteEmail] = useState("");
   const [lastInvite, setLastInvite] = useState<Invite | null>(null);
+  const [lastInviteUrl, setLastInviteUrl] = useState("");
+  const [mail, setMail] = useState<MailStatus | null>(null);
+  const [identity, setIdentity] = useState<MailIdentity | null>(null);
+  const [editSender, setEditSender] = useState(false);
+  const [senderName, setSenderName] = useState("");
+  const [senderEmail, setSenderEmail] = useState("");
+  // The invitation, ready to send, shown when nothing can send it automatically. Copying it is
+  // the only route that always works: this machine may have no configured mail client at all.
+  const [compose, setCompose] = useState<{ to: string; subject: string; body: string; mailto: string; url: string } | null>(null);
+  const [invites, setInvites] = useState<InviteRow[]>([]);
+  const [resending, setResending] = useState<string | null>(null);
+  const [fixEmail, setFixEmail] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [distributeStrategy, setDistributeStrategy] = useState<AssignmentStrategy>("full_overlap");
   const [reviewersPerPaper, setReviewersPerPaper] = useState(2);
@@ -776,13 +829,112 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
   }
 
   useEffect(() => { load(); }, [projectId]);
+  useEffect(() => { getMailStatus().then(setMail).catch(() => {}); }, []);
+  useEffect(() => {
+    getMailIdentity().then(id => {
+      setIdentity(id); setSenderName(id.name || ""); setSenderEmail(id.email || "");
+    }).catch(() => {});
+  }, []);
+
+  async function saveSender() {
+    if (senderEmail.trim() && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(senderEmail.trim())) {
+      toast.error("Enter a valid email address"); return;
+    }
+    try {
+      const next = await setMailIdentity(senderName, senderEmail);
+      setIdentity(next); setEditSender(false);
+      toast.success(next.email ? `Invitations will come from ${next.effective_from}`
+                              : "Sender cleared; the default applies again");
+    } catch (e: any) {
+      toast.error(e?.message || "Could not save the sender");
+    }
+  }
+
+  // Invitations are listed so a lead can resend one later: after a reload, or when an
+  // address bounced. Lead-only endpoint, so failures are ignored for other roles.
+  async function loadInvites() {
+    try { setInvites(await listInvites(projectId)); } catch { setInvites([]); }
+  }
+  useEffect(() => { loadInvites(); }, [projectId]);
+
+  async function handleResend(row: InviteRow) {
+    const override = (fixEmail[row.token] || "").trim();
+    if (override && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(override)) {
+      toast.error("Enter a valid email address"); return;
+    }
+    const target = override || row.email || "";
+    setResending(row.token);
+    try {
+      if (mail?.configured) {
+        const sent = await resendInvite(projectId, row.token, override || undefined);
+        if (sent.email.sent) {
+          toast.success(`Invitation resent to ${sent.invite.email}`);
+          setFixEmail(prev => ({ ...prev, [row.token]: "" }));
+        } else {
+          toast.warning(sent.email.error || "Could not send. Copy the link instead.", { duration: 8000 });
+        }
+      } else if (target) {
+        // No configuration: reopen the mail app with the same invitation.
+        if (override) await resendInvite(projectId, row.token, override).catch(() => {});  // record the corrected address
+        if (await openInMailApp(row.token, target, "reminder")) setFixEmail(prev => ({ ...prev, [row.token]: "" }));
+      } else {
+        toast.error("Add an address to send this invitation to");
+      }
+      loadInvites();
+    } catch (e: any) {
+      toast.error(e?.message || "Failed to resend");
+      loadInvites();
+    } finally {
+      setResending(null);
+    }
+  }
+
+  // No mail configuration needed: the invitation is composed server-side and handed to
+  // whatever mail app the author already uses, so it goes from their real address. A
+  // configured SMTP server (optional) sends silently instead; this is the fallback and
+  // the default.
+  async function openInMailApp(token: string, email: string, _label = "invitation") {
+    try {
+      const m = await getInviteMessage(projectId, token, email);
+      setCompose({ to: email, subject: m.subject, body: m.body, mailto: m.mailto, url: m.url });
+      return true;
+    } catch (e: any) {
+      toast.error(e?.message || "Could not compose the invitation");
+      return false;
+    }
+  }
+
+  async function copyInviteMessage(token: string, email: string) {
+    try {
+      const m = await getInviteMessage(projectId, token, email);
+      await navigator.clipboard.writeText(`${m.subject}\n\n${m.body}`);
+      toast.success("Invitation copied. Paste it into Outlook, Gmail or Teams.");
+    } catch (e: any) {
+      toast.error(e?.message || "Could not copy the invitation");
+    }
+  }
 
   async function handleInvite() {
+    const email = inviteEmail.trim();
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      toast.error("Enter a valid email address, or leave the field blank for a link");
+      return;
+    }
     setBusy(true);
     try {
-      const inv = await createInvite(projectId, inviteRole);
-      setLastInvite(inv);
-      toast.success(`Invite link created (${inviteRole})`);
+      const created = await createInvite(projectId, inviteRole, undefined, email);
+      setLastInvite(created.invite);
+      setLastInviteUrl(created.url);
+      loadInvites();
+      if (!email) {
+        toast.success(`Invite link created (${inviteRole})`);
+      } else if (created.email.sent) {
+        toast.success(`Invitation emailed to ${email} (${inviteRole})`);
+        setInviteEmail("");
+      } else {
+        // Nothing to configure: compose it and let the author's own mail app send it.
+        if (await openInMailApp(created.invite.token, email)) setInviteEmail("");
+      }
     } catch (e: any) {
       toast.error(e?.message || "Failed to create invite");
     } finally {
@@ -833,10 +985,16 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
   if (!project) return null;
 
   const isLead = project.my_role === "lead";
-  const inviteUrl = lastInvite ? `${window.location.origin}/?invite=${lastInvite.token}` : "";
+  const composeDialog = (
+    <ComposeInviteDialog
+      request={compose ? { projectId, token: compose.url.split("invite=")[1], email: compose.to } : null}
+      onClose={() => setCompose(null)} />
+  );
+  const inviteUrl = lastInviteUrl || (lastInvite ? `${window.location.origin}/?invite=${lastInvite.token}` : "");
 
   return (
     <Card className="p-4 space-y-3 border-primary/40">
+      {composeDialog}
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="font-medium">{project.name}</div>
@@ -904,13 +1062,132 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
                 <SelectItem value="viewer">Viewer</SelectItem>
               </SelectContent>
             </Select>
-            <Button onClick={handleInvite} disabled={busy}><LinkIcon className="size-4 mr-1" />Create invite link</Button>
+            <Input
+              type="email"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !busy) handleInvite(); }}
+              placeholder="reviewer@ucsf.edu (optional)"
+              className="flex-1"
+            />
+            <Button onClick={handleInvite} disabled={busy}>
+              {inviteEmail.trim()
+                ? <><Mail className="size-4 mr-1" />Email invitation</>
+                : <><LinkIcon className="size-4 mr-1" />Create invite link</>}
+            </Button>
           </div>
+          {!editSender ? (
+            <div className="text-[11px] text-muted-foreground flex items-center gap-1.5 flex-wrap">
+              {mail?.configured
+                ? <>Sent automatically from <strong>{identity?.effective_from || mail.from}</strong>.</>
+                : <>Opens your own mail app with the invitation ready to send. Nothing to set up.</>}
+              <span>
+                From <strong>{identity?.email || "no address yet"}</strong>
+                {identity?.from_login
+                  ? <> (the account you signed in with)</>
+                  : <> &mdash; sign in and invitations come from that account instead</>}
+                , signed <strong>{identity?.name || "no name set"}</strong>.
+              </span>
+              <Button variant="link" size="sm" className="h-auto p-0 text-[11px]"
+                      onClick={() => setEditSender(true)}>
+                <Pencil className="size-3 mr-1" />{identity?.from_login ? "Change name" : "Change sender"}
+              </Button>
+            </div>
+          ) : (
+            <div className="p-2 border rounded bg-muted/20 space-y-2">
+              <div className="text-[11px] font-medium">Sender</div>
+              <div className="flex gap-2">
+                <Input value={senderName} onChange={e => setSenderName(e.target.value)}
+                       placeholder="Your name (appears in the invitation)" className="flex-1 h-8 text-[11px]" />
+                <Input type="email" value={senderEmail} onChange={e => setSenderEmail(e.target.value)}
+                       placeholder="you@ucsf.edu" className="flex-1 h-8 text-[11px]"
+                       readOnly={!!identity?.from_login}
+                       title={identity?.from_login
+                         ? "This is the address you signed in with. Sign in with another account to change it."
+                         : undefined} />
+                <Button size="sm" onClick={saveSender}>Save</Button>
+                <Button size="sm" variant="ghost" onClick={() => {
+                  setSenderName(identity?.name || ""); setSenderEmail(identity?.email || ""); setEditSender(false);
+                }}>Cancel</Button>
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                {identity?.from_login
+                  ? <>The address is the one you signed in with and cannot be edited here, so nobody
+                      can send as somebody else. </>
+                  : <>You are not signed in, so there is no account address to use. Sign in and
+                      invitations will come from that account automatically. </>}
+                This name signs every invitation, and replies come back to this address.
+                {mail?.configured
+                  ? <> It is also the From address on automatic sends. Some providers refuse to send
+                      as an address they do not own; if that happens the error says so and the
+                      invitation is still available as a link.</>
+                  : <> When the invitation opens in your mail app, that app chooses which account
+                      actually sends it, so pick the right one there.</>}
+                {identity?.env_default && !identity?.email
+                  ? <> Currently defaulting to {identity.env_default}.</> : null}
+              </div>
+            </div>
+          )}
+          {invites.filter(i => i.state === "pending").length > 0 && (
+            <div className="space-y-1 pt-1">
+              <div className="text-[11px] text-muted-foreground">
+                Sent invitations (not yet accepted). Resend if one did not arrive, or correct the address first.
+              </div>
+              {invites.filter(i => i.state === "pending").map(row => (
+                <div key={row.token} className="flex items-center gap-2 text-xs border rounded p-2 bg-muted/20">
+                  <Badge variant="outline" className="text-[10px] shrink-0">{row.role}</Badge>
+                  <div className="flex-1 min-w-0">
+                    <div className="truncate">
+                      {row.email || <span className="text-muted-foreground">link only, no address</span>}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground">
+                      {row.emailed_at ? `emailed ${timeAgo(row.emailed_at)}` : "not emailed"}
+                      {row.resend_count ? ` · resent ${row.resend_count}x` : ""}
+                    </div>
+                  </div>
+                  <Input
+                    type="email"
+                    value={fixEmail[row.token] ?? ""}
+                    onChange={(e) => setFixEmail(prev => ({ ...prev, [row.token]: e.target.value }))}
+                    placeholder={row.email ? "Change address (optional)" : "Address to send to"}
+                    className="w-56 h-8 text-[11px]"
+                  />
+                  <Button
+                    size="sm" variant="outline"
+                    disabled={resending === row.token}
+                    onClick={() => handleResend(row)}
+                    title={mail?.configured ? "Send this invitation again" : "Open your mail app with this invitation"}
+                  >
+                    {resending === row.token
+                      ? <RefreshCw className="size-3 animate-spin" />
+                      : <><Send className="size-3 mr-1" />{mail?.configured ? "Resend" : "Email again"}</>}
+                  </Button>
+                  <Button
+                    size="sm" variant="ghost"
+                    onClick={() => copyInviteMessage(row.token, (fixEmail[row.token] || row.email || "").trim())}
+                    title="Copy the whole invitation to paste into Outlook, Gmail or Teams"
+                  ><Copy className="size-3" /></Button>
+                  <Button
+                    size="sm" variant="ghost"
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${window.location.origin}/?invite=${row.token}`);
+                      toast.success("Invite link copied");
+                    }}
+                    title="Copy just the link"
+                  ><LinkIcon className="size-3" /></Button>
+                </div>
+              ))}
+            </div>
+          )}
           {lastInvite && (
             <div className="p-2 border rounded bg-muted/30 text-xs space-y-1">
               <div className="flex items-center gap-2">
                 <ShieldCheck className="size-3" />
-                <span>One-time invite link ({lastInvite.role}):</span>
+                <span>
+                  {lastInvite.emailed_at
+                    ? `Emailed to ${lastInvite.email} (${lastInvite.role}). The same link, if you need it:`
+                    : `One-time invite link (${lastInvite.role}):`}
+                </span>
               </div>
               <div className="flex gap-2">
                 <Input value={inviteUrl} readOnly className="font-mono text-[11px]" />
@@ -976,4 +1253,146 @@ function ModeBadge({ mode }: { mode: ScreeningMode }) {
             : mode === "dual" ? "bg-blue-50 text-blue-700 border-blue-200"
             : "bg-slate-50 text-slate-700 border-slate-200";
   return <Badge variant="outline" className={`text-[10px] ${cls}`}>{label}</Badge>;
+}
+
+
+/** The finished invitation, with the copy buttons that work regardless of what mail software
+ *  exists on the machine. "Open in mail app" is offered too, but it depends on a configured
+ *  mail client and silently does nothing when there is none, so it is not the primary action. */
+function ComposeInviteDialog({
+  request, onClose,
+}: {
+  request: { projectId: string; token: string; email: string } | null;
+  onClose: () => void;
+}) {
+  const [msg, setMsg] = useState<{ subject: string; body: string; mailto: string; url: string;
+                                   reach?: string; shareable?: boolean } | null>(null);
+  const [base, setBase] = useState<LinkBase | null>(null);
+  const [baseDraft, setBaseDraft] = useState("");
+  const [editBase, setEditBase] = useState(false);
+
+  async function reload() {
+    if (!request) return;
+    const [m, b] = await Promise.all([
+      getInviteMessage(request.projectId, request.token, request.email),
+      getLinkBase().catch(() => null),
+    ]);
+    setMsg({ subject: m.subject, body: m.body, mailto: m.mailto, url: m.url, reach: m.reach, shareable: m.shareable });
+    if (b) { setBase(b); setBaseDraft(b.configured || ""); }
+  }
+  useEffect(() => {
+    if (!request) { setMsg(null); setEditBase(false); return; }
+    reload().catch((e: any) => { toast.error(e?.message || "Could not compose the invitation"); onClose(); });
+  }, [request?.projectId, request?.token, request?.email]);
+
+  async function saveBase(url: string) {
+    try {
+      const next = await setLinkBase(url);
+      setBase(next); setBaseDraft(next.configured || ""); setEditBase(false);
+      await reload();
+      toast.success(next.shareable
+        ? `Invite links now use ${next.url}`
+        : `Saved, but ${next.url} still only works ${next.reach === "lan" ? "on your network" : "on this computer"}`);
+    } catch (e: any) {
+      toast.error(e?.message || "Could not save the address");
+    }
+  }
+
+  const open = !!request;
+  return (
+    <Dialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
+      <DialogContent className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Invitation ready to send</DialogTitle>
+          <DialogDescription>
+            Copy it into Outlook, Gmail or Teams and send it to {request?.email}. The link inside is
+            single use and tied to that address.
+          </DialogDescription>
+        </DialogHeader>
+        {msg && msg.shareable === false && (
+          <Alert variant="destructive">
+            <AlertTriangle className="size-4" />
+            <AlertDescription className="text-xs space-y-2">
+              <div>
+                <strong>This link will not work for them.</strong>{" "}
+                {msg.reach === "lan"
+                  ? <>It points at an address on your own network, so only someone on the same
+                      Wi-Fi can open it, and only while this computer is running the app.</>
+                  : <>It points at <span className="font-mono">{base?.url}</span>, which only
+                      resolves on this computer. Anyone else will see nothing.</>}
+              </div>
+              {!editBase ? (
+                <div className="flex items-center gap-2 flex-wrap">
+                  <Button size="sm" variant="outline" onClick={() => setEditBase(true)}>
+                    <Globe className="size-3 mr-1" />Set the address reviewers will use
+                  </Button>
+                  {base?.lan_candidate && (
+                    <Button size="sm" variant="ghost" onClick={() => saveBase(base.lan_candidate!)}>
+                      Use {base.lan_candidate} (same network only)
+                    </Button>
+                  )}
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <Input value={baseDraft} onChange={e => setBaseDraft(e.target.value)}
+                         placeholder="https://review.example.edu" className="h-8 text-[11px]" />
+                  <Button size="sm" onClick={() => saveBase(baseDraft)}>Save</Button>
+                  <Button size="sm" variant="ghost" onClick={() => { setEditBase(false); setBaseDraft(base?.configured || ""); }}>
+                    Cancel
+                  </Button>
+                </div>
+              )}
+              <div className="text-[11px] opacity-80">
+                Until the app is reachable at an address your reviewers can open you can still send
+                the invitation, but they will not be able to accept it.
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+        {!msg ? <Skeleton className="h-40 w-full" /> : (
+          <div className="space-y-2">
+            <div className="space-y-1">
+              <Label className="text-xs">To</Label>
+              <Input value={request?.email || ""} readOnly className="font-mono text-[11px]" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Subject</Label>
+              <Input value={msg.subject} readOnly className="text-[11px]" />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-xs">Message</Label>
+              <Textarea value={msg.body} readOnly rows={10} className="text-[11px] font-mono" />
+            </div>
+          </div>
+        )}
+        <DialogFooter className="gap-2 sm:justify-between">
+          <Button variant="ghost" size="sm" disabled={!msg}
+                  onClick={() => { navigator.clipboard.writeText(msg!.url); toast.success("Link copied"); }}>
+            <LinkIcon className="size-4 mr-1" />Copy link only
+          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" disabled={!msg}
+                    onClick={() => {
+                      // An anchor click rather than a location change: it never navigates the app
+                      // away, and if no mail client is registered nothing happens at all.
+                      const a = document.createElement("a");
+                      a.href = msg!.mailto; a.target = "_blank"; a.rel = "noopener";
+                      document.body.appendChild(a); a.click(); a.remove();
+                      toast.info("If no mail window opened, this machine has no mail app set up. Use Copy invitation.",
+                                 { duration: 8000 });
+                    }}>
+              <ExternalLink className="size-4 mr-1" />Open in mail app
+            </Button>
+            <Button size="sm" disabled={!msg}
+                    onClick={() => {
+                      navigator.clipboard.writeText(`${msg!.subject}\n\n${msg!.body}`);
+                      toast.success("Invitation copied. Paste it into your email and send.");
+                    }}>
+              <Copy className="size-4 mr-1" />Copy invitation
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }

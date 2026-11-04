@@ -86,10 +86,33 @@ describe("project CRUD", () => {
 
 describe("membership and invites", () => {
   it("creates an invite with the requested role", async () => {
-    const calls = mockApi(() => ({ invite: { token: "tok", role: "reviewer" } }));
+    const calls = mockApi(() => ({ invite: { token: "tok", role: "reviewer" },
+                                   url: "https://x/?invite=tok", email: { sent: false, transport: "unconfigured", error: null } }));
     const out = await projects.createInvite("p1", "reviewer");
     expect(JSON.stringify(calls[0].init)).toContain("reviewer");
-    expect(out.token).toBe("tok");
+    expect(out.invite.token).toBe("tok");
+    expect(out.url).toContain("tok");
+    expect(out.email.sent).toBe(false);
+  });
+
+  it("sends the address and the browser origin when inviting by email", async () => {
+    const calls = mockApi(() => ({ invite: { token: "tok", role: "reviewer", email: "rev@example.edu" },
+                                   url: "https://x/?invite=tok", email: { sent: true, transport: "smtp", error: null } }));
+    const out = await projects.createInvite("p1", "reviewer", undefined, "rev@example.edu", "please screen");
+    const body = JSON.parse(String((calls[0].init as any).body));
+    expect(body.email).toBe("rev@example.edu");
+    expect(body.note).toBe("please screen");
+    expect(body).toHaveProperty("base_url");
+    expect(out.email.sent).toBe(true);
+  });
+
+  it("resends an invitation, optionally correcting the address", async () => {
+    const calls = mockApi(() => ({ invite: { token: "tok", role: "reviewer", email: "fixed@example.edu" },
+                                   url: "https://x/?invite=tok", email: { sent: true, transport: "smtp", error: null } }));
+    const out = await projects.resendInvite("p1", "tok", "fixed@example.edu");
+    expect(calls[0].path).toContain("/invites/tok/resend");
+    expect(JSON.parse(String((calls[0].init as any).body)).email).toBe("fixed@example.edu");
+    expect(out.invite.email).toBe("fixed@example.edu");
   });
 
   it("previews an invite without accepting it", async () => {

@@ -37,6 +37,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import mailer
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 
@@ -551,9 +552,105 @@ def set_member_role(pid: str, target_uid: str, body: RoleUpdate, request: Reques
     return {"member": nxt}
 
 
+_LOCAL_HOST_RE = re.compile(
+    r"^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?|0\.0\.0\.0|.*\.local)$", re.I)
+_PRIVATE_RE = re.compile(r"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)")
+
+
+def _host_of(url: str) -> str:
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or "").strip()
+
+
+def link_reach(url: str) -> str:
+    """How far a link built on this origin travels: "loopback" (this computer only),
+    "lan" (same network), or "public". Invitations are useless to a remote reviewer unless
+    this is "public", so the answer is surfaced rather than assumed."""
+    host = _host_of(url)
+    if not host or _LOCAL_HOST_RE.match(host):
+        return "loopback"
+    if _PRIVATE_RE.match(host):
+        return "lan"
+    return "public"
+
+
+def _lan_candidate(port: int = 5173) -> Optional[str]:
+    """This machine's LAN address, offered as a better-than-loopback option. It only helps
+    once the dev server also listens on that interface (vite --host)."""
+    import socket
+    try:
+        sk = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sk.connect(("192.0.2.1", 1))        # a reserved address: no packet is actually sent
+        ip = sk.getsockname()[0]; sk.close()
+        return f"http://{ip}:{port}" if _PRIVATE_RE.match(ip) else None
+    except Exception:
+        return None
+
+
+def _app_origin(request: Request, explicit: Optional[str] = None) -> str:
+    """Origin for invite links, most trustworthy first: an address the author has set (the
+    only one that can be public for a locally run app), then EE_APP_ORIGIN, then what the
+    browser is using, then the dev default. A caller-supplied value is used only when
+    nothing has been configured, so one setting governs every link."""
+    configured = (kv_get("app_origin") or {}).get("url")
+    for cand in (configured, os.getenv("EE_APP_ORIGIN"), explicit,
+                 request.headers.get("origin"), request.headers.get("referer")):
+        c = (cand or "").strip()
+        if c.startswith("http"):
+            return c.split("?")[0].rstrip("/")
+    return "http://localhost:5173"
+
+
+class AppOrigin(BaseModel):
+    url: Optional[str] = None
+
+
+@router.get("/app/link-base")
+def get_link_base(request: Request):
+    """Where invite links point, and how far they reach. `shareable` false means a reviewer
+    on another computer cannot open them, whatever route the invitation takes."""
+    current = _app_origin(request)
+    configured = (kv_get("app_origin") or {}).get("url")
+    return {
+        "url": current,
+        "configured": configured,
+        "env_default": os.getenv("EE_APP_ORIGIN") or None,
+        "browser_origin": request.headers.get("origin"),
+        "reach": link_reach(current),
+        "shareable": link_reach(current) == "public",
+        "lan_candidate": _lan_candidate(),
+    }
+
+
+@router.put("/app/link-base")
+def set_link_base(body: AppOrigin, request: Request):
+    """Set the address reviewers will use. Blank clears it and the browser origin applies."""
+    url = (body.url or "").strip().rstrip("/")
+    if not url:
+        kv_del("app_origin")
+        return get_link_base(request)
+    if not re.match(r"^https?://[^\s/]+", url):
+        raise HTTPException(status_code=400, detail="Enter a full address, for example https://review.example.edu")
+    kv_set("app_origin", {"url": url, "updated_at": _now()})
+    return get_link_base(request)
+
+
+def _display_name(uid: str) -> Optional[str]:
+    rec = kv_get(f"reviewer:{uid}") or {}
+    return rec.get("name") or rec.get("email") or None
+
+
+def _verified_email(uid: str) -> Optional[str]:
+    rec = kv_get(f"reviewer:{uid}") or {}
+    return (rec.get("email") or "").strip().lower() or None
+
+
 class InviteCreate(BaseModel):
     role: Optional[str] = None
     expires_at: Optional[str] = None
+    email: Optional[str] = None      # when given, the invite is emailed and bound to this address
+    note: Optional[str] = None       # optional line from the inviter, included in the mail
+    base_url: Optional[str] = None   # origin of the app the link should point at
 
 
 @router.post("/projects/{pid}/invites")
@@ -568,6 +665,9 @@ def create_invite(pid: str, body: InviteCreate, request: Request):
     if role not in ROLES:
         raise HTTPException(status_code=400,
                             detail=f"Invalid role '{role}'. Must be one of: {', '.join(ROLES)}")
+    email = (body.email or "").strip().lower() or None
+    if email and not mailer.valid_address(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
     token = _new_id("inv").split("_", 1)[1]
     invite = {
         "token": token,
@@ -578,9 +678,179 @@ def create_invite(pid: str, body: InviteCreate, request: Request):
         "expires_at": body.expires_at or None,
         "used_at": None,
         "used_by": None,
+        "email": email,
     }
     kv_set(f"invite:{token}", invite)
-    return {"invite": invite}
+    # The link is returned either way: mail is a convenience, not the only path in.
+    url = f"{_app_origin(request, body.base_url)}/?invite={token}"
+    delivery = {"sent": False, "transport": mailer.transport_name(), "error": None, "message_id": None}
+    if email:
+        project = kv_get(f"project:{pid}") or {}
+        ident = _identity(uid)
+        subject, text, html = mailer.invite_message(
+            project.get("name") or "a systematic review", role, url,
+            inviter=ident["name"] or _display_name(uid), expires_at=invite["expires_at"], note=body.note)
+        delivery = mailer.send_email(email, subject, text, html, reply_to=ident["email"] or _verified_email(uid),
+                                     sender=mailer.format_sender(ident["name"], ident["email"]))
+        kv_set(f"invite:{token}", {**invite, "emailed_at": _now() if delivery["sent"] else None})
+        invite = kv_get(f"invite:{token}")
+    return {"invite": invite, "url": url, "email": delivery, "reach": link_reach(url)}
+
+
+def _invite_state(inv: dict) -> str:
+    if inv.get("used_at"):
+        return "accepted"
+    if inv.get("expires_at") and inv["expires_at"] < _now():
+        return "expired"
+    return "pending"
+
+
+@router.get("/projects/{pid}/invites")
+def list_invites(pid: str, request: Request):
+    """The project's invitations, newest first, with delivery state so the lead can
+    see what has been sent, what was accepted, and what needs sending again."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    out = []
+    for inv in kv_get_by_prefix("invite:"):
+        if inv.get("project_id") != pid:
+            continue
+        out.append({**inv, "state": _invite_state(inv)})
+    out.sort(key=lambda i: i.get("created_at") or "", reverse=True)
+    return {"invites": out}
+
+
+class InviteResend(BaseModel):
+    email: Optional[str] = None      # correct a wrong address while resending
+    note: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+@router.post("/projects/{pid}/invites/{token}/resend")
+def resend_invite(pid: str, token: str, body: InviteResend, request: Request):
+    """Send an existing, unaccepted invitation again, optionally to a corrected address.
+    The token is unchanged, so any copy of the link already shared stays valid."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    invite = kv_get(f"invite:{token}")
+    if not invite or invite.get("project_id") != pid:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    if invite.get("used_at"):
+        raise HTTPException(status_code=410, detail="That invitation has already been accepted")
+    if invite.get("expires_at") and invite["expires_at"] < _now():
+        raise HTTPException(status_code=410, detail="That invitation has expired. Create a new one.")
+    email = (body.email or invite.get("email") or "").strip().lower() or None
+    if not email:
+        raise HTTPException(status_code=400, detail="This invitation has no email address. Add one to send it.")
+    if not mailer.valid_address(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    url = f"{_app_origin(request, body.base_url)}/?invite={token}"
+    project = kv_get(f"project:{pid}") or {}
+    ident = _identity(uid)
+    subject, text, html = mailer.invite_message(
+        project.get("name") or "a systematic review", invite.get("role") or "reviewer", url,
+        inviter=ident["name"] or _display_name(uid), expires_at=invite.get("expires_at"), note=body.note)
+    delivery = mailer.send_email(email, subject, text, html, reply_to=ident["email"] or _verified_email(uid),
+                                 sender=mailer.format_sender(ident["name"], ident["email"]))
+    nxt = {**invite, "email": email, "resend_count": int(invite.get("resend_count") or 0) + (1 if delivery["sent"] else 0)}
+    if delivery["sent"]:
+        nxt["emailed_at"] = _now()
+    kv_set(f"invite:{token}", nxt)
+    return {"invite": {**nxt, "state": _invite_state(nxt)}, "url": url, "email": delivery}
+
+
+@router.get("/projects/{pid}/invites/{token}/message")
+def invite_message_for_client(pid: str, token: str, request: Request, email: Optional[str] = None):
+    """The composed invitation, for the lead to send from their own mail client.
+
+    This is the zero-configuration path: no SMTP credentials, no restart, and the message
+    goes from the author's real address, which collaborators trust and spam filters do not
+    punish. The wording comes from the same builder the automatic sender uses, so both
+    routes say the same thing. Returns a ready mailto: URL plus the raw parts for clipboard."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    invite = kv_get(f"invite:{token}")
+    if not invite or invite.get("project_id") != pid:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    to = (email or invite.get("email") or "").strip()
+    project = kv_get(f"project:{pid}") or {}
+    url = f"{_app_origin(request)}/?invite={token}"
+    ident = _identity(uid)
+    subject, text, _ = mailer.invite_message(
+        project.get("name") or "a systematic review", invite.get("role") or "reviewer", url,
+        inviter=ident["name"] or _display_name(uid), expires_at=invite.get("expires_at"))
+    from urllib.parse import quote
+    # "from" is not part of the mailto standard: clients that honour it preselect the right
+    # account, the rest use their default. The UI says so rather than implying control.
+    mailto = f"mailto:{quote(to)}?subject={quote(subject)}&body={quote(text)}"
+    if ident["email"]:
+        mailto += f"&from={quote(ident['email'])}"
+    return {"to": to or None, "subject": subject, "body": text, "url": url, "mailto": mailto,
+            "sender": ident["email"], "reach": link_reach(url), "shareable": link_reach(url) == "public"}
+
+
+class MailIdentity(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+
+
+def _identity(uid: str) -> dict:
+    """Who invitations come from.
+
+    The address is the one the user signed in with: it is already verified, it is what
+    collaborators expect to see, and it removes any way to send as somebody else. A typed
+    address is honoured only when there is no account at all (the unsigned-in local mode),
+    so a single-machine user is not stuck. The display name stays editable either way."""
+    saved = kv_get(f"mail_identity:{uid}") or {}
+    rec = kv_get(f"reviewer:{uid}") or {}
+    login_email = (rec.get("email") or "").strip().lower() or None
+    email = login_email or ((saved.get("email") or "").strip().lower() or None)
+    return {
+        "name": saved.get("name") or rec.get("name") or None,
+        "email": email,
+        "login_email": login_email,
+        "from_login": bool(login_email),
+        "saved": bool(saved),
+    }
+
+
+@router.get("/mail/identity")
+def get_mail_identity(request: Request):
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    ident = _identity(uid)
+    env_default = mailer.status().get("from")
+    return {**ident, "env_default": env_default,
+            "signed_in": uid != "local" and bool(ident["login_email"]),
+            "effective_from": mailer.format_sender(ident["name"], ident["email"]) or env_default}
+
+
+@router.put("/mail/identity")
+def set_mail_identity(body: MailIdentity, request: Request):
+    """Edit the address invitations are sent from. Blank fields clear the override and the
+    environment default applies again."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    email = (body.email or "").strip().lower() or None
+    login_email = _identity(uid)["login_email"]
+    if login_email and email and email != login_email:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invitations are sent from the address you signed in with ({login_email}). "
+                   f"Sign in with another account to send from a different address.")
+    if email and not mailer.valid_address(email):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    name = (body.name or "").strip()[:120] or None
+    if not email and not name:
+        kv_del(f"mail_identity:{uid}")
+    else:
+        kv_set(f"mail_identity:{uid}", {"name": name, "email": email, "updated_at": _now()})
+    return get_mail_identity(request)
+
+
+@router.get("/mail/status")
+def mail_status():
+    """Whether outbound mail is configured, so the Projects tab can offer an address
+    field and explain itself when it cannot send. Contains no credentials."""
+    return mailer.status()
 
 
 @router.get("/invites/{token}")
@@ -593,7 +863,11 @@ def get_invite(token: str):
     if invite.get("expires_at") and invite["expires_at"] < _now():
         raise HTTPException(status_code=410, detail="Invite expired")
     project = kv_get(f"project:{invite['project_id']}")
-    return {"invite": invite, "project": {"id": project["id"], "name": project["name"]} if project else None}
+    shown = {**invite}
+    if shown.get("email"):      # the preview is public: show only enough to recognise it
+        name, _, domain = shown["email"].partition("@")
+        shown["email"] = f"{name[:2]}***@{domain}"
+    return {"invite": shown, "project": {"id": project["id"], "name": project["name"]} if project else None}
 
 
 @router.post("/invites/{token}/accept")
@@ -606,6 +880,12 @@ def accept_invite(token: str, request: Request):
         raise HTTPException(status_code=410, detail="Invite already used")
     if invite.get("expires_at") and invite["expires_at"] < _now():
         raise HTTPException(status_code=410, detail="Invite expired")
+    # An emailed invite belongs to that address. Enforced only for signed-in users with a
+    # verified address, so the local single-user flow (uid "local", no account) is unchanged.
+    bound = (invite.get("email") or "").strip().lower()
+    mine = _verified_email(uid)
+    if bound and mine and bound != mine:
+        raise HTTPException(status_code=403, detail=f"This invitation was sent to {bound}. Sign in as that user to accept it.")
     pid = invite["project_id"]
     existing = kv_get(f"project_member:{pid}:{uid}")
     if existing:
