@@ -11,7 +11,7 @@
 //
 // All endpoints go through the Hono edge function (apiFetch).
 
-import { apiFetch } from "./backendClient";
+import { apiFetch, getReviewerId, getAuthToken } from "./backendClient";
 
 export type ProjectRole = "lead" | "reviewer" | "adjudicator" | "viewer";
 export type ScreeningMode = "single" | "dual" | "dual_blinded";
@@ -88,6 +88,31 @@ export type LinkBase = {
   shareable: boolean;
   lan_candidate: string | null;
 };
+
+/** Download a reviewer's whole workload as one self-contained HTML file: no link, no server
+ *  reachability, nothing for them to install. They screen in a browser and send back a
+ *  decisions bundle that `importIntoProject` merges. */
+export function reviewPackUrl(pid: string, opts: { token?: string; email?: string; stage?: string } = {}): string {
+  const q = new URLSearchParams();
+  if (opts.token) q.set("token", opts.token);
+  if (opts.email) q.set("email", opts.email);
+  if (opts.stage) q.set("stage", opts.stage);
+  const qs = q.toString();
+  return `/api/projects/${pid}/review-pack${qs ? `?${qs}` : ""}`;
+}
+
+export async function downloadReviewPack(pid: string, opts: { token?: string; email?: string; stage?: string } = {}): Promise<void> {
+  const res = await fetch(reviewPackUrl(pid, opts), {
+    headers: { "x-reviewer-id": getReviewerId(), ...(getAuthToken() ? { authorization: `Bearer ${getAuthToken()}` } : {}) },
+  });
+  if (!res.ok) throw new Error((await res.text()) || `Could not build the pack (${res.status})`);
+  const blob = await res.blob();
+  const name = /filename="([^"]+)"/.exec(res.headers.get("content-disposition") || "")?.[1] || "screening-pack.html";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
 
 export async function getLinkBase(): Promise<LinkBase> {
   return apiFetch("/app/link-base");

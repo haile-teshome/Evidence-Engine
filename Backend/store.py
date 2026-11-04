@@ -38,7 +38,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import mailer
-from fastapi import APIRouter, Header, HTTPException, Request
+import review_pack
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 
 
@@ -844,6 +845,40 @@ def set_mail_identity(body: MailIdentity, request: Request):
     else:
         kv_set(f"mail_identity:{uid}", {"name": name, "email": email, "updated_at": _now()})
     return get_mail_identity(request)
+
+
+@router.get("/projects/{pid}/review-pack")
+def download_review_pack(pid: str, request: Request, token: Optional[str] = None,
+                         email: Optional[str] = None, stage: str = "abstract"):
+    """One self-contained HTML file holding a reviewer's whole workload.
+
+    This is the route that does not depend on the app being reachable: the lead emails the
+    file, the reviewer opens it in any browser with nothing installed, screens offline, and
+    sends back a decisions bundle that /projects/{pid}/import merges. `token` ties the pack to
+    an invitation so the returned decisions are attributed to that person."""
+    uid = current_user(request.headers.get("x-reviewer-id"))
+    _require_role(pid, uid, ["lead"])
+    project = kv_get(f"project:{pid}")
+    if not project:
+        raise HTTPException(status_code=404, detail="Not found")
+    reviewer_email, reviewer_id = (email or "").strip().lower() or None, None
+    if token:
+        inv = kv_get(f"invite:{token}")
+        if not inv or inv.get("project_id") != pid:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        reviewer_email = reviewer_email or inv.get("email")
+        reviewer_id = inv.get("used_by")
+    # Stable identity for an invitee who has not signed in yet, so repeated packs and repeated
+    # imports land on the same reviewer rather than multiplying them.
+    reviewer_id = reviewer_id or (f"pack:{reviewer_email}" if reviewer_email else f"pack:{token or 'reviewer'}")
+    papers = kv_get(f"project_papers:{pid}") or []
+    htmlpack = review_pack.build_pack(
+        project, papers, reviewer_email, reviewer_id, stage=stage,
+        blinded=(project.get("screening_mode") == "dual_blinded"))
+    slug = re.sub(r"[^a-z0-9]+", "-", (project.get("name") or "review").lower()).strip("-")[:48]
+    who = re.sub(r"[^a-z0-9]+", "-", (reviewer_email or "reviewer").lower()).strip("-")[:40]
+    return Response(content=htmlpack, media_type="text/html; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{slug}-{who}-screening-pack.html"'})
 
 
 @router.get("/mail/status")

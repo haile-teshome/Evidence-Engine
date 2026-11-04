@@ -7,7 +7,7 @@ import {
   lockProject, acceptInvite, previewInvite, setProjectPapers, assignPapers, listProjectPapers,
   importNewProject, getMailStatus, MailStatus, listInvites, resendInvite, InviteRow,
   getInviteMessage, getMailIdentity, setMailIdentity, MailIdentity,
-  getLinkBase, setLinkBase, LinkBase,
+  getLinkBase, setLinkBase, LinkBase, downloadReviewPack,
 } from "../lib/projects";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { ConflictsSection } from "../components/ConflictsSection";
@@ -23,7 +23,7 @@ import { timeAgo } from "../lib/format";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Textarea } from "../components/ui/textarea";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "../components/ui/dialog";
-import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy, Upload, Mail, Send, RefreshCw, Pencil, ExternalLink, Globe } from "lucide-react";
+import { Users, Plus, X, Link as LinkIcon, ShieldCheck, Lock, CheckCircle2, AlertTriangle, Copy, Upload, Mail, Send, RefreshCw, Pencil, ExternalLink, Globe, Download, FileDown } from "lucide-react";
 import { toast } from "sonner";
 
 export function ProjectsPage() {
@@ -1164,6 +1164,18 @@ function ProjectDetailCard({ projectId, onChanged }: { projectId: string; onChan
                   </Button>
                   <Button
                     size="sm" variant="ghost"
+                    onClick={async () => {
+                      try {
+                        await downloadReviewPack(projectId,
+                          { token: row.token, email: (fixEmail[row.token] || row.email || "").trim() || undefined });
+                        toast.success("Pack downloaded. Email the file; they open it in any browser, no install needed.",
+                                      { duration: 8000 });
+                      } catch (e: any) { toast.error(e?.message || "Could not build the pack"); }
+                    }}
+                    title="Download this reviewer's articles as one file to email them"
+                  ><FileDown className="size-3" /></Button>
+                  <Button
+                    size="sm" variant="ghost"
                     onClick={() => copyInviteMessage(row.token, (fixEmail[row.token] || row.email || "").trim())}
                     title="Copy the whole invitation to paste into Outlook, Gmail or Teams"
                   ><Copy className="size-3" /></Button>
@@ -1343,9 +1355,21 @@ function ComposeInviteDialog({
                 </div>
               )}
               <div className="text-[11px] opacity-80">
-                Until the app is reachable at an address your reviewers can open you can still send
-                the invitation, but they will not be able to accept it.
+                Or skip links altogether: send them a screening pack. It is a single file holding
+                their articles and your criteria. They open it in any browser, screen offline with
+                nothing installed, and send back a decisions file you import here.
               </div>
+              <Button size="sm" variant="outline" disabled={!request}
+                      onClick={async () => {
+                        try {
+                          await downloadReviewPack(request!.projectId,
+                            { token: request!.token, email: request!.email });
+                          toast.success("Pack downloaded. Attach it to your email to " + request!.email,
+                                        { duration: 8000 });
+                        } catch (e: any) { toast.error(e?.message || "Could not build the pack"); }
+                      }}>
+                <Download className="size-3 mr-1" />Download screening pack instead
+              </Button>
             </AlertDescription>
           </Alert>
         )}
