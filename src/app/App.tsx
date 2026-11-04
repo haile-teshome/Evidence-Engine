@@ -6,7 +6,9 @@ import { InterraterReliability } from "./components/InterraterReliability";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { bucketAbstractExclusions, bucketFullTextExclusions } from "./lib/exclusionBucketing";
 import { Toaster } from "./components/ui/sonner";
-import { StoreProvider, useStore } from "./lib/store";
+import { StoreProvider, useStore, useSaveStatus } from "./lib/store";
+import { DeferredPage, PageSkeleton } from "./components/DeferredPage";
+import { AnimatePresence, motion } from "motion/react";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { AuthScreen } from "./components/AuthScreen";
 import { BackendReadyProvider, useEngineStatus } from "./lib/backendReady";
@@ -15,7 +17,6 @@ import { UserMenu } from "./components/UserMenu";
 // Diagramming page) is a named export from the same module. The rest are
 // code-split so the initial bundle is small and each stage loads on demand.
 import { QualityPage, RiskOfBiasSummary } from "./pages/QualityPage";
-import { Skeleton } from "./components/ui/skeleton";
 const HomePage = lazy(() => import("./pages/HomePage").then(m => ({ default: m.HomePage })));
 const SimulationPage = lazy(() => import("./pages/SimulationPage").then(m => ({ default: m.SimulationPage })));
 const AbstractPage = lazy(() => import("./pages/AbstractPage").then(m => ({ default: m.AbstractPage })));
@@ -27,6 +28,15 @@ const TextExtractionPage = lazy(() => import("./pages/TextExtractionPage").then(
 const MetaAnalysisPage = lazy(() => import("./pages/MetaAnalysisPage").then(m => ({ default: m.MetaAnalysisPage })));
 const ProjectsPage = lazy(() => import("./pages/ProjectsPage").then(m => ({ default: m.ProjectsPage })));
 const WritingPage = lazy(() => import("./pages/WritingPage").then(m => ({ default: m.WritingPage })));
+// The same code splits, for warming in idle time after the first paint so the
+// first visit to a tab does not wait on its module load (hundreds of requests on
+// the dev server). A repeat import() resolves from the module cache.
+const PAGE_CHUNKS = [
+  () => import("./pages/HomePage"), () => import("./pages/SimulationPage"), () => import("./pages/AbstractPage"),
+  () => import("./pages/FullTextPage"), () => import("./pages/SnowballPage"), () => import("./pages/ExtractionPage"),
+  () => import("./pages/AcquisitionPage"), () => import("./pages/TextExtractionPage"), () => import("./pages/MetaAnalysisPage"),
+  () => import("./pages/ProjectsPage"), () => import("./pages/WritingPage"),
+];
 import { CommandPalette } from "./components/CommandPalette";
 import { FlaskConical, Home, BarChart3, FileSearch, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Users, PenLine, SlidersHorizontal, Loader2, Check, RotateCcw } from "lucide-react";
 
@@ -48,6 +58,14 @@ const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> 
 
 function Shell() {
   const s = useStore();
+  const lastSavedAt = useSaveStatus();
+  useEffect(() => {
+    const warm = () => PAGE_CHUNKS.forEach(load => { load().catch(() => { /* prefetch only */ }); });
+    const w = window as any;
+    const idle = typeof w.requestIdleCallback === "function";
+    const id: number = idle ? w.requestIdleCallback(warm, { timeout: 4000 }) : window.setTimeout(warm, 2000);
+    return () => { if (idle) w.cancelIdleCallback(id); else window.clearTimeout(id); };
+  }, []);
   const engine = useEngineStatus();
   const meta = PAGE_META[s.page];
   const Icon = meta.icon;
@@ -99,10 +117,10 @@ function Shell() {
                 <span className="text-muted-foreground">{s.currentProjectRole}</span>
               </button>
             )}
-            {s.lastSavedAt && (
+            {lastSavedAt && (
               <span
                 className="hidden sm:inline-flex items-center gap-1 text-[11px] text-muted-foreground"
-                title={`Saved locally at ${new Date(s.lastSavedAt).toLocaleTimeString()}`}
+                title={`Saved locally at ${new Date(lastSavedAt).toLocaleTimeString()}`}
               >
                 <Check className="size-3 text-emerald-500" />Saved
               </span>
@@ -110,8 +128,15 @@ function Shell() {
             <UserMenu />
           </div>
         </header>
-        <div key={s.page} className="max-w-6xl mx-auto p-6 animate-in fade-in duration-200 motion-reduce:animate-none">
-          <Suspense fallback={<div className="space-y-3"><Skeleton className="h-8 w-64" /><Skeleton className="h-32 w-full" /><Skeleton className="h-32 w-full" /></div>}>
+        <div className="max-w-6xl mx-auto p-6">
+          {/* One page at a time: the leaving page fades out completely, then the
+              arriving one fades in. Nothing heavy is committed while either fade
+              runs, which is what keeps the switch smooth. */}
+          <AnimatePresence mode="wait" initial={false}>
+          <motion.div key={s.page} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            transition={{ duration: 0.12, ease: "easeOut" }}>
+          <Suspense fallback={<PageSkeleton />}>
+          <DeferredPage>
           {s.page === "home" && <HomePage />}
           {s.page === "simulation" && <SimulationPage />}
           {s.page === "projects" && <ProjectsPage />}
@@ -264,7 +289,10 @@ function Shell() {
           })()}
           {s.page === "meta" && <MetaAnalysisPage />}
           {s.page === "writing" && <WritingPage />}
+          </DeferredPage>
           </Suspense>
+          </motion.div>
+          </AnimatePresence>
         </div>
       </main>
     </div>

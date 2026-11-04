@@ -653,6 +653,8 @@ export const AIService = {
 
   async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{
     status: "found" | "missing"; text?: string; reason?: string; source?: string; pdf_key?: string;
+    /** Key of the body in the backend text cache; the saved session keeps this, not the text. */
+    text_key?: string;
     /** Present on a miss: why, and where a human can go to get it by hand. */
     reason_code?: string; oa_status?: string; doi?: string; pmid?: string;
     links?: Record<string, string>;

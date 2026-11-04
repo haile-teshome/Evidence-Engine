@@ -1,4 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { usePagedRows } from "../lib/usePagedRows";
+import { ShowMore } from "../components/ShowMore";
 import { motion } from "motion/react";
 import { useStore, type SnowballSort, type SnowballPlan } from "../lib/store";
 import { AIService, ScreenResult, Paper, DataAggregator } from "../lib/mockServices";
@@ -449,9 +451,10 @@ export function SnowballPage() {
     }
   }
 
-  const shown = (results || [])
+  const shown = useMemo(() => (results || [])
     .filter(p => selectedSeed === null || p.seed_paper_title === selectedSeed)
-    .filter(p => !q.trim() || (p.title || "").toLowerCase().includes(q.toLowerCase()));
+    .filter(p => !q.trim() || (p.title || "").toLowerCase().includes(q.toLowerCase())), [results, selectedSeed, q]);
+  const pagedShown = usePagedRows(shown);
 
   // Flag when the current seed set differs from the one the visible citations
   // were fetched from (after re-running full-text, or switching source), so the
@@ -704,7 +707,7 @@ export function SnowballPage() {
                 </Button>
               </div>
               <div className="overflow-auto flex-1 divide-y">
-                {shown.map((p, i) => {
+                {pagedShown.visible.map((p, i) => {
                   const v = verdict(p);
                   const picked = chosen.has(p.id);
                   return (
@@ -768,6 +771,7 @@ export function SnowballPage() {
                     </div>
                   );
                 })}
+                <ShowMore shown={pagedShown.shown} total={pagedShown.total} step={pagedShown.step} onMore={pagedShown.showMore} onAll={pagedShown.showAll} />
                 {shown.length === 0 && (
                   <div className="p-4 text-sm text-muted-foreground">No citations match “{q}”.</div>
                 )}

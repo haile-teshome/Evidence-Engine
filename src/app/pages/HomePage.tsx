@@ -1298,7 +1298,7 @@ export function HomePage() {
           const { c, r } = f.value;
           if (r.status === "found" && (r.text || "").trim()) {
             c.text = r.text!;
-            updates[c.id] = { paper_id: c.id, title: c.title, url: c.url || "", source: r.source || c.source || "", status: "found", text: r.text };
+            updates[c.id] = { paper_id: c.id, title: c.title, url: c.url || "", source: r.source || c.source || "", status: "found", text: r.text, text_key: r.text_key };
           }
         }
         if (Object.keys(updates).length) s.setFullTexts(prev => ({ ...prev, ...updates }));

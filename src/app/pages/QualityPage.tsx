@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { usePagedRows } from "../lib/usePagedRows";
+import { ShowMore } from "../components/ShowMore";
 import { motion } from "motion/react";
 import { useStore } from "../lib/store";
 import {
@@ -436,9 +438,10 @@ export function QualityPage() {
   // The figure + paper list are scoped to the active instrument tab.
   const activeGroup = instrumentGroups.find(g => g.label === activeInstrument) ?? instrumentGroups[0] ?? null;
   const activeReports = activeGroup?.reports ?? [];
-  const filtered = q.trim()
+  const filtered = useMemo(() => q.trim()
     ? activeReports.filter(r => r.title.toLowerCase().includes(q.toLowerCase()))
-    : activeReports;
+    : activeReports, [activeReports, q]);
+  const pagedQ = usePagedRows(filtered);
   const selected = activeReports.find(r => r.paper_id === selectedId) ?? activeReports[0] ?? null;
 
   return (
@@ -612,7 +615,7 @@ export function QualityPage() {
                   </div>
                 </div>
                 <div className="overflow-auto flex-1">
-                  {filtered.map(r => {
+                  {pagedQ.visible.map(r => {
                     const active = r.paper_id === selected?.paper_id;
                     const excluded = s.excludedByQuality.has(r.paper_id);
                     const ov = recomputeOverall(r, overrides);
@@ -645,6 +648,7 @@ export function QualityPage() {
                       </button>
                     );
                   })}
+                  <ShowMore shown={pagedQ.shown} total={pagedQ.total} step={pagedQ.step} onMore={pagedQ.showMore} onAll={pagedQ.showAll} />
                   {filtered.length === 0 && (
                     <div className="p-4 text-sm text-muted-foreground">No articles match “{q}”.</div>
                   )}

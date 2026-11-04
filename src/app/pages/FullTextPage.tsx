@@ -1,4 +1,6 @@
 import { Fragment, useState, useMemo, useEffect } from "react";
+import { usePagedRows } from "../lib/usePagedRows";
+import { ShowMore } from "../components/ShowMore";
 import { useStore } from "../lib/store";
 import { AIService, formatDuration, FullTextResult } from "../lib/mockServices";
 import { RapidScreen } from "../components/RapidScreen";
@@ -151,6 +153,18 @@ export function FullTextPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawColOrder, movableIds.join("|")]);
   useEffect(() => { try { localStorage.setItem("ee:fulltext-col-order", JSON.stringify(colOrder)); } catch { /* ignore */ } }, [colOrder]);
+  // Client-side row filter for the results table (title / reason / decision), then
+  // chunked rendering: every full-text row used to mount on each tab open. Declared
+  // here, ahead of the early returns below, so the hook order stays fixed.
+  const ftQ = ftQuery.trim().toLowerCase();
+  const visibleFt = useMemo(() => {
+    const all = s.fullTextResults;
+    if (!all) return [];
+    return ftQ
+      ? all.filter(row => `${row.Title} ${row.Reason} ${row.Decision} ${effectiveFullTextDecision(row, s.fullTextOverrides)}`.toLowerCase().includes(ftQ))
+      : all;
+  }, [s.fullTextResults, ftQ, s.fullTextOverrides]);
+  const pagedFt = usePagedRows(visibleFt);
   const [dragCol, setDragCol] = useState<string | null>(null);
   const [overCol, setOverCol] = useState<string | null>(null);
   const moveCol = (from: string, to: string) => setRawColOrder(() => {
@@ -386,11 +400,6 @@ export function FullTextPage() {
       {ft && (() => {
             const includedEff = ft.filter(x => effectiveFullTextDecision(x, s.fullTextOverrides) === "Include").length;
             const excludedEff = ft.filter(x => effectiveFullTextDecision(x, s.fullTextOverrides) === "Exclude").length;
-            // Client-side row filter for the results table (title / reason / decision).
-            const ftQ = ftQuery.trim().toLowerCase();
-            const visibleFt = ftQ
-              ? ft.filter(row => `${row.Title} ${row.Reason} ${row.Decision} ${effectiveFullTextDecision(row, s.fullTextOverrides)}`.toLowerCase().includes(ftQ))
-              : ft;
             return (
               <>
                 <ControlPane
@@ -543,7 +552,7 @@ export function FullTextPage() {
                 {ftQuery && visibleFt.length === 0 && (
                   <tr><td colSpan={3 + movableCols.length} className="px-3 py-10 text-center text-sm text-muted-foreground">No results match "{ftQuery}".</td></tr>
                 )}
-                {visibleFt.map(row => {
+                {pagedFt.visible.map(row => {
                   const eff = effectiveFullTextDecision(row, s.fullTextOverrides);
                   const isOverridden = eff !== row.Decision;
                   const keep = eff === "Include";
@@ -660,6 +669,11 @@ export function FullTextPage() {
                   </Fragment>
                   );
                 })}
+                {pagedFt.hasMore && (
+                  <tr><td colSpan={3 + movableCols.length} className="p-0">
+                    <ShowMore shown={pagedFt.shown} total={pagedFt.total} step={pagedFt.step} onMore={pagedFt.showMore} onAll={pagedFt.showAll} />
+                  </td></tr>
+                )}
               </tbody>
             </table>
             </div>

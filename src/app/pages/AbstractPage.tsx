@@ -1,4 +1,6 @@
 import { Fragment, useState, useEffect, useMemo } from "react";
+import { usePagedRows } from "../lib/usePagedRows";
+import { ShowMore } from "../components/ShowMore";
 import { useStore, resolveInUseRun, ScreeningPlan } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
 import { frameworkOf, labelFor, type FrameworkId } from "../lib/frameworks";
@@ -704,11 +706,13 @@ export function AbstractPage() {
 
   // Client-side row filter for the results table (title / reason / decision).
   const tableQ = tableQuery.trim().toLowerCase();
-  const visibleRows = r
+  const visibleRows = useMemo(() => r
     ? (tableQ
         ? r.filter(row => `${row.Title} ${row.Reason} ${row.Decision} ${effectiveAbstractDecision(row, s.abstractOverrides)}`.toLowerCase().includes(tableQ))
         : r)
-    : [];
+    : [], [r, tableQ, s.abstractOverrides]);
+  // Rows mount in chunks of 100; the match count above the table still reports all of them.
+  const paged = usePagedRows(visibleRows);
 
   return (
     <div className="space-y-4">
@@ -1012,7 +1016,7 @@ export function AbstractPage() {
                   {tableQuery && visibleRows.length === 0 && (
                     <tr><td colSpan={3 + orderedCols.length} className="px-3 py-10 text-center text-sm text-muted-foreground">No results match "{tableQuery}".</td></tr>
                   )}
-                  {visibleRows.map(row => {
+                  {paged.visible.map(row => {
                     const pa = row.Pico_Assessment;
                     const eff = effectiveAbstractDecision(row, s.abstractOverrides);
                     const isOverridden = eff !== row.Decision;
@@ -1124,6 +1128,11 @@ export function AbstractPage() {
                       </Fragment>
                     );
                   })}
+                  {paged.hasMore && (
+                    <tr><td colSpan={3 + orderedCols.length} className="p-0">
+                      <ShowMore shown={paged.shown} total={paged.total} step={paged.step} onMore={paged.showMore} onAll={paged.showAll} />
+                    </td></tr>
+                  )}
                 </tbody>
               </table>
               </div>

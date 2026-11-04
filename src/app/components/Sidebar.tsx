@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { Card } from "./ui/card";
 import { Label } from "./ui/label";
@@ -117,11 +117,25 @@ export function Sidebar() {
   // each nav button and spring the pill's y/height whenever the active page
   // changes, so it always animates from its current spot to the clicked tab.
   const navBtns = useRef<Record<string, HTMLButtonElement | null>>({});
+  // The tab the reviewer just clicked, before the store has caught up. The
+  // highlight and pill follow this, so they move on the click itself; the store
+  // update runs as a transition, so tearing down the old page and building the
+  // new one can never hold the sidebar back.
+  const [pendingPage, setPendingPage] = useState<PageId | null>(null);
+  const activePage: PageId = pendingPage ?? s.page;
+  useEffect(() => {
+    if (pendingPage !== null && s.page === pendingPage) setPendingPage(null);
+  }, [s.page, pendingPage]);
+  const goTo = (id: PageId) => {
+    if (id === activePage) return;
+    setPendingPage(id);
+    startTransition(() => s.setPage(id));
+  };
   const [pill, setPill] = useState<{ top: number; height: number } | null>(null);
   useLayoutEffect(() => {
-    const el = navBtns.current[s.page];
+    const el = navBtns.current[activePage];
     if (el) setPill({ top: el.offsetTop, height: el.offsetHeight });
-  }, [s.page]);
+  }, [activePage]);
   const [localModels, setLocalModels] = useState<string[]>([]);
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
@@ -218,10 +232,11 @@ export function Sidebar() {
         <nav className="relative space-y-1 mb-4">
           {pill && (
             <motion.span
-              className="pointer-events-none absolute left-0 right-0 top-0 rounded-xl overflow-hidden bg-gradient-to-b from-primary/80 to-primary/60 backdrop-blur-xl backdrop-saturate-150 border border-white/40 dark:border-white/20 ring-1 ring-inset ring-white/25 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.28),0_1px_0_0_rgba(255,255,255,0.45)_inset,0_-10px_18px_-10px_rgba(0,0,0,0.2)_inset]"
+              className="pointer-events-none absolute left-0 right-0 top-0 rounded-xl overflow-hidden bg-gradient-to-b from-primary/90 to-primary/75 border border-white/40 dark:border-white/20 ring-1 ring-inset ring-white/25 shadow-[0_8px_24px_-8px_rgba(0,0,0,0.28),0_1px_0_0_rgba(255,255,255,0.45)_inset,0_-10px_18px_-10px_rgba(0,0,0,0.2)_inset] will-change-transform"
               initial={false}
-              animate={{ y: pill.top, height: pill.height }}
-              transition={{ type: "spring", stiffness: 420, damping: 34, mass: 0.7 }}
+              style={{ height: pill.height }}
+              animate={{ y: pill.top }}
+              transition={{ type: "spring", duration: 0.22, bounce: 0 }}
             >
               {/* Specular glass sheen: bright top-lit highlight fading down */}
               <span className="absolute inset-0 bg-gradient-to-b from-white/35 via-white/5 to-transparent" />
@@ -231,10 +246,11 @@ export function Sidebar() {
           )}
           {NAV.map(n => {
             const Icon = n.icon;
-            const active = s.page === n.id;
+            const active = activePage === n.id;
             return (
-              <button key={n.id} ref={el => { navBtns.current[n.id] = el; }} onClick={() => s.setPage(n.id)}
-                className={`group relative z-10 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors duration-200 ${
+              <button key={n.id} ref={el => { navBtns.current[n.id] = el; }} onClick={() => goTo(n.id)}
+                aria-current={active ? "page" : undefined}
+                className={`group relative z-10 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors duration-100 ${
                   active
                     ? "text-primary-foreground"
                     : "text-foreground/80 hover:bg-white/50 dark:hover:bg-white/[0.06] hover:backdrop-blur-sm"

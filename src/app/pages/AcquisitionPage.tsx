@@ -240,7 +240,7 @@ export function AcquisitionPage() {
             ...prev,
             [p.paper_id]: {
               paper_id: p.paper_id, title: p.Title, url: p.URL, source: p.Source,
-              status: res.status, text: res.text, reason: res.reason,
+              status: res.status, text: res.text, text_key: res.text_key, reason: res.reason,
               retrieved_via: res.source,
               reason_code: res.reason_code, oa_status: res.oa_status,
               doi: res.doi, pmid: res.pmid, links: res.links,
