@@ -127,13 +127,18 @@ BPY="$PAYLOAD/runtime/python/bin/python3"
 # ranker runs on CPU, and it would put the artifact over GitHub's 2 GB
 # per-asset limit. Take torch from the CPU-only index there; PyPI still serves
 # everything else.
-PIP_INDEX_ARGS=()
+# Spelled out rather than built as an array: expanding an EMPTY array under
+# `set -u` is an error on bash 3.2, which is what macOS ships and what the Mac
+# runners use, so an array here built fine on Linux and failed on both Macs.
 if [ "$TARGET" = "linux-x64" ]; then
-  PIP_INDEX_ARGS=(--index-url https://download.pytorch.org/whl/cpu
-                  --extra-index-url https://pypi.org/simple)
+  "$BPY" -m pip download -r "$PAYLOAD/Backend/requirements.txt" \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    -d "$PAYLOAD/Backend/wheels" >/dev/null
+else
+  "$BPY" -m pip download -r "$PAYLOAD/Backend/requirements.txt" \
+    -d "$PAYLOAD/Backend/wheels" >/dev/null
 fi
-"$BPY" -m pip download -r "$PAYLOAD/Backend/requirements.txt" \
-  "${PIP_INDEX_ARGS[@]}" -d "$PAYLOAD/Backend/wheels" >/dev/null
 
 echo "==> [7/7] Packaging"
 mkdir -p "$ROOT/dist-bundle"
