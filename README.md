@@ -2,7 +2,7 @@
 
 **An AI-powered assistant for systematic literature reviews.** Search multiple
 databases, screen abstracts and full texts, refine PICO questions, snowball
-citations, extract tables and data, and generate PRISMA-compliant reports —
+citations, extract tables and data, and generate PRISMA-compliant reports,
 all from one desktop app that runs on your own computer.
 
 Screening runs locally by default (LEADS-Mistral-7B via Ollama), so your data
@@ -10,55 +10,50 @@ never leaves your machine unless you choose a cloud model.
 
 ---
 
-## Get started
+## Install
 
-### 1. Install the two prerequisites (one time)
+Download one file for your computer from the
+[**Releases page**](https://github.com/haile-teshome/Evidence-Engine/releases).
+You do **not** need to install Node.js, Python or Ollama: a download carries its
+own runtimes.
 
-You need **Node.js** and **Python 3**. Pick your OS:
+| Your computer | Download | Then |
+|---|---|---|
+| **Mac** (Apple Silicon: M1 and later) | `...-darwin-arm64.dmg` | Open it, drag **Evidence Engine** to Applications |
+| **Mac** (Intel) | `...-darwin-x64.dmg` | Open it, drag **Evidence Engine** to Applications |
+| **Windows** | `...-win-x64-Setup.exe` | Run it, then open Evidence Engine from the Start Menu |
+| **Linux** | `...-linux-x64.zip` | Unzip it, run `launch.sh` |
 
-**macOS** (with [Homebrew](https://brew.sh)):
-```bash
-brew install node python
-```
+Not sure which Mac you have? Apple menu, then About This Mac. Anything listing an
+M1, M2, M3 or M4 chip is Apple Silicon.
 
-**Windows** (with [winget](https://learn.microsoft.com/windows/package-manager/winget/), built into Windows 10/11):
-```powershell
-winget install OpenJS.NodeJS Python.Python.3.12
-```
+### The first open needs one extra step
 
-Or download the installers directly: [Node.js (LTS)](https://nodejs.org/en/download) · [Python 3](https://www.python.org/downloads/).
+These builds are not code-signed, so your computer will warn you about an
+unidentified developer. It is one click, once:
 
-> Optional: [Google Chrome](https://www.google.com/chrome/) for a clean app
-> window (otherwise it opens in your default browser). You do **not** need to
-> install Ollama — the app sets up the local AI model automatically on first run.
+- **macOS:** control-click (or right-click) **Evidence Engine** in Applications
+  and choose **Open**, then **Open** again. If you are not offered an Open
+  button, go to **System Settings → Privacy & Security**, scroll to the bottom
+  and click **Open Anyway**.
+- **Windows:** on the blue SmartScreen box, click **More info**, then **Run
+  anyway**.
 
-### 2. Get the app
+### The first launch takes a few minutes
 
-**Option A — Download (easiest):** grab the latest zip from the
-[**Releases page**](https://github.com/haile-teshome/Evidence-Engine/releases),
-and unzip it anywhere.
+It builds its own private Python environment from files inside the app, then
+installs [Ollama](https://ollama.com) and downloads the local AI model (about
+4 GB). The window opens by itself when it is ready, and after that it starts in
+seconds. **To quit, close the app window** and everything shuts down on its own.
 
-**Option B — Clone (recommended if you have Git):**
-```bash
-git clone https://github.com/haile-teshome/Evidence-Engine.git
-```
-Cloning avoids the macOS security prompt in step 4.
+No account, no sign-up, no API keys.
 
-### 3. Launch it
+### Updating
 
-- **macOS** — double-click **`Evidence Engine.app`** (or `launch.command`).
-- **Windows** — double-click **`launch.bat`**.
-
-The first launch installs dependencies and builds an optimized version of the
-app (a few minutes, one time). After that it starts in seconds and runs the
-fast production build. **To quit, just close the app window** — everything shuts
-down on its own.
-
-### 4. macOS security prompt (only if you downloaded the zip)
-
-Because the app isn't from the App Store, macOS may block the first open.
-**Right-click** `Evidence Engine.app` → **Open** → **Open**. Only needed once.
-(If it still refuses: `xattr -dr com.apple.quarantine "Evidence Engine.app"`.)
+The app tells you when a new version is out and links to the download. Install
+it over the top of the old one. Your reviews are kept in `~/.evidence-engine`
+(`%USERPROFILE%\.evidence-engine` on Windows), **outside** the app, so replacing
+it keeps everything. To turn the check off, set `EE_UPDATE_CHECK=0`.
 
 📖 Full walkthrough and troubleshooting: **[GETTING-STARTED.md](GETTING-STARTED.md)**
 
@@ -70,8 +65,9 @@ Because the app isn't from the App Store, macOS may block the first open.
   [Ollama](https://ollama.com) and downloads **LEADS-Mistral-7B** (~4 GB) for
   screening. Nothing leaves your computer; no manual setup.
 - **Cloud (optional):** pick Claude / GPT / Gemini in the sidebar. These need an
-  API key in `Backend/.env` (copy from `Backend/.env.example`):
-  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
+  API key, entered in the app's API keys dialog (stored in your OS keychain),
+  or set in `~/.evidence-engine/.env` as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`
+  or `GEMINI_API_KEY`.
 - **Sessions & reviewers:** saved automatically to a local database
   (`~/.evidence-engine/evidence.db`) by the backend. No account or cloud service.
   Add reviewer profiles from the top-right menu for local dual-review projects.
@@ -94,13 +90,17 @@ recall 1.000, specificity 0.676, MCC +0.260, WSS@95 0.61 on van_Dis_2020).
 
 ## For developers
 
+Working from a checkout needs **Node.js** and **Python 3** (`brew install node python`,
+or `winget install OpenJS.NodeJS Python.Python.3.12`). A checkout keeps its venv in
+`Backend/.venv` and its keys in `Backend/.env`, both unchanged.
+
 Run the dev server with hot reload instead of the packaged launcher:
 
 ```bash
 npm install
 npm run dev                       # Vite dev server (http://localhost:5173)
 
-# in a second terminal — backend
+# in a second terminal: backend
 cd Backend && python3 -m uvicorn api:app --reload --port 8000
 ```
 

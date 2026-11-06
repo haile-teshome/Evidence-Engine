@@ -1,62 +1,115 @@
-# Evidence Engine — Getting Started
+# Evidence Engine: Getting Started
 
-A one-click research assistant. The launcher starts everything, opens the app in
-its own window, and shuts it all down when you close that window.
+A one-click research assistant. It starts everything, opens in its own window,
+and shuts it all down when you close that window.
 
-## 1. Install the prerequisites (one time)
+**You do not need to install Node.js, Python or Ollama.** A download from the
+[Releases page](https://github.com/haile-teshome/Evidence-Engine/releases)
+carries its own runtimes.
 
-You need two free tools. Install both, then continue.
+## 1. Download and install
 
-| Tool | Why | Get it |
+| Your computer | Download | Then |
 |---|---|---|
-| **Node.js (LTS)** | runs the launcher + the app UI | https://nodejs.org/en/download |
-| **Python 3.10+** | runs the backend | https://www.python.org/downloads/ |
+| **Mac** (Apple Silicon: M1 and later) | `...-darwin-arm64.dmg` | Open it, drag **Evidence Engine** onto **Applications** |
+| **Mac** (Intel) | `...-darwin-x64.dmg` | Open it, drag **Evidence Engine** onto **Applications** |
+| **Windows** | `...-win-x64-Setup.exe` | Run it, then open **Evidence Engine** from the Start Menu |
+| **Linux** | `...-linux-x64.zip` | Unzip anywhere, run `launch.sh` |
 
-Optional:
-- **Google Chrome / Edge / Brave** — used for the clean app window. Without it, the app opens in your default browser instead.
-- **Ollama** (https://ollama.com) — only if you want local, offline AI models. Cloud models work without it.
+Not sure which Mac you have? Apple menu, then About This Mac. Anything listing
+an M1, M2, M3 or M4 chip is Apple Silicon.
 
-> Tip: on the download pages, pick the installer for your operating system and accept the defaults. On Windows, keep "Add to PATH" checked.
+## 2. Get past the first-open warning
 
-## 2. Launch it
+These builds are not code-signed, so your computer warns you about an
+unidentified developer. It is not a sign anything is wrong, and you only do this
+once.
 
-Put this whole folder wherever you like, then:
+**macOS.** Control-click (or right-click) **Evidence Engine** in Applications and
+choose **Open**, then **Open** again in the dialog.
 
-- **macOS** — double-click **`Evidence Engine.app`** (or **`launch.command`**).
-- **Windows** — double-click **`launch.bat`**.
+If you are not offered an Open button, open **System Settings**, go to
+**Privacy & Security**, scroll to the bottom, and click **Open Anyway** next to
+Evidence Engine. You may be asked for your password.
 
-The **first** launch installs dependencies and builds an optimized version of
-the app automatically (a few minutes, one time). Later launches take a few
-seconds. The app is rebuilt only when its code changes, so day-to-day it runs
-the fast production build, not the slower developer server.
+If it still refuses, open Terminal and run:
 
-**To quit:** just close the app window. Everything shuts down on its own.
+```bash
+xattr -dr com.apple.quarantine "/Applications/Evidence Engine.app"
+```
 
-## 3. macOS security prompt (first launch only)
+**Windows.** On the blue SmartScreen box, click **More info**, then **Run
+anyway**.
 
-Because the app isn't from the App Store, macOS may block the first open.
-If you see "unidentified developer" or "cannot be opened":
+## 3. The first launch
 
-1. **Right-click** `Evidence Engine.app` → **Open** → **Open** in the dialog.
+It sets itself up, which takes a few minutes:
 
-That's it, only needed once. (If it still refuses after downloading as a zip,
-open Terminal and run: `xattr -dr com.apple.quarantine "Evidence Engine.app"`.)
+- builds its own private Python environment from files inside the app, with no
+  internet needed for that part
+- installs [Ollama](https://ollama.com) and downloads the local screening model,
+  about 4 GB
+
+The window opens by itself when the app is ready, and the model keeps downloading
+in the background. You can use a cloud model in the sidebar in the meantime. If
+you are offline, the model download is skipped and retried next launch.
+
+Later launches take a few seconds.
+
+**To quit:** close the app window. Everything shuts down on its own.
+
+No account, no sign-up and no API keys. The default model runs on your own
+machine, so your articles and decisions are not sent anywhere.
+
+## 4. Where your work is kept, and updating
+
+Everything you do is stored **outside** the app, in `.evidence-engine` in your
+home folder (`%USERPROFILE%\.evidence-engine` on Windows): your reviews,
+projects, screening decisions and cached article text.
+
+That is what makes updating safe. The app tells you when a new version is out and
+links to the download. Install it over the top of the old one:
+
+- **macOS:** drag the new app into Applications and choose Replace.
+- **Windows:** run the new installer.
+
+Nothing is lost. To turn the update check off, set `EE_UPDATE_CHECK=0`.
+
+To uninstall, delete the app. To remove your reviews too, also delete the
+`.evidence-engine` folder in your home folder. (In Finder, press
+Command-Shift-G and enter `~/.evidence-engine`.)
 
 ## Troubleshooting
 
-- **"Node.js is required"** — install Node from the link above, then relaunch.
-- **"Python 3 is required"** — install Python from the link above, then relaunch.
-- **Nothing opens / stuck on "Waiting for services"** — close the window and
-  relaunch; the first run may still be installing dependencies.
-- **Local AI model** — handled automatically. On first launch the app installs
-  Ollama (if needed), starts it, and downloads the default screening model
-  (~4 GB) in the background. Local screening works once that finishes; you can use
-  a cloud model in the sidebar in the meantime. If you're offline, the download
-  is skipped and retried next launch.
-  - Prefer no local download? Pick Claude / GPT / Gemini in the sidebar and add an
-    API key in `Backend/.env` (copy from `Backend/.env.example`).
-- **Ports busy** — if you already have something on ports 5180 or 8000, close it
-  and relaunch.
-- **"permission denied" / launcher won't run (macOS)** — the zip may have dropped
-  the executable flag. In Terminal, `cd` into the folder and run:
-  `chmod +x launch.command "Evidence Engine.app/Contents/MacOS/EvidenceEngine"`
+- **Nothing opens, or it sits on "Waiting for services"** — the first run may
+  still be building its Python environment. Give it a few minutes, then close
+  and reopen. If it keeps happening, the log says why:
+  `~/.evidence-engine/launcher.log` and `~/.evidence-engine/backend.log`.
+- **"Another program is using port 8000"** — the app moves to a free port by
+  itself, so this message means it found something answering on its own port
+  that was not the app. Quit and reopen.
+- **"The local engine stopped unexpectedly"** — the backend crashed.
+  `~/.evidence-engine/backend.log` holds the reason.
+- **Local AI model** — handled automatically on first launch. Prefer not to
+  download it? Pick Claude, GPT or Gemini in the sidebar and add an API key
+  through the app's API keys dialog, which stores it in your operating system's
+  keychain.
+- **"permission denied" (macOS, zip download only)** — a zip can drop the
+  executable flag. In Terminal, `cd` into the folder and run:
+  `chmod +x launch.command "Evidence Engine.app/Contents/MacOS/EvidenceEngine"`.
+
+## Running from the source code
+
+Only needed if you are developing the app. A checkout **does** need Node.js and
+Python 3.10+ (`brew install node python`, or
+`winget install OpenJS.NodeJS Python.Python.3.12`).
+
+```bash
+npm install
+npm run dev                  # Vite dev server on http://localhost:5173
+cd Backend && python3 -m uvicorn api:app --reload --port 8000
+```
+
+Or `./run.sh` to serve the built frontend and the API from one process. A
+checkout keeps its environment in `Backend/.venv` and its keys in `Backend/.env`,
+exactly as before.
