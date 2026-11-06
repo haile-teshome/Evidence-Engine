@@ -121,7 +121,19 @@ mkdir -p "$PAYLOAD/runtime/node"
 tar -xzf "$NODE_TGZ" -C "$PAYLOAD/runtime/node" --strip-components=1
 tar -xzf "$PY_TGZ" -C "$PAYLOAD/runtime"          # yields runtime/python/
 BPY="$PAYLOAD/runtime/python/bin/python3"
-"$BPY" -m pip download -r "$PAYLOAD/Backend/requirements.txt" -d "$PAYLOAD/Backend/wheels" >/dev/null
+# On Linux the default torch wheel drags in five CUDA packages (cudnn, nccl,
+# cusparselt, nvshmem, triton) gated on platform_system == "Linux", which do not
+# apply on macOS. That is gigabytes of GPU runtime for a desktop app whose
+# ranker runs on CPU, and it would put the artifact over GitHub's 2 GB
+# per-asset limit. Take torch from the CPU-only index there; PyPI still serves
+# everything else.
+PIP_INDEX_ARGS=()
+if [ "$TARGET" = "linux-x64" ]; then
+  PIP_INDEX_ARGS=(--index-url https://download.pytorch.org/whl/cpu
+                  --extra-index-url https://pypi.org/simple)
+fi
+"$BPY" -m pip download -r "$PAYLOAD/Backend/requirements.txt" \
+  "${PIP_INDEX_ARGS[@]}" -d "$PAYLOAD/Backend/wheels" >/dev/null
 
 echo "==> [7/7] Packaging"
 mkdir -p "$ROOT/dist-bundle"
