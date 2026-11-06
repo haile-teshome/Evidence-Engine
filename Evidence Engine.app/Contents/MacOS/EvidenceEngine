@@ -1,9 +1,20 @@
 #!/bin/bash
-# Self-locating: the project root is three levels up from this executable
-# (Contents/MacOS -> Contents -> Evidence Engine.app -> project root).
-# Keep this .app INSIDE the project folder so it stays portable when shared.
+# Self-locating, and it supports two layouts.
+#
+# Packaged install: the whole app sits inside the bundle at
+# Contents/Resources/app, so the .app is self-contained, can live in
+# /Applications, and can be replaced wholesale to update it. Nothing is written
+# inside the bundle at runtime: the venv, env file and database all live in
+# ~/.evidence-engine.
+#
+# Source checkout: the .app sits inside the project folder, so the project root
+# is three levels up (Contents/MacOS -> Contents -> .app -> project root).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT="$(cd "$HERE/../../.." && pwd)"
+if [ -d "$HERE/../Resources/app" ]; then
+  PROJECT="$(cd "$HERE/../Resources/app" && pwd)"
+else
+  PROJECT="$(cd "$HERE/../../.." && pwd)"
+fi
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 # Prefer the bundled Node runtime (self-contained install); fall back to a

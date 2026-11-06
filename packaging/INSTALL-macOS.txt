@@ -1,0 +1,58 @@
+Evidence Engine for macOS
+=========================
+
+To install
+----------
+1. Drag "Evidence Engine" onto the Applications folder in this window.
+2. Open your Applications folder and double-click Evidence Engine.
+
+
+The first time you open it
+--------------------------
+macOS will say the developer cannot be verified. That is because this build is
+not signed by an Apple-registered developer, not because anything is wrong with
+it. You only have to get past this once.
+
+Either:
+
+  - Control-click (or right-click) Evidence Engine in Applications, choose
+    Open, and then click Open in the dialog that appears.
+
+Or, if you are not offered an Open button:
+
+  - Open System Settings, go to Privacy & Security, scroll to the bottom, and
+    click "Open Anyway" next to Evidence Engine. You may be asked for your
+    password.
+
+After that it opens normally from the Dock or Applications like any other app.
+
+
+What happens on first launch
+----------------------------
+It sets itself up, which takes a few minutes on a normal connection:
+
+  - builds its own private Python environment from files inside the app, with
+    no internet needed for that part
+  - installs Ollama and downloads the local AI model, about 4 GB
+
+Everything after that starts in a few seconds. The app window opens by itself
+when it is ready. Closing the window shuts the whole thing down.
+
+No account, no sign-up and no API keys are needed. The default model runs on
+your own machine, so your articles and decisions are not sent anywhere.
+
+
+Where your work is kept
+-----------------------
+In your home folder, in a folder called ".evidence-engine", NOT inside the app.
+That holds your reviews, projects, screening decisions and cached article text.
+
+Because of that you can replace the app with a newer version and keep
+everything: drag the new one into Applications over the old one.
+
+
+To uninstall
+------------
+Drag Evidence Engine from Applications to the Trash. To remove your reviews as
+well, also delete the ".evidence-engine" folder in your home folder. (In Finder,
+press Command-Shift-G and enter ~/.evidence-engine to find it.)
