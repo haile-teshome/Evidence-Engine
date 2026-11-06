@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Evidence Engine</title>
+<meta name="description" content="A systematic review assistant that runs on your own computer. Search, screen, extract and report, with no account and no data leaving your machine.">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #ffffff;
+    --bg-soft: #f6f8f7;
+    --fg: #15201d;
+    --fg-soft: #5a6b66;
+    --line: #dde5e2;
+    --brand: #1a4b42;
+    --brand-deep: #0c302a;
+    --brand-ink: #ffffff;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1513;
+      --bg-soft: #141d1a;
+      --fg: #e8efec;
+      --fg-soft: #9aaba6;
+      --line: #25322e;
+      --brand: #2f7c6d;
+      --brand-deep: #1a4b42;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1513; --bg-soft: #141d1a; --fg: #e8efec; --fg-soft: #9aaba6;
+    --line: #25322e; --brand: #2f7c6d; --brand-deep: #1a4b42;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 16px 72px; }
+
+  header { padding: 56px 0 8px; display: flex; align-items: center; gap: 14px; }
+  header img { width: 52px; height: 52px; border-radius: 13px; display: block; }
+  header h1 { font-size: 1.6rem; margin: 0; letter-spacing: -0.01em; }
+
+  h2 { font-size: 1.15rem; margin: 40px 0 12px; letter-spacing: -0.01em; }
+  h3 { font-size: 0.98rem; margin: 20px 0 6px; }
+  p { margin: 0 0 12px; }
+  a { color: var(--brand); }
+  @media (prefers-color-scheme: dark) { a { color: #6ec0ae; } }
+  code, kbd {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.88em; background: var(--bg-soft); border: 1px solid var(--line);
+    border-radius: 5px; padding: 1px 5px;
+  }
+
+  /* Download */
+  .dl { margin-top: 28px; }
+  .btns { display: grid; gap: 10px; }
+  @media (min-width: 600px) { .btns { grid-template-columns: 1fr 1fr; } }
+  .btn {
+    display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    background: var(--brand); color: var(--brand-ink); text-decoration: none;
+    padding: 14px 18px; border-radius: var(--radius); border: 1px solid transparent;
+  }
+  .btn:hover { background: var(--brand-deep); }
+  .btn-title { font-weight: 600; font-size: 1.02rem; }
+  .btn-sub { font-weight: 400; opacity: 0.82; font-size: 0.85rem; }
+  .meta { color: var(--fg-soft); font-size: 0.87rem; margin-top: 12px; }
+  .pending {
+    border: 1px dashed var(--line); border-radius: var(--radius);
+    padding: 22px; color: var(--fg-soft); background: var(--bg-soft);
+  }
+
+  .card {
+    background: var(--bg-soft); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 18px; margin: 14px 0;
+  }
+  ol, ul { margin: 0 0 12px; padding-left: 22px; }
+  li { margin: 4px 0; }
+  .muted { color: var(--fg-soft); }
+  footer {
+    border-top: 1px solid var(--line); margin-top: 48px; padding-top: 18px;
+    color: var(--fg-soft); font-size: 0.88rem;
+  }
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <img src="logo.svg" alt="">
+    <h1>Evidence Engine</h1>
+  </header>
+
+  <!-- Filled in from the latest GitHub release. -->
+  <section class="dl" id="dl">
+    <div class="pending" id="pending">Looking for the latest version&hellip;</div>
+
+    <div id="ready" class="hide">
+      <div class="btns" id="btns"></div>
+      <p class="meta" id="meta"></p>
+    </div>
+
+    <div class="pending hide" id="none">
+      <strong>No release published yet.</strong>
+      <p style="margin:8px 0 0">
+        The first build is being prepared. In the meantime the source is on
+        <a href="https://github.com/haile-teshome/Evidence-Engine">GitHub</a>.
+      </p>
+    </div>
+  </section>
+
+  <h2>Installing</h2>
+
+  <div class="card" id="card-mac">
+    <h3>macOS</h3>
+    <ol>
+      <li>Open the downloaded <code>.dmg</code> and drag <strong>Evidence Engine</strong> onto <strong>Applications</strong>.</li>
+      <li>Open your Applications folder, then <strong>control-click</strong> (or right-click)
+          Evidence Engine and choose <strong>Open</strong>. Click <strong>Open</strong> again.</li>
+      <li>If you are not offered an Open button, go to <strong>System Settings &rarr;
+          Privacy &amp; Security</strong>, scroll to the bottom, and click
+          <strong>Open Anyway</strong>.</li>
+    </ol>
+    <p class="muted" style="margin:10px 0 0">
+      After that it opens normally from the Dock. Still refusing? In Terminal:
+      <code>xattr -dr com.apple.quarantine "/Applications/Evidence Engine.app"</code>
+    </p>
+  </div>
+
+  <div class="card" id="card-win">
+    <h3>Windows</h3>
+    <ol>
+      <li>Run the downloaded <code>Setup.exe</code>.</li>
+      <li>On the blue SmartScreen box, click <strong>More info</strong>, then
+          <strong>Run anyway</strong>.</li>
+      <li>Open <strong>Evidence Engine</strong> from the Start Menu.</li>
+    </ol>
+    <p class="muted" style="margin:10px 0 0">
+      It installs for your user only, so it never asks for an administrator password.
+    </p>
+  </div>
+
+  <div class="card" id="card-linux">
+    <h3>Linux</h3>
+    <ol>
+      <li>Unzip the download anywhere.</li>
+      <li>Run <code>./launch.sh</code> from that folder.</li>
+    </ol>
+  </div>
+
+  <footer>
+    <p>
+      <a href="https://github.com/haile-teshome/Evidence-Engine">Source on GitHub</a>
+      &nbsp;&middot;&nbsp;
+      <a href="https://github.com/haile-teshome/Evidence-Engine/releases">All releases</a>
+      &nbsp;&middot;&nbsp;
+      MIT licensed
+    </p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var REPO = "haile-teshome/Evidence-Engine";
+
+  // Which asset is which. Matched against the asset filename.
+  var KINDS = [
+    { id: "mac-arm", test: /darwin-arm64.*\.dmg$/i, title: "Download for Mac",
+      sub: "Apple Silicon (M1 and later)", os: "mac" },
+    { id: "mac-x64", test: /darwin-x64.*\.dmg$/i, title: "Download for Mac",
+      sub: "Intel", os: "mac" },
+    { id: "win",     test: /win-x64.*Setup\.exe$/i, title: "Download for Windows",
+      sub: "Windows 10 and 11, 64-bit", os: "win" },
+    { id: "linux",   test: /linux-x64.*\.zip$/i, title: "Download for Linux",
+      sub: "64-bit", os: "linux" }
+  ];
+
+  function platform() {
+    var ua = navigator.userAgent || "";
+    if (/Windows/i.test(ua)) return "win";
+    if (/Mac OS X|Macintosh/i.test(ua)) return "mac";
+    if (/Linux|X11/i.test(ua) && !/Android/i.test(ua)) return "linux";
+    return "";
+  }
+
+  // Safari and Chrome report "Intel Mac OS X" on every Mac, Apple Silicon
+  // included, because Apple froze the user agent. The GPU name is the only
+  // hint available to a web page, and it is a hint, not a guarantee, which is
+  // why both Mac builds stay visible below.
+  function appleSilicon() {
+    try {
+      var gl = document.createElement("canvas").getContext("webgl");
+      if (!gl) return false;
+      var ext = gl.getExtension("WEBGL_debug_renderer_info");
+      if (!ext) return false;
+      return /apple\s?m\d/i.test(String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)));
+    } catch (e) { return false; }
+  }
+
+  function show(id) { var e = document.getElementById(id); if (e) e.classList.remove("hide"); }
+  function hide(id) { var e = document.getElementById(id); if (e) e.classList.add("hide"); }
+
+  function render(rel) {
+    var found = [];
+    (rel.assets || []).forEach(function (a) {
+      KINDS.forEach(function (k) {
+        if (k.test.test(a.name)) {
+          found.push({ kind: k, url: a.browser_download_url });
+        }
+      });
+    });
+    if (!found.length) { hide("pending"); show("none"); return; }
+
+    // Order so the build for this machine comes first, but every build is a
+    // button of the same size: the Mac architecture check is a guess, and a
+    // wrong guess must not hide the right download.
+    var os = platform();
+    var wantArm = os === "mac" ? appleSilicon() : false;
+    function rank(f) {
+      if (f.kind.os !== os) return 2;
+      if (os !== "mac") return 0;
+      return f.kind.id === (wantArm ? "mac-arm" : "mac-x64") ? 0 : 1;
+    }
+    found.sort(function (a, b) { return rank(a) - rank(b); });
+
+    var box = document.getElementById("btns");
+    box.innerHTML = "";
+    found.forEach(function (f) {
+      var a = document.createElement("a");
+      a.className = "btn";
+      a.href = f.url;
+      var t = document.createElement("span");
+      t.className = "btn-title";
+      t.appendChild(document.createTextNode(f.kind.title));
+      var sub = document.createElement("span");
+      sub.className = "btn-sub";
+      sub.appendChild(document.createTextNode(f.kind.sub));
+      a.appendChild(t);
+      a.appendChild(sub);
+      box.appendChild(a);
+    });
+
+    var when = rel.published_at ? new Date(rel.published_at).toLocaleDateString(
+      undefined, { year: "numeric", month: "long", day: "numeric" }) : "";
+    document.getElementById("meta").textContent =
+      (rel.tag_name || "") + (when ? " \u00b7 released " + when : "");
+
+    hide("pending");
+    show("ready");
+  }
+
+  fetch("https://api.github.com/repos/" + REPO + "/releases/latest", {
+    headers: { Accept: "application/vnd.github+json" }
+  })
+    .then(function (r) {
+      if (!r.ok) throw new Error("no release");
+      return r.json();
+    })
+    .then(render)
+    .catch(function () { hide("pending"); show("none"); });
+})();
+</script>
+</body>
+</html>
