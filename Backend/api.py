@@ -20,7 +20,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 
+# A source checkout keeps its own Backend/.env. An installed app cannot write
+# inside itself, so its env file lives beside the database in ~/.evidence-engine.
+# Loaded in that order because python-dotenv does not override what is already
+# set, which keeps a developer's local file authoritative.
 load_dotenv()
+load_dotenv(os.path.join(os.path.expanduser("~"), ".evidence-engine", ".env"))
 
 # IMPORTANT: install the headless shim BEFORE importing utils / data_services
 
@@ -61,7 +66,11 @@ from urllib.parse import quote, urljoin
 # App + CORS
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="Evidence Engine API", version="0.1.0")
+# The version is read from the build stamp (packaged) or package.json (source),
+# so there is one place it is ever edited.
+import updates as _updates  # noqa: E402
+
+app = FastAPI(title="Evidence Engine API", version=_updates.current_version())
 
 # Local persistence (sessions + multi-reviewer projects), backed by SQLite, so the
 # app needs no external service.
@@ -6193,6 +6202,21 @@ def reproducibility():
                  "seed, so those are best-effort. Hosted models can also change weights "
                  "silently; local pinned models (by digest) cannot."),
     }
+
+
+@app.get("/api/version")
+def version():
+    return {"version": _updates.current_version()}
+
+
+@app.get("/api/update")
+def update(force: bool = False):
+    """Advisory: is a newer release published? Never fails the request.
+
+    Answered from a once-a-day disk cache, so this is cheap enough for the app
+    to ask on every load. `force` skips the cache for a manual re-check.
+    """
+    return _updates.check(force=force)
 
 
 @app.get("/api/health")

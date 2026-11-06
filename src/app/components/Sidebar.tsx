@@ -15,6 +15,7 @@ import { subscribeDbKeys, hasDbKey, type DbSource } from "../lib/dbKeys";
 import { ApiKeysDialog } from "./ApiKeysDialog";
 import { useStore, PageId } from "../lib/store";
 import { SessionsPanel } from "./SessionsPanel";
+import { UpdateBanner } from "./UpdateBanner";
 
 const TASK_LABEL: Record<string, string> = {
   "home-analysis": "Strategy analysis",
@@ -267,6 +268,8 @@ export function Sidebar() {
 
       {/* Scrollable region: sessions, model, databases, local PDFs. */}
       <div className="flex-1 overflow-y-auto border-t px-4 pt-3 pb-4">
+        <UpdateBanner />
+
         <div className="mb-3">
           <SessionsPanel />
         </div>
