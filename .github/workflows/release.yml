@@ -53,10 +53,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # macos-13 was retired in December 2025 and macos-14 went fully
+          # unsupported on 2 November 2026; jobs pinned to either are cancelled
+          # within a second, with no runner ever assigned and no steps run.
+          # macos-15-intel is the last Intel image, available until about
+          # August 2027, after which Intel Macs cannot be built on hosted runners.
           - target: darwin-arm64
-            runner: macos-14          # Apple Silicon
+            runner: macos-15          # Apple Silicon
           - target: darwin-x64
-            runner: macos-13          # Intel
+            runner: macos-15-intel    # Intel
           - target: linux-x64
             runner: ubuntu-latest
           - target: win-x64
