@@ -20,7 +20,10 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-PY=Backend/.venv/bin/python
+# Either location: a source checkout builds Backend/.venv, while the packaged
+# launcher builds it outside the app so updates can replace the app wholesale.
+PY="$PWD/Backend/.venv/bin/python"
+[ -x "$PY" ] || PY="$HOME/.evidence-engine/venv/bin/python"
 [ -x "$PY" ] || { echo "No Python environment yet. Run ./setup.sh first."; exit 1; }
 
 if [ "$REBUILD" = 1 ] || [ ! -f dist/index.html ]; then
@@ -37,4 +40,4 @@ fi
 
 echo "Evidence Engine → http://localhost:$PORT"
 cd Backend
-exec ./.venv/bin/python -m uvicorn api:app --host 127.0.0.1 --port "$PORT"
+exec "$PY" -m uvicorn api:app --host 127.0.0.1 --port "$PORT"

@@ -15,26 +15,58 @@ import { fileURLToPath } from "node:url";
 
 const PROJECT = path.dirname(fileURLToPath(import.meta.url));
 const BACKEND_DIR = path.join(PROJECT, "Backend");
-const FRONTEND_PORT = 5180;
+// Both ports are PREFERENCES, not requirements. Anything already listening on
+// 5180 (a dev `vite preview`, another app) used to make the launcher wait 60 s
+// and then exit with no window at all, which looks exactly like the app being
+// broken. Both now shift to the next free port instead.
+// The backend side is pinned to ONE address. uvicorn binds 127.0.0.1 by default
+// while "localhost" resolves to ::1 first here, so the health probe, the proxy and
+// the server could each end up on a different address family of the same port.
+// (The app window deliberately stays on localhost: that is its browser origin, and
+// changing it would discard whatever the app has stored there.)
+const LOCAL = "127.0.0.1";
+const FRONTEND_PORT_PREF = 5180;
+let FRONTEND_PORT = FRONTEND_PORT_PREF;
 let BACKEND_PORT = 8000;   // resolved at startup; may shift if 8000 is taken by a foreign process
-const APP_URL = `http://localhost:${FRONTEND_PORT}/`;
-// The window is opened at this URL: the `?new=1` flag tells the app a fresh
-// launch happened so it starts on Home with a new session instead of restoring
-// the last one (an in-app refresh has no flag and still restores). Health checks
-// use the bare APP_URL.
-const APP_LAUNCH_URL = `${APP_URL}?new=1`;
+// Recomputed once the frontend port is known. The `?new=1` flag on the launch URL
+// tells the app a fresh launch happened so it starts on Home with a new session
+// instead of restoring the last one (an in-app refresh has no flag and still
+// restores). Health checks use the bare appUrl().
+const appUrl = () => `http://localhost:${FRONTEND_PORT}/`;
+const appLaunchUrl = () => `${appUrl()}?new=1`;
 const IS_WIN = process.platform === "win32";
 const OLLAMA_URL = "http://localhost:11434/";
 const EE_CACHE = path.join(os.homedir(), ".evidence-engine");     // downloaded tools
 const LOCK_FILE = path.join(EE_CACHE, "launcher.pid");            // single-instance guard
+const LOG_FILE = path.join(EE_CACHE, "launcher.log");             // what this run did
+const BACKEND_LOG = path.join(EE_CACHE, "backend.log");           // the backend's own output
+try { fs.mkdirSync(EE_CACHE, { recursive: true }); } catch { /* exists */ }
 const DEFAULT_MODEL = "hf.co/mradermacher/leads-mistral-7b-v1-GGUF";  // default local screener
 
 const started = [];               // child processes we spawned (to clean up)
+// Set when the backend process exits by itself. Everything the app asks of /api
+// then gets a clear 503 instead of a dead socket, so the UI can explain itself.
+let backendFailure = null;
+let shuttingDown = false;         // suppresses the failure notice during a normal quit
 let heldWindow = null;            // the Chrome child — kept referenced so Node
                                   // (v22) doesn't GC and tear it down mid-run.
 let cleaned = false;
 
-function log(m) { process.stdout.write(m + "\n"); }
+// The .app starts us with stdout pointed at /dev/null, so stdout alone left no
+// trace of what a launch did. Everything is mirrored into LOG_FILE, which is the
+// file the failure messages tell people to read.
+function log(m) {
+  process.stdout.write(m + "\n");
+  try { fs.appendFileSync(LOG_FILE, "[" + new Date().toISOString() + "] " + m + "\n"); } catch { /* best effort */ }
+}
+
+// Fresh backend.log per run, handed to the child as its stdout/stderr.
+function openBackendLog() {
+  try {
+    fs.writeFileSync(BACKEND_LOG, "[" + new Date().toISOString() + "] backend starting\n");
+    return fs.openSync(BACKEND_LOG, "a");
+  } catch { return null; }
+}
 
 function httpOk(url) {
   return new Promise((resolve) => {
@@ -51,7 +83,7 @@ function httpOk(url) {
 // gone / stuck on Starting engine" bug).
 function isOurBackend(port) {
   return new Promise((resolve) => {
-    const req = http.get(`http://localhost:${port}/api/health`, (res) => {
+    const req = http.get(`http://${LOCAL}:${port}/api/health`, (res) => {
       if (res.statusCode !== 200) { res.resume(); return resolve(false); }
       let body = "";
       res.on("data", (c) => { body += c; if (body.length > 4096) req.destroy(); });
@@ -62,14 +94,50 @@ function isOurBackend(port) {
   });
 }
 
-// Resolve if a TCP port is free to bind on localhost.
-function portFree(port) {
+// True if we can open a TCP connection to this port, i.e. something is already
+// serving it.
+function connectable(port, host) {
+  return new Promise((resolve) => {
+    const s = net.connect({ port, host });
+    const done = (v) => { s.destroy(); resolve(v); };
+    s.once("connect", () => done(true));
+    s.once("error", () => done(false));
+    s.setTimeout(1000, () => done(false));
+  });
+}
+
+// Checked on both address families: a listener bound to only one of them (a
+// `vite preview` on ::1, a `python3 -m http.server` on 0.0.0.0) still owns the
+// port number as far as the app is concerned.
+async function portBusy(port) {
+  const [v4, v6] = await Promise.all([connectable(port, "127.0.0.1"), connectable(port, "::1")]);
+  return v4 || v6;
+}
+
+// A port is usable only if nobody is serving it AND we can bind it. Binding on
+// its own is not a valid test: on macOS a bind to 127.0.0.1 succeeds even while
+// another process serves the same port on 0.0.0.0, so the launcher would adopt a
+// foreign server's port and then proxy the app's /api calls straight to it. That
+// is how a stray `python3 -m http.server` came to answer "501 Unsupported method
+// ('POST')" inside the app.
+async function portFree(port, host = LOCAL) {
+  if (await portBusy(port)) return false;
   return new Promise((resolve) => {
     const srv = net.createServer();
     srv.once("error", () => resolve(false));
     srv.once("listening", () => srv.close(() => resolve(true)));
-    srv.listen(port, "localhost");
+    srv.listen({ port, host, exclusive: true });
   });
+}
+
+// Pick the port the app window is served on: the preferred one when free, else the
+// next free port. Without this a foreign listener on 5180 stops the app starting.
+async function pickFrontendPort() {
+  if (await portFree(FRONTEND_PORT_PREF, "localhost")) return FRONTEND_PORT_PREF;
+  for (let p = FRONTEND_PORT_PREF + 1; p < FRONTEND_PORT_PREF + 40; p++) {
+    if (await portFree(p, "localhost")) return p;
+  }
+  return 0;   // let the OS choose; serveFrontend reports the bound port
 }
 
 // Pick the backend port: reuse ours if already running, else the default if free,
@@ -100,7 +168,13 @@ async function waitHealthy(urls, timeoutSec) {
   return false;
 }
 
-const VENV_DIR = path.join(BACKEND_DIR, ".venv");
+// Mutable state must never live inside the app bundle. An installed app (in
+// /Applications, or Program Files) is not the user's to write into, and
+// replacing the app to update it would discard the venv along with it. A source
+// checkout keeps using Backend/.venv when it already exists, so run.sh,
+// setup.sh and the test suite are unaffected.
+const DEV_VENV = path.join(BACKEND_DIR, ".venv");
+const VENV_DIR = fs.existsSync(DEV_VENV) ? DEV_VENV : path.join(EE_CACHE, "venv");
 const VENV_PY = IS_WIN
   ? path.join(VENV_DIR, "Scripts", "python.exe")
   : path.join(VENV_DIR, "bin", "python");
@@ -151,11 +225,14 @@ function venvHasDeps() {
   return dep.status === 0;
 }
 
-// Create Backend/.env on first run so the user never has to. No API keys are
+// Create the env file on first run so the user never has to. No API keys are
 // required for the default local model; the only useful value is a real contact
 // email for NCBI/PubMed + Unpaywall, which we auto-fill from git if available.
+// Written beside the database rather than into the app, for the same reason as
+// the venv: an installed app is read-only and gets replaced wholesale.
 function ensureBackendEnv() {
-  const envPath = path.join(BACKEND_DIR, ".env");
+  const devEnv = path.join(BACKEND_DIR, ".env");
+  const envPath = fs.existsSync(devEnv) ? devEnv : path.join(EE_CACHE, ".env");
   const examplePath = path.join(BACKEND_DIR, ".env.example");
   if (fs.existsSync(envPath) || !fs.existsSync(examplePath)) return;
   try {
@@ -165,7 +242,7 @@ function ensureBackendEnv() {
       content = content.replace(/^ENTREZ_EMAIL=.*$/m, `ENTREZ_EMAIL=${gitEmail}`);
     }
     fs.writeFileSync(envPath, content);
-    log("Created Backend/.env (no API keys needed — the default model runs locally).");
+    log(`Created ${envPath} (no API keys needed: the default model runs locally).`);
   } catch { /* ignore — the backend falls back to built-in defaults */ }
 }
 
@@ -386,10 +463,44 @@ function serveFrontend(distDir, port) {
   const server = http.createServer((req, res) => {
     if (req.url.startsWith("/api")) {
       const up = http.request(
-        { host: "localhost", port: BACKEND_PORT, path: req.url, method: req.method, headers: req.headers },
-        (r) => { res.writeHead(r.statusCode || 502, r.headers); r.pipe(res); },
+        { host: LOCAL, port: BACKEND_PORT, path: req.url, method: req.method, headers: req.headers },
+        (r) => {
+          // Only our backend may answer /api. Another program holding the port
+          // replies with its own pages, and relaying those put raw HTML (such as
+          // http.server's "501 Unsupported method ('POST')") inside the app
+          // instead of a message it could act on. uvicorn always names itself in
+          // the Server header, so anything else is reported as a failure.
+          if (!/uvicorn/i.test(String(r.headers.server || ""))) {
+            r.resume();
+            res.writeHead(503, { "content-type": "application/json" });
+            res.end(JSON.stringify({
+              detail: "Another program is using port " + BACKEND_PORT + ", so the local engine is not "
+                    + "the thing answering on it. Quit Evidence Engine and open it again to move to a free port.",
+              state: "failed", port: BACKEND_PORT, log: LOG_FILE,
+            }));
+            return;
+          }
+          res.writeHead(r.statusCode || 502, r.headers);
+          r.pipe(res);
+        },
       );
-      up.on("error", () => { if (!res.headersSent) res.writeHead(502); res.end("backend not ready"); });
+      up.on("error", () => {
+        if (res.headersSent) { res.end(); return; }
+        // JSON either way: the app parses /api answers, and a plain-text body made
+        // a readable "still starting" state look like a hard failure.
+        if (backendFailure) {
+          res.writeHead(503, { "content-type": "application/json" });
+          res.end(JSON.stringify({
+            detail: "The local engine stopped unexpectedly. Quit and reopen Evidence Engine; "
+                  + "if it keeps happening, the log says why.",
+            state: "failed", exit_code: backendFailure.code, signal: backendFailure.signal,
+            log: backendFailure.log,
+          }));
+        } else {
+          res.writeHead(503, { "content-type": "application/json", "retry-after": "2" });
+          res.end(JSON.stringify({ detail: "The local engine is still starting.", state: "starting" }));
+        }
+      });
       req.pipe(up);
       return;
     }
@@ -408,7 +519,12 @@ function serveFrontend(distDir, port) {
     });
   });
   server.on("error", (e) => log("Frontend server error: " + e.message));
-  server.listen(port, "localhost");
+  server.listen({ port, host: "localhost", exclusive: true }, () => {
+    const bound = server.address();
+    if (bound && typeof bound === "object" && bound.port !== FRONTEND_PORT) {
+      FRONTEND_PORT = bound.port;   // the OS picked it; health checks and the window follow
+    }
+  });
   return server;
 }
 
@@ -485,15 +601,28 @@ async function appPageCount() {
 // so it's reliable even for a Finder/Dock launch where localhost probes can be
 // flaky — that flakiness is what let a second click fall through and open a
 // stray blank window.
+// Line 1 is the pid. Line 2, once the port is settled, is the URL the app is
+// served at: a later launch reads it to re-open the window on a machine with no
+// Chromium browser, where there is no DevTools port to activate.
+function lockLines() {
+  try { return fs.readFileSync(LOCK_FILE, "utf8").split("\n"); } catch { return []; }
+}
 function launcherLockAlive() {
   try {
-    const pid = parseInt(fs.readFileSync(LOCK_FILE, "utf8").trim(), 10);
+    const pid = parseInt((lockLines()[0] || "").trim(), 10);
     if (pid && pid !== process.pid) { process.kill(pid, 0); return true; }   // throws if dead
   } catch { /* missing, stale, or dead pid */ }
   return false;
 }
-function writeLock() {
-  try { fs.mkdirSync(EE_CACHE, { recursive: true }); fs.writeFileSync(LOCK_FILE, String(process.pid)); } catch { /* ignore */ }
+function lockAppUrl() {
+  const url = (lockLines()[1] || "").trim();
+  return /^http:\/\/(localhost|127\.0\.0\.1):\d+\/?$/.test(url) ? url : "";
+}
+function writeLock(url) {
+  try {
+    fs.mkdirSync(EE_CACHE, { recursive: true });
+    fs.writeFileSync(LOCK_FILE, url ? `${process.pid}\n${url}\n` : String(process.pid));
+  } catch { /* ignore */ }
 }
 function clearLock() {
   try {
@@ -507,11 +636,21 @@ function clearLock() {
 async function focusExistingWindow() {
   try {
     const res = await fetch(`http://localhost:${DEBUG_PORT}/json`);
-    if (!res.ok) return;
-    const list = await res.json();
-    const page = (list || []).find((t) => t.type === "page");
-    if (page && page.id) await fetch(`http://localhost:${DEBUG_PORT}/json/activate/${page.id}`).catch(() => {});
-  } catch { /* ignore */ }
+    if (res.ok) {
+      const list = await res.json();
+      const page = (list || []).find((t) => t.type === "page");
+      if (page && page.id) {
+        await fetch(`http://localhost:${DEBUG_PORT}/json/activate/${page.id}`).catch(() => {});
+        return;
+      }
+    }
+  } catch { /* no app-window Chrome listening on the debug port */ }
+  // With no Chromium browser the window is an ordinary browser tab, which the
+  // user may simply have closed, and there is no DevTools port to activate.
+  // Re-open the recorded URL instead. Without this, clicking the icon again did
+  // nothing at all and the app looked dead until the launcher was killed by hand.
+  const url = lockAppUrl();
+  if (url) openDefaultBrowser(url);
 }
 
 // True if an Evidence Engine window is already open. Primary signal is a live
@@ -524,7 +663,7 @@ async function alreadyOpen() {
     if ((await appPageCount()) >= 1) return true;
     await sleep(200);
   }
-  if ((await httpOk(APP_URL)) && appWindowAlive()) return true;
+  if ((await httpOk(appUrl())) && appWindowAlive()) return true;
   return false;
 }
 
@@ -585,6 +724,7 @@ async function reclaimFromPriorInstances() {
 function cleanup(code = 0) {
   if (cleaned) return;
   cleaned = true;
+  shuttingDown = true;   // a child exiting now is us quitting, not a crash
   log("\nShutting down Evidence Engine...");
   for (const c of started) killChild(c);
   // Also kill the app-window Chrome instance itself — on macOS it lingers
@@ -639,8 +779,25 @@ async function main() {
       cleanup(1); return;
     }
     log(`Starting backend on :${BACKEND_PORT}...`);
-    const b = spawn(backendPy, ["-m", "uvicorn", "api:app", "--app-dir", BACKEND_DIR, "--port", String(BACKEND_PORT)], spawnOpts);
+    // --host pins the backend to the address the proxy and health probe use, and
+    // its output is captured so a crash can actually be diagnosed afterwards.
+    const blog = openBackendLog();
+    const b = spawn(backendPy,
+      ["-m", "uvicorn", "api:app", "--app-dir", BACKEND_DIR, "--host", LOCAL, "--port", String(BACKEND_PORT)],
+      blog === null ? spawnOpts : { ...spawnOpts, stdio: ["ignore", blog, blog] });
     started.push(b);
+    // If the backend exits on its own the app would otherwise sit on "the local
+    // engine is still starting" forever. Record it so /api answers explain the
+    // failure and point at the log instead of timing out silently.
+    b.on("exit", (code, signal) => {
+      if (shuttingDown) return;
+      backendFailure = {
+        code, signal,
+        log: BACKEND_LOG,
+        at: new Date().toISOString(),
+      };
+      log(`The backend stopped unexpectedly (exit ${code ?? signal}). The app window will say so.`);
+    });
   }
 
   // 3) frontend — serve the prebuilt production build with a tiny built-in static
@@ -666,6 +823,7 @@ async function main() {
     log("No frontend build (dist/) found and no build toolchain available."); cleanup(1); return;
   }
   {
+    FRONTEND_PORT = await pickFrontendPort();
     log(`Serving the app on :${FRONTEND_PORT}...`);
     serveFrontend(path.join(PROJECT, "dist"), FRONTEND_PORT);
   }
@@ -676,8 +834,9 @@ async function main() {
   //    the background while the window is already on screen. The app shows a
   //    "starting the local engine" indicator until the backend answers. This is
   //    what makes Evidence Engine appear fast instead of waiting on imports.
-  const ok = await waitHealthy([APP_URL], 60);
+  const ok = await waitHealthy([appUrl()], 60);
   if (!ok) { log("Frontend did not come up in time."); cleanup(1); return; }
+  writeLock(appUrl());   // the port is settled, so a later launch can find this window
 
   // 5) open in its own window and wait; closing it shuts everything down
   clearStaleProfileLock();   // recover from any previous unclean exit
@@ -686,7 +845,7 @@ async function main() {
   if (browser) {
     log("Opening Evidence Engine — CLOSE THE APP WINDOW to shut everything down.");
     const win = spawn(browser, [
-      `--app=${APP_LAUNCH_URL}`,
+      `--app=${appLaunchUrl()}`,
       `--user-data-dir=${APP_PROFILE}`,
       `--remote-debugging-port=${DEBUG_PORT}`,
       "--no-first-run", "--no-default-browser-check",
@@ -701,7 +860,7 @@ async function main() {
       "--enable-accelerated-2d-canvas",
     ], { stdio: "ignore" });
     heldWindow = win;   // keep a live reference so the child isn't garbage-collected
-    win.on("error", () => { openDefaultBrowser(APP_LAUNCH_URL); keepAlive(); });
+    win.on("error", () => { openDefaultBrowser(appLaunchUrl()); keepAlive(); });
     if (IS_WIN) {
       // Windows: rely on the child's exit (handoff-aware), as before.
       const openedAt = Date.now();
@@ -724,7 +883,7 @@ async function main() {
       monitorWindow();
     }
   } else {
-    openDefaultBrowser(APP_LAUNCH_URL);
+    openDefaultBrowser(appLaunchUrl());
     keepAlive();
   }
 
@@ -739,7 +898,7 @@ async function main() {
 // and pull the default screening model. Nothing here blocks the app window.
 async function warmUp() {
   // Backend is already starting; give it time to finish importing heavy deps.
-  for (let i = 0; i < 180 && !(await httpOk(`http://localhost:${BACKEND_PORT}/api/health`)); i++) await sleep(1000);
+  for (let i = 0; i < 180 && !(await isOurBackend(BACKEND_PORT)); i++) await sleep(1000);
 
   // Ollama powers the default local (private) screening model. Fully automatic:
   // install it if missing, start it, and pull the default model in the background.
@@ -762,7 +921,7 @@ async function warmUp() {
 }
 
 function keepAlive() {
-  log(`\nEvidence Engine is running at ${APP_URL}`);
+  log(`\nEvidence Engine is running at ${appUrl()}`);
   log(">>> Press Ctrl-C in this window to shut everything down. <<<");
   setInterval(() => {}, 1 << 30);   // stay alive until SIGINT
 }
