@@ -285,6 +285,28 @@ function ensureBackendPython() {
   return venvHasDeps() ? VENV_PY : null;
 }
 
+// Docling downloads its layout and table models from Hugging Face the first time
+// it reads a document. Doing that here, once, in the background, means the first
+// scanned PDF a reviewer opens is read straight away, and the app keeps working
+// with no network afterwards. The marker file is what keeps it to once: the
+// models live in the Hugging Face cache, which this launcher does not own.
+const DOCLING_MARK = path.join(EE_CACHE, "docling-models-fetched");
+
+function warmDocling(venvPy) {
+  if (!venvPy || fs.existsSync(DOCLING_MARK)) return;
+  const code = "from docling.document_converter import DocumentConverter; DocumentConverter()";
+  const p = spawn(venvPy, ["-c", code], { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
+  started.push(p);
+  p.on("exit", (status) => {
+    if (status === 0) {
+      log("Document reader ready (scanned PDFs can be read).");
+      try { fs.writeFileSync(DOCLING_MARK, new Date().toISOString()); } catch { /* retry next run */ }
+    } else {
+      log(`Document reader models not fetched (exit ${status}); will try again next launch.`);
+    }
+  });
+}
+
 function findChrome() {
   const home = os.homedir();
   let cands = [];
@@ -806,6 +828,8 @@ async function main() {
       openDefaultBrowser("https://www.python.org/downloads/");
       cleanup(1); return;
     }
+    // Nothing here blocks the window: the models are fetched beside the app.
+    warmDocling(backendPy);
     log(`Starting backend on :${BACKEND_PORT}...`);
     // --host pins the backend to the address the proxy and health probe use, and
     // its output is captured so a crash can actually be diagnosed afterwards.
