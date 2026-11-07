@@ -16,6 +16,7 @@ import { render, screen, act, waitFor, fireEvent } from "@testing-library/react"
 import type { ReactNode } from "react";
 
 import { StoreProvider, useStore } from "../../lib/store";
+import { ImportStage, importReason } from "../../lib/importedAt";
 import { setResolverBase } from "../../lib/dbKeys";
 import { HomePage } from "../HomePage";
 import { SimulationPage } from "../SimulationPage";
@@ -107,6 +108,116 @@ beforeEach(() => {
 });
 
 // --------------------------------------------------------------------------
+// An upload carries into every stage, without being counted as work done.
+//
+// The stages are a menu, not a queue: a reviewer who arrives with the studies
+// they have already chosen can use whichever stage they need. That is why an
+// import seeds a row at every stage. The row says plainly that it was not
+// screened here, and the stages have to read it that way, or a reviewer who
+// does want to screen their upload finds the button greyed out and the work
+// apparently already done.
+// --------------------------------------------------------------------------
+
+describe("an imported record", () => {
+  const imported = (stage: ImportStage) => ({
+    paper_id: "p1", Title: "Study p1", Source: "Local PDFs", URL: "", Abstract: "a",
+    Decision: "INCLUDE", Reason: importReason(stage), Agent_Trace: {}, Imported: stage,
+  });
+
+  it("is still offered for abstract screening", () => {
+    const { container } = renderPage(AbstractPage, s => {
+      s.setUniquePapers([paper("p1")] as any);
+      s.setResults([imported("text-extraction")] as any);
+    });
+    expect(container.querySelector('[title^="Screen 1 article"]')).not.toBeNull();
+  });
+
+  it("is still offered for full-text screening", () => {
+    const { container } = renderPage(FullTextPage, s => {
+      s.setResults([imported("text-extraction")] as any);
+      s.setFullTextResults([{ ...imported("text-extraction"), Decision: "Include" }] as any);
+    });
+    expect(container.querySelector('[title^="Screen 1 newly included"]')).not.toBeNull();
+  });
+
+  it("does not make a genuinely screened paper look unscreened", () => {
+    const { container } = renderPage(AbstractPage, s => {
+      s.setUniquePapers([paper("p1")] as any);
+      s.setResults([result("p1", "INCLUDE")] as any);
+    });
+    expect(container.querySelector('[title^="Screen 1 article"]')).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------------
+// Every stage can be started from the reviewer's own studies.
+//
+// A reviewer who screened elsewhere and arrives with 200 PDFs should not have
+// to walk back through the stages they already did. Each stage that reads an
+// earlier one therefore offers its own import, and it has to be offered in the
+// empty state too: that is exactly the state such a reviewer arrives in, and a
+// button that only appears once the stage already has data is no use to them.
+// --------------------------------------------------------------------------
+
+describe.each([
+  ["AbstractPage", AbstractPage],
+  ["AcquisitionPage", AcquisitionPage],
+  ["FullTextPage", FullTextPage],
+  ["ExtractionPage", ExtractionPage],
+  ["TextExtractionPage", TextExtractionPage],
+  ["QualityPage", QualityPage],
+  ["SnowballPage", SnowballPage],
+  ["MetaAnalysisPage", MetaAnalysisPage],
+  ["WritingPage", WritingPage],
+] as [string, () => JSX.Element][])("%s with nothing upstream", (_name, Page) => {
+  it("offers to start from your own studies", () => {
+    const { container } = renderPage(Page);
+    expect(container.textContent ?? "").toMatch(/add (seed )?studies/i);
+  });
+});
+
+// --------------------------------------------------------------------------
+// Starting a new session empties the store under whichever page is open.
+//
+// That is a render with less data than the one before it, so a page that bails
+// out early and then calls another hook runs fewer hooks than React recorded,
+// and React takes the whole app down with "Rendered fewer hooks than expected"
+// (minified #300). Three pages did exactly that. The rule it enforces is that
+// every hook sits above every early return, which no test could catch until
+// something emptied the store with the page still mounted.
+// --------------------------------------------------------------------------
+
+/** Enough of a finished review that every page renders its full body. */
+function seedWholeReview(s: any) {
+  s.setHistory([{ goal: "g", query: "q", formal_question: "fq", ts: 1,
+                  inclusion: ["adults"], exclusion: ["animals"] }] as any);
+  s.setRawPapers([paper("p1")] as any);
+  s.setUniquePapers([paper("p1")] as any);
+  s.setResults([result("p1", "INCLUDE")] as any);
+  s.setFullTexts({
+    p1: { paper_id: "p1", title: "Study p1", url: "", source: "PubMed",
+          status: "found", text: "body" },
+  });
+  // Source matters: the writing stage reads it to enrich citations, and an
+  // undefined one throws out of an effect rather than failing a render.
+  s.setFullTextResults([{ paper_id: "p1", Title: "Study p1", Abstract: "a", URL: "",
+                          Source: "PubMed", Decision: "Include", Reason: "" }] as any);
+  s.setSnowballResults([{ id: "c1", title: "A citation", seed_paper_title: "Study p1",
+                          citation_type: "backward" }] as any);
+  s.setQualityReports([{ paper_id: "p1", title: "Study p1", instrument: "RoB 2",
+                         judgment: "Low", domains: [] }] as any);
+  s.setTextExtractions([{ paper_id: "p1", title: "Study p1", answer: "",
+                          spans: [], evidence: [], values: [] }] as any);
+}
+
+describe.each(PAGES)("%s with the review cleared under it", (_name, Page) => {
+  it("survives a new session", () => {
+    const view = renderPage(Page, seedWholeReview);
+    expect(() => act(() => view.store().reset())).not.toThrow();
+  });
+});
+
+// --------------------------------------------------------------------------
 // Every page renders, empty and populated.
 // --------------------------------------------------------------------------
 
@@ -181,6 +292,20 @@ describe("stage gating", () => {
       counts: { PubMed: 47 }, totalYield: 47, source: "manual",
     } as any);
   };
+
+  it("SimulationPage can be started without a research question", () => {
+    /* A reviewer who already has a search string should be able to tune and
+       count it here rather than being sent back to write a question for it. */
+    const view = renderPage(SimulationPage);
+    expect(view.container.textContent).toMatch(/start a search plan/i);
+
+    const box = view.container.querySelector("textarea")!;
+    fireEvent.change(box, { target: { value: "glioma AND temozolomide" } });
+    fireEvent.click(screen.getByRole("button", { name: /use this query/i }));
+
+    // The planner proper, not the starting card.
+    expect(view.container.textContent).not.toMatch(/start a search plan/i);
+  });
 
   it("SimulationPage shows the run history expanded by default", async () => {
     localStorage.removeItem("ee:planning-history-collapsed");

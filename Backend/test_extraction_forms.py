@@ -31,7 +31,8 @@ class StubAI:
     def __init__(self, model):
         self._model = model
 
-    def get_model(self, _name):
+    def get_model(self, _name, num_ctx=None):
+        self.num_ctx = num_ctx
         return self._model
 
     @staticmethod
@@ -344,3 +345,176 @@ class TestKeychain:
 
         monkeypatch.setattr(keychain, "keyring", Boom)
         keychain.delete_key("openai")
+
+
+class TestFieldGroups:
+    """Asking for a whole imported workbook in one request.
+
+    Measured on a real paper with the local 7B: 40 fields filled 31 of them;
+    183, which is what a Covidence workbook looks like, returned no usable JSON
+    and filled none. The failure is in the answer, not the question: every field
+    costs a value, a source quote and a confidence in the reply, and a reply cut
+    off part-way parses to nothing at all. So the endpoint asks in groups.
+    """
+
+    def _fields(self, n):
+        return [{"id": f"f{i}", "label": f"Field {i}", "type": "text"} for i in range(n)]
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        import api
+        return TestClient(api.app), api
+
+    def test_a_large_form_is_split_into_several_requests(self, monkeypatch):
+        c, api = self._client()
+        seen = []
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            seen.append(len(fields))
+            return {"fields": [{"name": f["name"], "value": "v", "type": "text",
+                                "source_quote": "", "confidence": "low",
+                                "needs_review": True} for f in fields]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 100, "fields": self._fields(60)}).json()
+
+        assert len(seen) > 1, "60 fields went out as one request"
+        assert max(seen) <= api.Config.EXTRACTION_FIELDS_PER_CALL
+        assert len(body["values"]) == 60, "every field has to come back"
+
+    def test_one_failed_group_does_not_empty_the_row(self, monkeypatch):
+        """A partial answer is still an answer: the fields that were read are
+        worth more to the reviewer than a blank row."""
+        c, api = self._client()
+        calls = {"n": 0}
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {"fields": [], "error": "the model did not return usable JSON"}
+            return {"fields": [{"name": f["name"], "value": "v", "type": "text",
+                                "source_quote": "", "confidence": "low",
+                                "needs_review": True} for f in fields]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 100, "fields": self._fields(60)}).json()
+
+        filled = [v for v in body["values"].values() if str(v).strip()]
+        assert filled, "the groups that worked were thrown away"
+        assert "of" in body["error"] and "groups failed" in body["error"]
+
+    def test_every_group_failing_is_reported_as_the_failure_it_is(self, monkeypatch):
+        c, api = self._client()
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            return {"fields": [], "error": "the model did not return usable JSON"}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 100, "fields": self._fields(60)}).json()
+
+        assert body["error"] == "the model did not return usable JSON"
+        assert not [v for v in body["values"].values() if str(v).strip()]
+
+    def test_a_small_form_is_still_one_request(self, monkeypatch):
+        c, api = self._client()
+        seen = []
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            seen.append(len(fields))
+            return {"fields": []}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        c.post("/api/extract/fields", json={"text": "Methods. " * 100, "fields": self._fields(6)})
+        assert seen == [6]
+
+
+class TestMissingModel:
+    """Extraction runs on a general-purpose model whatever the reviewer picked
+    for screening, so it can be one they never downloaded. Saying so costs one
+    request; finding out costs a run of empty rows."""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        import api
+        return TestClient(api.app), api
+
+    def test_it_says_which_model_to_install(self, monkeypatch):
+        c, api = self._client()
+        api._LOCAL_TAGS.update({"at": 0.0, "names": []})
+        monkeypatch.setattr(api, "resolve_for_thinking", lambda m: "qwen2.5:7b")
+
+        class R:
+            def json(self_inner):
+                return {"models": [{"name": "some-other-model:latest"}]}
+
+        monkeypatch.setattr(api.requests, "get", lambda *a, **k: R())
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 60,
+                            "fields": [{"id": "n", "label": "N", "type": "number"}]}).json()
+
+        assert "not installed" in body["error"]
+        assert "ollama pull qwen2.5:7b" in body["error"]
+        assert body["values"] == {}
+
+    def test_an_installed_model_is_not_complained_about(self, monkeypatch):
+        c, api = self._client()
+        api._LOCAL_TAGS.update({"at": 0.0, "names": []})
+        monkeypatch.setattr(api, "resolve_for_thinking", lambda m: "qwen2.5:7b")
+
+        class R:
+            def json(self_inner):
+                return {"models": [{"name": "qwen2.5:7b"}]}
+
+        monkeypatch.setattr(api.requests, "get", lambda *a, **k: R())
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form",
+                            lambda **k: {"fields": [{"name": "n", "value": 272, "type": "number",
+                                                     "source_quote": "", "confidence": "low",
+                                                     "needs_review": True}]})
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 60,
+                            "fields": [{"id": "n", "label": "N", "type": "number"}]}).json()
+
+        assert body["error"] == ""
+        assert body["values"]["n"] == 272
+
+    def test_a_cloud_model_is_never_called_missing(self, monkeypatch):
+        """Nothing local to check, and the keys are a separate question."""
+        c, api = self._client()
+        api._LOCAL_TAGS.update({"at": 0.0, "names": []})
+        monkeypatch.setattr(api, "resolve_for_thinking", lambda m: "claude-3-5-sonnet")
+
+        def boom(*a, **k):
+            raise AssertionError("asked Ollama about a cloud model")
+
+        monkeypatch.setattr(api.requests, "get", boom)
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", lambda **k: {"fields": []})
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 60, "model": "claude-3-5-sonnet",
+                            "fields": [{"id": "n", "label": "N", "type": "number"}]}).json()
+        assert body["error"] == ""
+
+    def test_an_unreachable_ollama_does_not_block_the_run(self, monkeypatch):
+        """If we cannot tell, let the call proceed and fail honestly."""
+        c, api = self._client()
+        api._LOCAL_TAGS.update({"at": 0.0, "names": []})
+        monkeypatch.setattr(api, "resolve_for_thinking", lambda m: "qwen2.5:7b")
+
+        def down(*a, **k):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(api.requests, "get", down)
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", lambda **k: {"fields": []})
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 60,
+                            "fields": [{"id": "n", "label": "N", "type": "number"}]}).json()
+        assert "not installed" not in (body.get("error") or "")

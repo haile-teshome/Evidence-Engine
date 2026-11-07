@@ -5,6 +5,7 @@ import { PrismaChecklist } from "./components/PrismaChecklist";
 import { InterraterReliability } from "./components/InterraterReliability";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { bucketAbstractExclusions, bucketFullTextExclusions } from "./lib/exclusionBucketing";
+import { countImported } from "./lib/importedAt";
 import { Toaster } from "./components/ui/sonner";
 import { StoreProvider, useStore, useSaveStatus } from "./lib/store";
 import { DeferredPage, PageSkeleton } from "./components/DeferredPage";
@@ -231,6 +232,7 @@ function Shell() {
                   <PrismaFlow
                     counts={{
                       identified,
+                      other_sources: countImported(s.results),
                       source_counts: sourceCounts,
                       duplicates_removed: duplicatesRemoved,
                       after_duplicates: afterDuplicates,

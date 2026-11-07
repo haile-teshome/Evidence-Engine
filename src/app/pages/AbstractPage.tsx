@@ -1,6 +1,8 @@
 import { Fragment, useState, useEffect, useMemo } from "react";
 import { usePagedRows } from "../lib/usePagedRows";
 import { ShowMore } from "../components/ShowMore";
+import { ImportStudies } from "../components/ImportStudies";
+import { excludeImported } from "../lib/importedAt";
 import { useStore, resolveInUseRun, ScreeningPlan } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
 import { frameworkOf, labelFor, type FrameworkId } from "../lib/frameworks";
@@ -639,7 +641,10 @@ export function AbstractPage() {
   // Papers in the corpus not yet screened (drives the "Screen new papers"
   // incremental action). Snowballed records already sit in results, so they are
   // correctly excluded from this count.
-  const existingIds = new Set((r || []).map(x => x.paper_id));
+  // excludeImported, not every row: a record seeded by an import says plainly
+  // that it was not screened here, so it is still waiting to be, and "Screen
+  // new" must keep offering it rather than counting it as done.
+  const existingIds = new Set(excludeImported(r || []).map(x => x.paper_id));
   const availableCorpus = (s.uniquePapers || []).filter(p => !s.excludedByQuality.has(p.id));
   const newToScreen = availableCorpus.filter(p => !existingIds.has(p.id)).length;
 
@@ -726,12 +731,18 @@ export function AbstractPage() {
       {!r && !s.uniquePapers && !s.query && (
         <EmptyState icon={Search} title="No research goal yet"
           description="Define your research question and search strategy on the Home page, then come back to screen titles and abstracts."
-          action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }} />
+          action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }}
+          extra={<ImportStudies stage="abstract-screening" />} />
       )}
       {!r && !s.uniquePapers && s.query && (
         <Alert>
-          <AlertDescription>
-            Ready to screen against your PICO. Articles are fetched and deduplicated on demand. Quality Assessment is optional and can be run first from the sidebar.
+          {/* The import belongs here too: a reviewer with their own corpus is
+              ready to screen without fetching anything. */}
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+            <span>
+              Ready to screen against your PICO. Articles are fetched and deduplicated on demand. Quality Assessment is optional and can be run first from the sidebar.
+            </span>
+            <ImportStudies stage="abstract-screening" />
           </AlertDescription>
         </Alert>
       )}
@@ -751,6 +762,7 @@ export function AbstractPage() {
               <InlineStat icon={Clock} value={formatDuration(s.screeningDuration)} label="Time" tone="neutral" />
             </>}
             actions={<>
+              <ImportStudies stage="abstract-screening" />
               {running ? (
                 <Button size="sm" variant="destructive" className="h-8 shadow-sm" onClick={() => s.cancelTask("abstract-screen")} title="Stop screening (keeps the current results)">
                   <X className="size-3.5 mr-1.5" />Cancel

@@ -71,6 +71,10 @@ export type ScreenResult = {
   // Short headline reason. For an exclusion driven by a discriminating element
   // this names it ("Fails Concept"); otherwise it is the model's own label.
   Bucket?: string;
+  // Set when the reviewer imported this record at a later stage rather than
+  // screening it here. PRISMA counts these under "other sources" and the AI
+  // decision log leaves them out. See lib/importedAt.ts.
+  Imported?: import("./importedAt").ImportStage;
 };
 
 export type CriterionEvidence = { decision: "INCLUDE" | "EXCLUDE"; evidence: string; reasoning: string };
@@ -90,6 +94,8 @@ export type FullTextResult = {
   picoEvidence?: PicoEvidence;
   inclusion_score: number;
   exclusion_violations: number;
+  // As on ScreenResult: imported at this stage, not judged here.
+  Imported?: import("./importedAt").ImportStage;
 };
 
 // Legacy type kept exported only because mockServices re-exports it.
@@ -477,13 +483,17 @@ export const AIService = {
       id: string; label: string; type: string; value: any;
       source_quote: string; confidence: "high" | "low" | "none"; needs_review: boolean;
     }[];
+    // Set when the call reached the model and the model's answer was unusable
+    // (most often cut off part-way through). Every field comes back empty in
+    // that case, which otherwise looks like a paper that reports nothing.
+    error?: string;
   }> {
-    const r = await postJSON<{ values: Record<string, any>; fields?: any[] }>(
+    const r = await postJSON<{ values: Record<string, any>; fields?: any[]; error?: string }>(
       "/extract/fields",
       { text, fields, title, tables, model: apiConfig.model },
       signal,
     );
-    return { values: r.values || {}, fields: r.fields || [] };
+    return { values: r.values || {}, fields: r.fields || [], error: r.error || "" };
   },
 
   async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = ""): Promise<ScreenResult> {
@@ -756,6 +766,23 @@ export const AIService = {
     return { retracted: r.retracted || [], checked: r.checked || 0 };
   },
 
+  /** Hand an imported PDF to the backend, so the readers that work on the
+   *  file can run on a paper the reviewer supplied themselves. */
+  async uploadPdf(paperId: string, file: Blob): Promise<void> {
+    const res = await fetch(
+      `${apiConfig.baseUrl}/fulltext/pdf?paper_id=${encodeURIComponent(paperId)}`,
+      { method: "POST", headers: { "Content-Type": "application/pdf", ...keyHeaders() }, body: file },
+    );
+    if (!res.ok) throw new Error(`Upload failed (${res.status})`);
+  },
+
+  /** Have the backend read a PDF the browser could not, OCR included. */
+  async readPdfText(paperId: string): Promise<{ text: string; method: string }> {
+    const r = await postJSON<{ text?: string; method?: string }>(
+      `/fulltext/read?paper_id=${encodeURIComponent(paperId)}`, {});
+    return { text: r.text || "", method: r.method || "none" };
+  },
+
   async extractTables(
     paper: {
       Title: string; URL: string; Source: string;
@@ -763,7 +790,19 @@ export const AIService = {
     },
     signal?: AbortSignal,
   ): Promise<ExtractedTable[]> {
-    const r = await postJSON<{ tables: ExtractedTable[] }>("/extract/tables", {
+    return (await AIService.extractTablesTraced(paper, signal)).tables;
+  },
+
+  /** The same call, with the account of which rungs of the ladder ran. "This
+   *  paper has no tables" and "nothing managed to look" are different answers. */
+  async extractTablesTraced(
+    paper: {
+      Title: string; URL: string; Source: string;
+      paper_id?: string; Abstract?: string; full_text?: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ tables: ExtractedTable[]; tried: string[] }> {
+    const r = await postJSON<{ tables: ExtractedTable[]; tried?: string[] }>("/extract/tables", {
       Title: paper.Title,
       URL: paper.URL,
       Source: paper.Source,
@@ -775,7 +814,7 @@ export const AIService = {
       full_text: paper.full_text || "",
       model: apiConfig.model,
     }, signal);
-    return r.tables || [];
+    return { tables: r.tables || [], tried: r.tried || [] };
   },
 };
 

@@ -17,6 +17,7 @@ import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 import { TaskProgressCard } from "../components/TaskProgressCard";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
+import { ImportStudies } from "../components/ImportStudies";
 
 type SnowballType = "Both" | "Backward (References)" | "Forward (Cited by)";
 
@@ -195,8 +196,18 @@ export function SnowballPage() {
     .filter(r => effectiveFullTextDecision(r, s.fullTextOverrides) === "Include")
     .map(r => ({ paper_id: r.paper_id, Title: r.Title, Abstract: r.Abstract, URL: r.URL }));
 
+  // Above the bail-out, because a hook cannot run conditionally: starting a
+  // new session empties the seeds under a mounted page, and skipping these on
+  // that render is what React reports as "rendered fewer hooks than expected".
+  const results = s.snowballResults;
+  const shown = useMemo(() => (results || [])
+    .filter(p => selectedSeed === null || p.seed_paper_title === selectedSeed)
+    .filter(p => !q.trim() || (p.title || "").toLowerCase().includes(q.toLowerCase())), [results, selectedSeed, q]);
+  const pagedShown = usePagedRows(shown);
+
   if (seeds.length === 0) {
-    return <EmptyState icon={FlaskConical} title="No kept full-text studies yet" description="Keep at least one study at Full-Text Screening (include it, or check its Keep box). Snowballing expands from the kept studies." action={{ label: "Go to Full-Text Screening", onClick: () => s.setPage("fulltext"), icon: FlaskConical }} />;
+    return <EmptyState icon={FlaskConical} title="No kept full-text studies yet" description="Keep at least one study at Full-Text Screening (include it, or check its Keep box). Snowballing expands from the kept studies." action={{ label: "Go to Full-Text Screening", onClick: () => s.setPage("fulltext"), icon: FlaskConical }}
+      extra={<ImportStudies stage="citation-snowball" label="Add seed studies" />} />;
   }
 
   async function start() {
@@ -422,7 +433,6 @@ export function SnowballPage() {
     s.setSnowballResults(null); s.setSnowballScreened(null); s.setSnowballChosen(null);
   }
 
-  const results = s.snowballResults;
   const screened = s.snowballScreened;
 
   // Decision lookup keyed by both id and normalised title, so a citation row
@@ -450,11 +460,6 @@ export function SnowballPage() {
       seedGroups[idx.get(seed)!].items.push(p);
     }
   }
-
-  const shown = useMemo(() => (results || [])
-    .filter(p => selectedSeed === null || p.seed_paper_title === selectedSeed)
-    .filter(p => !q.trim() || (p.title || "").toLowerCase().includes(q.toLowerCase())), [results, selectedSeed, q]);
-  const pagedShown = usePagedRows(shown);
 
   // Flag when the current seed set differs from the one the visible citations
   // were fetched from (after re-running full-text, or switching source), so the
@@ -491,6 +496,7 @@ export function SnowballPage() {
           {results && results.length > 0 && chosen.size > 0 && <InlineStat icon={CheckCircle2} tone="success" value={chosen.size} label="Selected" />}
         </>}
         actions={<>
+          <ImportStudies stage="citation-snowball" label="Add seed studies" />
           <div className="flex items-center gap-2.5 h-9 rounded-lg border bg-muted/30 px-2.5">
             <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Direction</span>
             <div className="inline-flex h-7 rounded-md border bg-background p-0.5">

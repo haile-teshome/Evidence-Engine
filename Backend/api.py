@@ -4208,6 +4208,60 @@ def fulltext_fetch(req: FullTextRequest):
     return resp
 
 
+@app.post("/api/fulltext/pdf")
+async def fulltext_pdf_upload(request: Request, paper_id: str = "", url: str = ""):
+    """Take a PDF the reviewer uploaded in the browser into the cache the
+    acquisition step writes to.
+
+    Until this existed, an imported paper reached the server as text only, so
+    every server-side reader that works on the FILE (table extraction above all)
+    was skipped for exactly the papers a reviewer supplied themselves.
+    """
+    body = await request.body()
+    if not body[:5].startswith(b"%PDF"):
+        raise HTTPException(status_code=400, detail="That is not a PDF")
+    if len(body) > 200 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="PDF too large to cache")
+    key = _cache_pdf(paper_id or None, url or None, body)
+    if not key:
+        raise HTTPException(status_code=500, detail="Could not write to the PDF cache")
+    return {"key": key, "bytes": len(body)}
+
+
+@app.post("/api/fulltext/read")
+async def fulltext_read(request: Request, paper_id: str = "", url: str = ""):
+    """Read the words out of a PDF the server holds, OCR included.
+
+    The browser parses an imported PDF itself, which works for a born-digital
+    file and returns nothing for a scanned one. Rather than hand that back to
+    the reviewer as a chore ("run OCR on them"), the file is already here and
+    Docling renders each page and reads it. Falls back to the text layer when
+    docling is not installed, so the endpoint is always safe to call.
+    """
+    body = await request.body()
+    pdf = body if body[:5].startswith(b"%PDF") else _read_cached_pdf(paper_id or None, url or None)
+    if not pdf:
+        raise HTTPException(status_code=404, detail="No PDF for that paper on this machine")
+
+    # The text layer first: it is instant and exact where it exists.
+    layer = (_extract_text_from_pdf(pdf) or "").strip()
+    if len(re.sub(r"[^A-Za-z]", "", layer)) >= 200:
+        return {"text": layer, "method": "text-layer", "chars": len(layer)}
+
+    try:
+        import docling_tables
+    except Exception:
+        docling_tables = None
+    if docling_tables is not None and docling_tables.available():
+        read = docling_tables.extract_text(pdf)
+        if (read or "").strip():
+            print(f"[fulltext_read] {paper_id or 'upload'} OCR -> {len(read)} chars")
+            return {"text": read, "method": "ocr", "chars": len(read)}
+
+    return {"text": layer, "method": "none", "chars": len(layer),
+            "detail": "This file has no text layer, and no OCR reader is installed."}
+
+
 @app.get("/api/fulltext/pdf/{key}")
 def fulltext_pdf(key: str):
     """Serve a cached acquired PDF for inline display in the UI."""
@@ -4666,9 +4720,38 @@ def extract_fields(req: ExtractFieldsRequest):
         })
 
     model_name = resolve_for_thinking(req.model)
-    result = extraction_forms.extract_form(
-        text=text[:30000], tables=(req.tables or ""), fields=ef_fields,
-        model_name=model_name, ai_service=AIService)
+    if _local_model_missing(model_name):
+        # Said once, plainly, instead of discovered after a run of empty rows.
+        return {"values": {}, "fields": [],
+                "error": f"The extraction model {model_name} is not installed on this machine. "
+                         f"Install it with:  ollama pull {model_name}"}
+
+    # Ask for the fields in groups. A whole imported workbook in one request is
+    # not a hard question, it is a long answer: the reply is cut off part-way
+    # and nothing at all can be parsed from it, so every field comes back empty.
+    per_call = max(1, Config.EXTRACTION_FIELDS_PER_CALL)
+    groups = [ef_fields[i:i + per_call] for i in range(0, len(ef_fields), per_call)]
+    raw_fields: List[Dict[str, Any]] = []
+    failures: List[str] = []
+    for group in groups:
+        got = extraction_forms.extract_form(
+            text=text[:30000], tables=(req.tables or ""), fields=group,
+            model_name=model_name, ai_service=AIService,
+            num_ctx=Config.EXTRACTION_NUM_CTX)
+        raw_fields.extend(got.get("fields") or [])
+        if got.get("error"):
+            failures.append(got["error"])
+    if len(groups) > 1:
+        print(f"[extract_fields] {len(ef_fields)} fields in {len(groups)} groups, "
+              f"{len(failures)} failed")
+    # A group that failed contributes no fields, so a partial answer is still an
+    # answer; only say the whole thing failed when all of it did.
+    result = {
+        "fields": raw_fields,
+        "error": ("" if not failures
+                  else failures[0] if len(failures) == len(groups)
+                  else f"{len(failures)} of {len(groups)} field groups failed: {failures[0]}"),
+    }
 
     label_by_id = {f["id"]: (f.get("label") or f["id"]) for f in fields}
     out_fields, values = [], {}
@@ -4681,7 +4764,10 @@ def extract_fields(req: ExtractFieldsRequest):
             "value": values[fid], "source_quote": ef["source_quote"],
             "confidence": ef["confidence"], "needs_review": ef["needs_review"],
         })
-    return {"values": values, "fields": out_fields, "model": model_name}
+    # An empty row and a failed call look identical to the reviewer, so the
+    # failure travels with the result instead of only reaching the server log.
+    return {"values": values, "fields": out_fields, "model": model_name,
+            "error": result.get("error") or ""}
 
 
 @app.post("/api/extract/text")
@@ -5035,6 +5121,57 @@ def _extract_epmc_tables(paper_id: str, extraction_type: str) -> List[Dict[str, 
         return []
 
 
+def _same_title(a: str, b: str) -> bool:
+    """Titles match if their letters do, allowing for the punctuation and
+    subtitle handling that differs between a PDF and a database record."""
+    x = re.sub(r"[^a-z0-9]+", "", (a or "").lower())
+    y = re.sub(r"[^a-z0-9]+", "", (b or "").lower())
+    if not x or not y:
+        return False
+    return x == y or (len(x) > 40 and len(y) > 40 and (x.startswith(y[:40]) or y.startswith(x[:40])))
+
+
+def _is_db_id(value: str) -> bool:
+    """Whether this identifier means anything to a literature database.
+
+    An imported paper carries whatever id the browser gave it, which no
+    database has heard of. Asking Europe PMC about it returns nothing, and that
+    nothing used to be read as "this paper has no tables"."""
+    return bool(re.fullmatch(r"(?:PMC\d+|\d{5,9})", (value or "").strip(), re.IGNORECASE))
+
+
+def _resolve_epmc_id(title: str) -> str:
+    """A Europe PMC id for a paper known only by its title.
+
+    An uploaded PDF carries no identifier, so the publisher's own structured
+    full text is out of reach until one is found. The match has to be checked:
+    a title search happily returns a review that merely cites the paper, and
+    extracting that review's tables would be worse than finding none.
+    """
+    t = (title or "").strip()
+    if len(t) < 12:
+        return ""
+
+    def _search() -> str:
+        try:
+            r = limited_get(
+                "https://www.ebi.ac.uk/europepmc/webservices/rest/search",
+                params={"query": f'TITLE:"{t[:300]}"', "resultType": "lite",
+                        "format": "json", "pageSize": 3},
+                timeout=8,
+            )
+            if r is None or not r.ok:
+                return ""
+            for hit in (r.json().get("resultList") or {}).get("result") or []:
+                if _same_title(hit.get("title", ""), t):
+                    return hit.get("pmcid") or hit.get("pmid") or ""
+        except Exception as e:
+            print(f"[resolve_epmc_id] {e}")
+        return ""
+
+    return cached("epmc_id", t, _search) or ""
+
+
 def _read_cached_pdf(paper_id: Optional[str], url: Optional[str]) -> Optional[bytes]:
     """Read the open-access PDF cached during full-text acquisition, if present."""
     try:
@@ -5057,6 +5194,41 @@ def _table_is_real(rows: List[List[str]]) -> bool:
     cells = sum(len(r) for r in rows)
     filled = sum(1 for r in rows for c in r if c)
     return cells > 0 and filled >= 0.5 * cells
+
+
+# Two patterns, because the two readers want different things from a caption.
+# For deciding whether a page HAS a table, only a caption that starts a line
+# counts: a page that merely cites "Supplementary Table 1" in a sentence is a
+# page of prose, and treating it as captioned lets the layout back in. For
+# deciding where to point a model, any mention will do: a two-column PDF's text
+# layer interleaves the columns, so the caption that introduces Table 1 often
+# lands in the middle of a sentence from the other column, and a window around
+# an in-text reference costs one call and sometimes lands on the table.
+_TABLE_CAPTION_LINE = re.compile(r"^[ \t]*(?:Supplementary\s+)?Table\s+\d+\b", re.M | re.I)
+_TABLE_CAPTION = re.compile(r"\b(?:Supplementary\s+)?Table\s+\d+\b", re.I)
+
+
+_PROSE_CELL = re.compile(r"[a-z],\s|\.\s+[A-Z]|\b(?:the|and|with|that|were|was|which)\b", re.I)
+
+
+def _looks_like_page_layout(rows: List[List[str]], width_frac: float) -> bool:
+    """True when the "table" is really the page.
+
+    A two-column article read by the text-alignment strategy yields one grid per
+    page: the gutter looks like a column boundary and every line looks like a
+    row. Measured across journal PDFs, a genuine table sits inside one column
+    (0.2-0.45 of the page width) while this artifact spans 0.85 and up, and its
+    cells are clauses rather than values. Both tests have to fail it, so a wide
+    table of short values in a single-column paper still gets through.
+    """
+    if width_frac < 0.7:
+        return False
+    cells = [c for r in rows for c in r if c]
+    if not cells:
+        return True
+    wordy = sum(1 for c in cells
+                if len(c) > 45 or len(c.split()) > 7 or _PROSE_CELL.search(c))
+    return wordy / len(cells) > 0.25
 
 
 def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str, Any]]:
@@ -5090,23 +5262,45 @@ def _extract_pdf_tables(pdf_bytes: bytes, extraction_type: str) -> List[Dict[str
 
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for page in pdf.pages:
-                found = page.extract_tables() or []
-                if not found:
+                # Each entry carries the strategy that produced it, because the UI
+                # states which tier a number came from and the two differ in fidelity.
+                page_tables: List[Tuple[List[List[str]], str]] = []
+                # Ruling lines first. The text-alignment fallback runs only where
+                # the lines found nothing, and even then its results have to get
+                # past _looks_like_page_layout: on a two-column page that strategy
+                # always finds "a table", and the table it finds is the page.
+                # A caption is what makes a text-alignment guess believable. Ruled
+                # tables speak for themselves; without ruling lines, a page of a
+                # journal article that never says "Table 1" does not contain one,
+                # and what the strategy found is the figure labels or the layout.
+                try:
+                    captioned = bool(_TABLE_CAPTION_LINE.search(page.extract_text() or ""))
+                except Exception:
+                    captioned = False
+                for settings in (None, text_settings):
                     try:
-                        found = page.extract_tables(text_settings) or []
+                        found = (page.find_tables() if settings is None
+                                 else page.find_tables(text_settings)) or []
                     except Exception:
                         found = []
-                # pdfplumber (text-layer) tables on this page. Each entry carries
-                # the strategy that produced it, because the UI states which tier
-                # a number came from and the two differ in fidelity.
-                page_tables: List[Tuple[List[List[str]], str]] = []
-                for t in found:
-                    rows = [
-                        [(c or "").strip() for c in row]
-                        for row in t if any((c or "").strip() for c in row)
-                    ]
-                    if _table_is_real(rows):
+                    for t in found:
+                        rows = [
+                            [(c or "").strip() for c in row]
+                            for row in (t.extract() or []) if any((c or "").strip() for c in row)
+                        ]
+                        # Three rows, not two: a bordered 2x2 in a journal PDF is
+                        # a box around a figure panel, never a table.
+                        if len(rows) < 3 or not _table_is_real(rows):
+                            continue
+                        if settings is not None:
+                            if not captioned:
+                                continue
+                            span = (t.bbox[2] - t.bbox[0]) / float(page.width or 1)
+                            if _looks_like_page_layout(rows, span):
+                                continue
                         page_tables.append((rows, "pdfplumber"))
+                    if page_tables:
+                        break
                 # Image-based recognition runs on EVERY page (when enabled), and its
                 # result is added only if it isn't already one of pdfplumber's tables
                 # for this page. This catches image-only / scanned / complex-spanning
@@ -5492,85 +5686,190 @@ Write a substantive answer in clean Markdown: a short overview paragraph first, 
     return {"answer": answer, "documents": documents, "trace": trace}
 
 
+def _table_windows(text: str, size: int = 4000, cap: int = 8) -> List[str]:
+    """The stretches of a paper where a table actually is.
+
+    A caption is the anchor the typesetter leaves behind and the rows follow it,
+    so these windows are where the numbers live. Sending them instead of the
+    first N characters is the difference between a model seeing Table 3 of a
+    40,000-character paper and never seeing a table at all.
+    """
+    if not text:
+        return []
+    spans: List[List[int]] = []
+    for m in _TABLE_CAPTION.finditer(text):
+        a, b = max(m.start() - 200, 0), min(m.start() + size, len(text))
+        if spans and a <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], b)
+        else:
+            spans.append([a, b])
+    if not spans:
+        # No captions at all: the head of the paper, where an abstract often
+        # reports its numbers inline.
+        return [text[:size]]
+    return [text[a:b] for a, b in spans[:cap]]
+
+
+def _deterministic_pdf_tables(pdf_bytes: bytes, extraction_type: str,
+                              tried: List[str]) -> List[Dict[str, Any]]:
+    """The PDF readers, best first: Docling, then the text layer.
+
+    Docling runs a layout model to find the table as a region and a structure
+    model to read it, which is what a two-column page needs; pdfplumber infers
+    the grid from where characters sit. They are not combined: when the better
+    reader has answered, adding the weaker one's guesses only adds noise.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        import docling_tables
+    except Exception:
+        docling_tables = None
+
+    if docling_tables is not None and docling_tables.available():
+        found = docling_tables.extract_tables(pdf_bytes)
+        if found is None:
+            tried.append("Docling could not read the file")
+        else:
+            for t in found:
+                rows = t["data"]
+                if not _table_is_real(rows):
+                    continue
+                out.append({
+                    "title": t.get("title") or f"Table {len(out) + 1}",
+                    "type": _classify_table(rows, extraction_type or ""),
+                    "data": rows,
+                    "caption": t.get("caption", ""),
+                    "page": t.get("page"),
+                    "tier": "docling",
+                    "deterministic": True,
+                })
+            tried.append(f"Docling read the PDF: {len(out)} table(s)")
+    else:
+        tried.append("Docling not installed (pip install docling)")
+
+    if not out:
+        plumbed = _extract_pdf_tables(pdf_bytes, extraction_type) or []
+        tried.append(f"PDF text layer: {len(plumbed)} table(s)")
+        out.extend(plumbed)
+    return out
+
+
 @app.post("/api/extract/tables")
 def extract_tables(req: ExtractTablesRequest):
-    """Table extraction, deterministic first:
-      1. Europe PMC JATS fullTextXML — open-access full-text, structured tables.
-      2. Deterministic parse of the acquired open-access PDF (pdfplumber). The
-         full-text step caches the PDF; the same PDF always yields the same tables.
-      3. LLM extraction over title + abstract + caller-supplied full text — a
-         non-deterministic fallback, used only when no structured OA source exists.
-    Tiers 1 and 2 are deterministic and reproducible; tier 3 is a last resort.
+    """Tables, by a ladder of readers that runs deterministic first.
+
+      0. Identity. An uploaded PDF arrives with no identifier, so nothing below
+         can be asked for the paper by name until a title search finds one.
+      1. Europe PMC JATS fullTextXML: the publisher's own markup, where a table
+         is already a table. No reader beats the typesetter's own file.
+      2. The PDF itself, best reader first: Docling (layout + structure models),
+         then the text layer, then image recognition where it is enabled. If no
+         PDF is on this machine, the acquisition ladder is asked to fetch the
+         open-access one first.
+      3. A model over the windows of the text where a caption says a table is.
+         Non-deterministic, so it runs only when every reader above came back
+         empty.
+
+    The response carries `tried`: which rungs ran and what each found. "This
+    paper has no tables" and "we never managed to look" are different answers,
+    and a reviewer has to be able to tell which one they got.
     """
     pid = req.paper_id or ""
-    if not pid and req.URL:
+    if not _is_db_id(pid) and req.URL:
         m = re.search(r"/(PMC\d+|\d+)/?$", req.URL, re.IGNORECASE)
         if m:
             pid = m.group(1)
 
+    tried: List[str] = []
     tables: List[Dict[str, Any]] = []
 
-    # Run BOTH the HTML/XML source AND the PDF (text + image) source and take the
-    # UNION, so a table that appears only in one is never missed. Sources are
-    # ordered by fidelity (HTML/JATS first, then image-based, then pdfplumber text
-    # inside _extract_pdf_tables); _dedup_tables keeps the first copy of any table.
+    # Tier 0: find out what this paper is.
+    if not _is_db_id(pid) and req.Title:
+        found_id = _resolve_epmc_id(req.Title)
+        if found_id:
+            pid = found_id
+            tried.append(f"matched the title to {found_id}")
+        else:
+            tried.append("no database record matched the title")
 
-    # Source A: Europe PMC JATS fullTextXML (structured HTML tables). Handles the
-    # PMID -> PMCID lookup transparently.
-    tier1: List[Dict[str, Any]] = []
-    if pid and req.Source in {"PubMed", "Europe PMC"}:
+    # Tier 1: the publisher's structured full text.
+    if _is_db_id(pid):
         tier1 = _extract_epmc_tables(pid, req.extraction_type or "") or []
+        tried.append(f"Europe PMC full text: {len(tier1)} table(s)")
+        tables.extend(tier1)
         if tier1:
-            print(f"[extract_tables] {pid} HTML/XML -> {len(tier1)} tables")
+            print(f"[extract_tables] {pid} JATS -> {len(tier1)} tables")
 
-    # Source B: the acquired open-access PDF — pdfplumber text tables plus, when
-    # enabled, UniTable image-based recognition on every page (scanned / image-only
-    # / complex-spanning tables the text layer misses). Deterministic; run always.
-    tier2: List[Dict[str, Any]] = []
+    # Tier 2: the file. Uploaded by the reviewer, cached by acquisition, or
+    # fetched now from the open-access copy the identifier points at.
     pdf_bytes = _read_cached_pdf(req.paper_id, req.URL)
-    if pdf_bytes:
-        tier2 = _extract_pdf_tables(pdf_bytes, req.extraction_type or "") or []
-        if tier2:
-            print(f"[extract_tables] {pid or 'no-id'} PDF (text+image) -> {len(tier2)} tables")
-
-    tables = _dedup_tables(tier1 + tier2)
-    if tier1 and tier2:
-        print(f"[extract_tables] {pid or 'no-id'} union HTML+PDF -> {len(tables)} unique tables")
-
-    # Tier 3: LLM fallback over title + abstract + caller-supplied full text.
-    # Non-deterministic; used only when neither the JATS XML nor a cached OA PDF
-    # produced tables. The caller-supplied content is what makes it useful.
-    if not tables:
+    if not pdf_bytes and not tables and (pid or req.URL):
         try:
-            seed_parts: List[str] = [req.Title.strip()]
-            if req.full_text:
-                seed_parts.append(req.full_text[:14000].strip())
-            elif req.abstract:
-                seed_parts.append(req.abstract.strip())
-            seed = "\n\n".join(p for p in seed_parts if p)
-            ai_tables = AITableExtractor.extract_from_text(
-                seed,
-                resolve_for_thinking(req.model),
-            )
-            for i, t in enumerate(ai_tables or []):
-                rows = [t.get("headers", [])] + t.get("rows", [])
-                tables.append({
-                    "title": t.get("label", f"Table {i + 1}"),
-                    "type": _classify_table(rows, req.extraction_type or ""),
-                    "data": rows,
-                    "caption": t.get("caption", ""),
-                    "page": None,
-                    "tier": "llm",
-                    "deterministic": False,
-                })
-            print(f"[extract_tables] {pid or 'no-id'} tier3 (LLM) -> {len(ai_tables or [])} tables (seed {len(seed)} chars)")
+            _fulltext_fetch_impl(FullTextRequest(
+                Title=req.Title, URL=req.URL or "", Source=req.Source or "",
+                paper_id=req.paper_id,
+            ))
+            pdf_bytes = _read_cached_pdf(req.paper_id, req.URL)
+            tried.append("fetched the open-access PDF" if pdf_bytes
+                         else "no open-access PDF to fetch")
         except Exception as e:
-            print(f"[extract_tables ai fallback] {e}")
+            tried.append(f"could not fetch a PDF ({str(e)[:80]})")
+
+    if tables:
+        # The publisher's own markup has answered. Reading the PDF as well would
+        # only offer a worse copy of the same tables for the de-duplicator to
+        # throw away, and a chance for a layout artifact to join them.
+        tried.append("did not need to parse the PDF")
+    elif pdf_bytes:
+        tables = _dedup_tables(_deterministic_pdf_tables(pdf_bytes, req.extraction_type or "", tried))
+    else:
+        tried.append("no PDF on this machine to parse")
+
+    # Tier 3: the model, on the parts of the text where a table is announced.
+    if not tables:
+        text = (req.full_text or "").strip() or (req.abstract or "").strip()
+        windows = _table_windows(text)
+        if not windows:
+            tried.append("no text to read")
+        else:
+            found = 0
+            for win in windows:
+                seed = f"{req.Title}\n\n{win}"
+                try:
+                    ai_tables = AITableExtractor.extract_from_text(
+                        seed,
+                        resolve_for_thinking(req.model),
+                        max_chars=len(seed) + 1,
+                        num_ctx=Config.EXTRACTION_NUM_CTX,
+                    ) or []
+                except Exception as e:
+                    print(f"[extract_tables ai fallback] {e}")
+                    continue
+                for t in ai_tables:
+                    rows = [[str(c) for c in (t.get("headers") or [])]]
+                    rows += [[str(c) for c in r] for r in (t.get("rows") or [])]
+                    if not _table_is_real(rows):
+                        continue
+                    found += 1
+                    tables.append({
+                        "title": t.get("label", f"Table {found}"),
+                        "type": _classify_table(rows, req.extraction_type or ""),
+                        "data": rows,
+                        "caption": t.get("caption", ""),
+                        "page": None,
+                        "tier": "llm",
+                        "deterministic": False,
+                    })
+            tables = _dedup_tables(tables)
+            tried.append(
+                f"model over {len(windows)} region(s) of the text: {len(tables)} table(s)")
+            print(f"[extract_tables] {pid or 'no-id'} tier3 (LLM) -> {len(tables)} tables "
+                  f"from {len(windows)} windows of {len(text)} chars")
 
     if not tables:
-        print(f"[extract_tables] {pid or req.URL[:60]} -> no tables found (source={req.Source}, has_abstract={bool(req.abstract)}, has_fulltext={bool(req.full_text)})")
+        print(f"[extract_tables] {pid or req.URL[:60]} -> no tables found: {'; '.join(tried)}")
 
-    return {"tables": tables}
+    return {"tables": tables, "tried": tried}
 
 
 # ---------------------------------------------------------------------------
@@ -6158,6 +6457,31 @@ def grade_outcome(req: GradeOutcomeRequest):
 # ---------------------------------------------------------------------------
 
 
+_LOCAL_TAGS: Dict[str, Any] = {"at": 0.0, "names": []}
+
+
+def _local_model_missing(name: str) -> bool:
+    """True when `name` is a local model this machine does not have.
+
+    Extraction is routed to a general-purpose model regardless of what the
+    reviewer picked for screening, so it can be a model they never downloaded.
+    Two minutes of requests that were always going to fail, ending in "the
+    model did not return usable JSON", is a bad way to learn that.
+    """
+    if not name or re.match(r"^(claude|gpt|gemini|o[13])", name, re.IGNORECASE):
+        return False
+    now = time.time()
+    if now - _LOCAL_TAGS["at"] > 30:
+        try:
+            r = requests.get(f"{os.getenv('OLLAMA_BASE_URL', 'http://localhost:11434')}/api/tags",
+                             timeout=4)
+            _LOCAL_TAGS["names"] = [m.get("name", "") for m in (r.json().get("models") or [])]
+            _LOCAL_TAGS["at"] = now
+        except Exception:
+            return False          # cannot tell: let the call proceed and fail honestly
+    return not any(t == name or t.startswith(name) for t in _LOCAL_TAGS["names"])
+
+
 @app.get("/api/models/local")
 def list_local_models():
     """List models available in the local Ollama instance."""
@@ -6202,6 +6526,428 @@ def reproducibility():
                  "seed, so those are best-effort. Hosted models can also change weights "
                  "silently; local pinned models (by digest) cannot."),
     }
+
+
+class SheetColumn(BaseModel):
+    header: str
+    samples: List[str] = []
+
+
+class SheetSpec(BaseModel):
+    name: str = ""
+    columns: List[SheetColumn] = []
+
+
+class InferFormRequest(BaseModel):
+    # One sheet, as before, or a whole workbook. A real extraction template is
+    # several tabs: study characteristics for everything, then tabs that only
+    # apply to one design, then outcomes for everything again.
+    columns: List[SheetColumn] = []
+    sheet_name: str = ""
+    sheets: List[SheetSpec] = []
+    model: Optional[str] = None
+
+
+# Columns that describe the row rather than something to extract from a paper.
+_NOT_A_VARIABLE = re.compile(
+    r"^(article|articles|study|studies|paper|papers|title|citation|reference|author|authors|"
+    r"year|doi|pmid|id|#|no\.?|row|reviewer|extractor|initials|date|notes?|comments?|status|"
+    r"included?|exclude[d]?|screened)$", re.I)
+
+
+def _infer_fields_heuristically(cols: List[SheetColumn]) -> List[Dict[str, Any]]:
+    """What the sheet says on its own, with no model involved.
+
+    Used when no model is configured and as the floor under the model's answer,
+    so an unreachable model degrades to the behaviour this page already had
+    rather than returning nothing.
+    """
+    out: List[Dict[str, Any]] = []
+    for c in cols:
+        header = (c.header or "").strip()
+        if not header:
+            continue
+        vals = [v for v in (c.samples or []) if str(v).strip()]
+        numeric = bool(vals) and all(
+            re.fullmatch(r"[-+]?[\d,.]+\s*%?", str(v).strip()) for v in vals)
+        uniq = {str(v).strip() for v in vals}
+        # A handful of repeated short values is a category, not free text.
+        categorical = bool(uniq) and len(uniq) <= 6 and len(vals) >= 3 and \
+            all(len(u) <= 32 for u in uniq)
+        out.append({
+            "label": header,
+            "type": "number" if numeric else ("select" if categorical else "text"),
+            "options": sorted(uniq) if categorical and not numeric else [],
+            "description": "",
+            # Narrow and literal: a whole header that IS "id" or "reviewer".
+            # Anything else stays in. A field that is wrongly present is one
+            # the reviewer unticks; a field wrongly absent is one they never
+            # find out about.
+            "include": not bool(_NOT_A_VARIABLE.match(header)),
+        })
+    return out
+
+
+def _classify_sheets(model, sheets: List[SheetSpec]) -> Dict[str, str]:
+    """What each worksheet in a template is for.
+
+    "extract"    - data recorded once per study: a real extraction tab
+    "dictionary" - defines the variables (name, definition, allowed values)
+    "other"      - instructions, a cover sheet, notes, a blank tab
+
+    Matching the tab's NAME against a list of likely words only catches the
+    obvious ones, and a dictionary named "Variables" or "Field guide" was being
+    extracted as though its rows were studies. The reviewer can override every
+    answer, so a wrong guess costs a click rather than a bad form.
+    """
+    roles = {sh.name: "extract" for sh in sheets}
+    if not model or len(sheets) < 2:
+        return roles
+    listing = "\n".join(
+        f'- "{sh.name}": columns = '
+        + ", ".join(c.header for c in sh.columns[:14])
+        + " | first values = "
+        + "; ".join((c.samples or [""])[0] for c in sh.columns[:6] if c.samples)
+        for sh in sheets
+    )
+    prompt = (
+        "These are the worksheets in a systematic reviewer's data-extraction workbook.\n"
+        "Say what each one is for:\n"
+        '  "extract"    - data recorded once per included study\n'
+        '  "dictionary" - defines the variables themselves (a variable name column\n'
+        "                 and a definition column; its rows are field names, not studies)\n"
+        '  "other"      - instructions, a cover sheet, notes, or an empty tab\n\n'
+        f"WORKSHEETS:\n{listing}\n\n"
+        'Reply with JSON only: {"sheets": [{"name": "...", "role": "extract"}]}'
+    )
+    try:
+        from langchain_core.messages import HumanMessage
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+        for item in (data.get("sheets") or []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            role = str(item.get("role") or "").strip().lower()
+            if name in roles and role in ("extract", "dictionary", "other"):
+                roles[name] = role
+    except Exception as e:
+        print(f"[classify_sheets] {e}")
+    # Never classify every sheet away: a workbook with nothing to extract is a
+    # classification failure, not a real answer.
+    if all(v != "extract" for v in roles.values()):
+        return {sh.name: "extract" for sh in sheets}
+    return roles
+
+
+def _suggest_tab_rules(model, tabs: List[Dict[str, Any]]) -> None:
+    """Ask which tabs cover every study and which only cover one kind.
+
+    A template's tab names say this out loud ("RCTs", "Cohort studies",
+    "Study characteristics"), and the deciding column is nearly always on one of
+    the all-studies tabs. Mutates `tabs` in place, leaving the rule empty when
+    the model does not answer usefully, because a wrong rule silently drops
+    studies out of a tab and that is worse than no rule.
+    """
+    if len(tabs) < 2:
+        return
+    listing = "\n".join(
+        f'- "{t["name"]}": ' + ", ".join(f["label"] for f in t["fields"][:12])
+        for t in tabs
+    )
+    # Name the values each column can actually take. Without this the model
+    # writes the rule in its own words ("Randomised controlled trial") while the
+    # sheet, and so the extraction, says "RCT", and the tab then matches nothing.
+    choices: Dict[str, List[str]] = {}
+    for t in tabs:
+        for f in t["fields"]:
+            if f.get("options"):
+                choices.setdefault(f["label"], list(f["options"]))
+    choice_lines = "\n".join(f'- "{k}" is one of: {", ".join(v)}' for k, v in choices.items())
+    every_field = sorted({f["label"] for t in tabs for f in t["fields"]})
+    prompt = (
+        "A systematic reviewer's data-extraction workbook has these tabs, each with\n"
+        "its columns. Some tabs are filled in for EVERY included study; others only\n"
+        "for studies of one kind (a design, a population, an outcome type).\n\n"
+        f"TABS:\n{listing}\n\n"
+        f"COLUMNS AVAILABLE ANYWHERE: {', '.join(every_field[:60])}\n\n"
+        + (f"KNOWN COLUMN VALUES:\n{choice_lines}\n\n" if choice_lines else "")
+        + "For each tab say whether it applies to all studies. If it does not, name the\n"
+        "column whose value decides it and the values that qualify. The deciding\n"
+        "column must be one of the columns listed above, and where that column's\n"
+        "values are listed, use those values EXACTLY as written, not a longer name\n"
+        "for the same thing.\n\n"
+        'Reply with JSON only: {"tabs": [{"name": "...", "all_studies": true, '
+        '"deciding_column": "", "values": []}]}'
+    )
+    try:
+        from langchain_core.messages import HumanMessage
+        r = model.invoke([HumanMessage(content=prompt)])
+        data = AIService._extract_json(r.content) or {}
+        by_name = {str(t.get("name", "")).strip().lower(): t
+                   for t in (data.get("tabs") or []) if isinstance(t, dict)}
+        labels = {f["label"].strip().lower() for t in tabs for f in t["fields"]}
+        for tab in tabs:
+            got = by_name.get(tab["name"].strip().lower())
+            if not got or got.get("all_studies", True):
+                continue
+            col = str(got.get("deciding_column") or "").strip()
+            vals = [str(v).strip() for v in (got.get("values") or []) if str(v).strip()]
+            # Only accept a rule naming a column that actually exists, else the
+            # tab would be gated on something nothing ever fills in.
+            if not (col and vals and col.strip().lower() in labels):
+                continue
+            # If that column has a fixed set of values, the rule has to use them.
+            # A value outside the set can never match, so a rule made entirely of
+            # such values is dropped: no rule (the reviewer sets one) beats a rule
+            # that silently empties the tab.
+            opts = choices.get(col) or next(
+                (list(f["options"]) for t2 in tabs for f in t2["fields"]
+                 if f["label"].strip().lower() == col.strip().lower() and f.get("options")),
+                [],
+            )
+            if opts:
+                lower = {o.strip().lower(): o for o in opts}
+                vals = [lower[v.strip().lower()] for v in vals if v.strip().lower() in lower]
+                if not vals:
+                    continue
+            tab["when"] = {"label": col, "equals": vals[:12]}
+    except Exception as e:
+        print(f"[suggest_tab_rules] {e}")
+
+
+class ClassifyTabsRequest(BaseModel):
+    # Just enough of each tab to judge it: the name and its column labels.
+    tabs: List[SheetSpec] = []
+    model: Optional[str] = None
+
+
+@app.post("/api/extraction/classify-tabs")
+def classify_tabs(req: ClassifyTabsRequest):
+    """Roles and rules for tabs whose fields have already been inferred.
+
+    Separated from infer-form so the client can infer one sheet at a time and
+    show real progress: a five-tab workbook is five model calls, and a single
+    request that takes a minute with only a spinner tells the reviewer nothing
+    about whether it is working or stuck.
+    """
+    sheets = [sh for sh in (req.tabs or []) if (sh.name or "").strip()]
+    if not sheets:
+        return {"roles": {}, "rules": {}}
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    roles = _classify_sheets(model, sheets) if model else {sh.name: "extract" for sh in sheets}
+
+    # _suggest_tab_rules works on the tab shape, so build it from what we were
+    # given. Options travel as a column's samples, which is where it looks.
+    tabs = [{
+        "name": sh.name,
+        "when": None,
+        "fields": [{"label": c.header, "options": list(c.samples or []),
+                    "type": "select" if c.samples else "text"}
+                   for c in sh.columns],
+    } for sh in sheets if roles.get(sh.name) == "extract"]
+    if model:
+        _suggest_tab_rules(model, tabs)
+    return {"roles": roles, "rules": {t["name"]: t["when"] for t in tabs if t.get("when")}}
+
+
+@app.post("/api/extraction/infer-form")
+def infer_extraction_form(req: InferFormRequest):
+    """Turn a reviewer's existing extraction workbook into a form.
+
+    Taking the headers literally is what this page used to do, and it extracts
+    badly: every field arrives as untyped text with no description, and the
+    description is what tells the model where in a paper to look. So the sample
+    values are read too, and a type and a description are inferred per column.
+
+    A real template is several tabs, not one: study characteristics for every
+    study, then tabs filled in only for one design, then outcomes for every
+    study again. Each sheet becomes a tab, and the tabs that only apply to some
+    studies get a rule naming the column and values that decide it.
+
+    Sample values are examples of what the reviewer wants, never data to import:
+    nothing here writes an extraction result.
+    """
+    sheets = [sh for sh in (req.sheets or []) if sh.columns]
+    if not sheets and req.columns:
+        sheets = [SheetSpec(name=req.sheet_name or "Form", columns=req.columns)]
+    sheets = [sh for sh in sheets if [c for c in sh.columns if (c.header or "").strip()]]
+    if not sheets:
+        return {"tabs": [], "fields": [], "source": "empty"}
+
+    model = AIService.get_model(resolve_for_thinking(req.model))
+    tabs: List[Dict[str, Any]] = []
+    used_model = False
+
+    for sh in sheets:
+        cols = [c for c in sh.columns if (c.header or "").strip()]
+        fallback = _infer_fields_heuristically(cols)
+        fields = fallback
+        if model:
+            preview = "\n".join(
+                f'- "{c.header}": '
+                + (", ".join(f'"{v}"' for v in (c.samples or [])[:5]) or "(no values yet)")
+                for c in cols[:120]   # beyond this the fallback types still apply
+            )
+            prompt = (
+                "A systematic reviewer records data extracted from papers in a spreadsheet.\n"
+                "Turn this tab's columns into extraction fields.\n\n"
+                "For each column decide:\n"
+                "  include     - false if it is not something you read out of a paper\n"
+                "                (a row number, study id, reviewer initials, a date stamp).\n"
+                "  type        - number | text | select\n"
+                "  options     - for select only: the allowed values, from the examples\n"
+                "  description - an instruction naming what to look for and where in a\n"
+                "                paper it usually appears. One sentence.\n\n"
+                f"TAB: {sh.name or 'untitled'}\n"
+                f"COLUMNS (header, then example values already recorded):\n{preview}\n\n"
+                'Reply with JSON only: {"fields": [{"label": "...", "include": true, '
+                '"type": "text", "options": [], "description": "..."}]}\n'
+                "Keep the labels exactly as the headers are written."
+            )
+            try:
+                from langchain_core.messages import HumanMessage
+                r = model.invoke([HumanMessage(content=prompt)])
+                data = AIService._extract_json(r.content) or {}
+                by_label = {str(f.get("label", "")).strip().lower(): f
+                            for f in (data.get("fields") or []) if isinstance(f, dict)}
+                merged = []
+                for base in fallback:
+                    got = by_label.get(base["label"].strip().lower())
+                    if not got:
+                        merged.append(base)
+                        continue
+                    ftype = str(got.get("type") or base["type"]).lower()
+                    if ftype not in ("number", "text", "select"):
+                        ftype = base["type"]
+                    opts = got.get("options")
+                    merged.append({
+                        "label": base["label"],
+                        "type": ftype,
+                        "options": [str(o) for o in opts][:20] if isinstance(opts, list) else base["options"],
+                        "description": str(got.get("description") or "").strip(),
+                        # The model does not decide this: it was unticking real
+                        # variables on large templates, and an unticked field is
+                        # dropped on apply, so columns went missing with nothing
+                        # on screen to explain it.
+                        "include": base["include"],
+                    })
+                fields = merged
+                used_model = True
+            except Exception as e:
+                print(f"[infer_extraction_form] {sh.name}: {e}")
+
+        tabs.append({"name": sh.name or f"Tab {len(tabs) + 1}", "fields": fields,
+                     "when": None, "role": "extract"})
+
+    roles = _classify_sheets(model, sheets) if model else {}
+    for tab in tabs:
+        tab["role"] = roles.get(tab["name"], "extract")
+    if model:
+        # Rules are only meaningful between the tabs that hold study data.
+        _suggest_tab_rules(model, [t for t in tabs if t["role"] == "extract"])
+
+    # `fields` is the flattened list, so a caller that only wants a single form
+    # (and every existing test) keeps working.
+    flat = [f for t in tabs for f in t["fields"]]
+    return {"tabs": tabs, "fields": flat, "source": "model" if used_model else "heuristic"}
+
+
+class LookupRequest(BaseModel):
+    queries: List[str]
+    cap: int = 500
+
+
+def _classify_query(q: str) -> str:
+    """A pasted line is a DOI, a PubMed ID, or a title."""
+    t = q.strip()
+    if re.match(r"^(https?://(dx\.)?doi\.org/)?10\.\d{4,9}/\S+$", t, re.I):
+        return "doi"
+    # PMIDs can technically be as short as one digit, but a short bare number in
+    # a pasted list is far more often a stray year. The two mistakes are not
+    # equally costly: reading "2020" as a PMID silently adds a wrong paper the
+    # reviewer has no reason to doubt, while treating a genuine short PMID as a
+    # title just fails the lookup and is reported back to them.
+    if t.isdigit() and 5 <= len(t) <= 9:
+        return "pmid"
+    return "title"
+
+
+def _lookup_one(q: str) -> Optional[Dict[str, Any]]:
+    """Resolve one pasted line to a paper record, or None if nothing matched.
+
+    Reuses the resolvers acquisition and snowballing already go through, so this
+    inherits their per-host rate limiting and run cache rather than opening a
+    second, unthrottled path to the same services.
+    """
+    kind = _classify_query(q)
+    text = q.strip()
+    doi = ""
+    if kind == "doi":
+        doi = re.sub(r"^https?://(dx\.)?doi\.org/", "", text, flags=re.I)
+
+    work = None
+    if kind == "doi":
+        work = _openalex_resolve_work("", doi)
+    elif kind == "pmid":
+        # OpenAlex indexes PubMed ids, and this keeps one code path for metadata.
+        try:
+            r = limited_get(
+                "https://api.openalex.org/works",
+                params=_polite_params({"filter": f"pmid:{text}", "per_page": 1}), timeout=6,
+            )
+            if r is not None and r.status_code == 200:
+                results = r.json().get("results", [])
+                work = results[0] if results else None
+        except Exception as e:
+            print(f"[lookup pmid] {e}")
+    else:
+        work = _openalex_resolve_work(text, "")
+
+    if not work:
+        return None
+
+    rec = _openalex_minimal(work, "lookup")
+    rec["source"] = "Imported list"
+    rec["authors"] = ", ".join(
+        (a.get("author") or {}).get("display_name", "")
+        for a in (work.get("authorships") or [])[:8]
+    ).strip(", ")
+    # A title search can land on the wrong paper. Say what was asked for so the
+    # reviewer can see the match rather than discovering it later in screening.
+    rec["matched_from"] = text
+    if not rec.get("abstract"):
+        # OpenAlex often lacks the abstract; Europe PMC covers far more.
+        ident = _openalex_minimal(work, "lookup").get("id", "")
+        try:
+            rec["abstract"] = _abstract_via_epmc(rec.get("title", ""), ident) or ""
+        except Exception:
+            rec["abstract"] = ""
+    return rec
+
+
+@app.post("/api/papers/lookup")
+def papers_lookup(req: LookupRequest):
+    """Resolve pasted titles, DOIs or PMIDs into papers that can be screened.
+
+    A bare title cannot be screened: there is no abstract to read and no DOI to
+    acquire a full text with. This fills both in where the services know them,
+    and reports the ones it could not find rather than inventing records.
+    """
+    found: List[Dict[str, Any]] = []
+    missing: List[str] = []
+    for q in req.queries[: max(1, req.cap)]:
+        if not (q or "").strip():
+            continue
+        try:
+            rec = _lookup_one(q)
+        except Exception as e:
+            print(f"[papers_lookup] {q[:60]}: {e}")
+            rec = None
+        (found.append(rec) if rec else missing.append(q.strip()))
+    return {"papers": found, "missing": missing,
+            "requested": len([q for q in req.queries if (q or "").strip()])}
 
 
 @app.get("/api/version")

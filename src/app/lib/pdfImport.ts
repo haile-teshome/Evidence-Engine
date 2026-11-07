@@ -21,6 +21,14 @@ export const UPLOAD_SOURCE = "Local PDFs";
 export type ImportedStudy = {
   paper: Paper;
   fullText?: FullTextRecord;   // present when we have the document's full text
+  // True when nothing in the document yielded a title and its filename had to
+  // stand in. A later read of the same file can do better, so this says when
+  // to try.
+  titleFromFilename?: boolean;
+  // Why the browser could not read the document, when it could not. Swallowing
+  // this turned every failure into "the file must be scanned", which was a
+  // guess, and for a born-digital paper the wrong one.
+  parseError?: string;
   objectBlob?: Blob;           // the original file bytes, for the in-app viewer (the registry owns the object URL + persistence)
   objectMime?: string;         // its MIME type, so the viewer knows if it can render it inline
   html?: string;               // rendered HTML (Word docs), so the preview looks like the real document
@@ -35,8 +43,38 @@ function newId(): string {
 }
 
 // ── text extraction (single-document formats) ────────────────────────────────
+// Some publishers ship a font whose character map is wrong, so the text layer
+// hands back "¼" where the page shows "=" and "þ" where it shows "+" (45 and 3
+// times in one JNCI article). Left alone they travel all the way into the
+// extracted data, where a cell reads "hazard ratio ¼ 3.96". A real ¼ appears in
+// a paper once if ever, so the repair waits for the pattern to repeat.
+export function repairTextLayer(text: string): string {
+  if ((text.match(/\s¼\s/g) || []).length < 3) return text;
+  return text.replace(/\s¼\s/g, " = ").replace(/\sþ\s/g, " + ");
+}
+
+/**
+ * Make the environment one the PDF reader can run in.
+ *
+ * pdf.js 5 calls Promise.withResolvers in two dozen places. Safari shipped it
+ * in 17.4 and Chrome in 119, so on anything older every call into pdf.js throws
+ * immediately, which here looks like a PDF with no text: the file imports, the
+ * study is named after its filename, and nothing can be extracted from it.
+ */
+export function ensurePdfSupport() {
+  const P = Promise as any;
+  if (typeof P.withResolvers === "function") return;
+  P.withResolvers = function withResolvers() {
+    let resolve!: (v: any) => void;
+    let reject!: (e: any) => void;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+}
+
 async function extractPdf(file: File): Promise<{ text: string; firstPage: string; metaTitle: string }> {
   const buf = await file.arrayBuffer();
+  ensurePdfSupport();
   const pdfjs: any = await import("pdfjs-dist");
   pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
   const doc = await pdfjs.getDocument({ data: buf, isEvalSupported: false }).promise;
@@ -48,7 +86,10 @@ async function extractPdf(file: File): Promise<{ text: string; firstPage: string
     const content = await page.getTextContent();
     pages.push(content.items.map((it: any) => ("str" in it ? it.str : "")).join(" "));
   }
-  return { text: pages.join("\n\n"), firstPage: pages[0] || "", metaTitle };
+  // Repaired as one document: the decision to repair is about the file, not a
+  // page, and the title guess should read the same text as the extractor.
+  const text = repairTextLayer(pages.join("\n\n"));
+  return { text, firstPage: text.split("\n\n")[0] || "", metaTitle };
 }
 
 async function extractDocx(file: File): Promise<{ text: string; html: string }> {
@@ -74,16 +115,33 @@ function cleanFilename(name: string): string {
     .replace(/\b(final|draft|revised|v\d+|copy)\b/gi, "").trim() || name;
 }
 
-function guessTitle(metaTitle: string, firstPage: string, filename: string): string {
+/** Words a human would read, with the punctuation a PDF leaves attached. */
+function wordyTokens(line: string): number {
+  return line.split(/\s+/)
+    .map(w => w.replace(/[^A-Za-z'\u2019-]/g, ""))
+    .filter(w => w.length >= 3).length;
+}
+
+export function guessTitle(metaTitle: string, firstPage: string, filename: string): string {
   const clean = (t: string) => t.replace(/\s+/g, " ").trim();
-  if (metaTitle && metaTitle.length >= 8 && metaTitle.length <= 300 && !GENERIC_TITLE.test(metaTitle)) return clean(metaTitle);
-  const lines = firstPage.split(/\n|(?<=\.)\s{2,}/).map(clean).filter(Boolean).slice(0, 12);
+  // A PDF's metadata Title is often the typesetter's job number
+  // ("OP-JNCI210018 1094..1104"), which passes every length check and then
+  // becomes the study's name everywhere in the app. A real title reads as words.
+  const usableMeta = metaTitle && metaTitle.length >= 8 && metaTitle.length <= 300
+    && !GENERIC_TITLE.test(metaTitle) && wordyTokens(metaTitle) >= 4;
+  if (usableMeta) return clean(metaTitle);
+  // Also split on runs of two or more spaces: that is where a text layer puts
+  // the gap between the title and the author list, and without it the title
+  // arrives glued to thirteen authors and is rejected for being too long.
+  const lines = firstPage.split(/\n|(?<=\.)\s{2,}|\s{2,}/).map(clean).filter(Boolean).slice(0, 16);
   const candidates = lines.filter(l => {
     const words = l.split(/\s+/).length;
     if (words < 4 || words > 30 || l.length < 18 || l.length > 260) return false;
     if (/^(doi|https?:|www\.|received|accepted|volume|vol\.|issn|©|copyright|abstract)\b/i.test(l)) return false;
     if (l === l.toUpperCase() && l.length > 40) return false;
-    return true;
+    // Four real words, so a running head ("Brain and Spine 4 (2024) 102732")
+    // cannot pass as the title of the paper underneath it.
+    return wordyTokens(l) >= 4;
   });
   return candidates[0] || cleanFilename(filename);
 }
@@ -119,12 +177,19 @@ function mimeOf(file: File): string {
   return "application/octet-stream";
 }
 
-function studyFromDoc(file: File, text: string, firstPage: string, metaTitle: string, keepFile?: boolean, html?: string): ImportedStudy {
+function studyFromDoc(file: File, text: string, firstPage: string, metaTitle: string, keepFile?: boolean, html?: string, parseError?: string): ImportedStudy {
   const id = newId();
   const title = guessTitle(metaTitle, firstPage, file.name);
   const paper: Paper = { id, source: UPLOAD_SOURCE, title, abstract: guessAbstract(text), url: "", year: guessYear(text) };
   const fullText: FullTextRecord = { paper_id: id, title, url: "", source: UPLOAD_SOURCE, status: "found", text };
-  return { paper, fullText, objectBlob: keepFile ? file : undefined, objectMime: keepFile ? mimeOf(file) : undefined, html: html || undefined };
+  return {
+    paper, fullText,
+    titleFromFilename: title === cleanFilename(file.name),
+    parseError,
+    objectBlob: keepFile ? file : undefined,
+    objectMime: keepFile ? mimeOf(file) : undefined,
+    html: html || undefined,
+  };
 }
 
 // ── tabular formats (one study per row) ──────────────────────────────────────
@@ -318,9 +383,17 @@ async function importOne(file: File): Promise<ImportedStudy[]> {
   // text from, is still imported so it can be viewed as the actual document. Text
   // powers Q&A / screening when available; its absence no longer rejects the file.
   if (ext === "pdf" || file.type === "application/pdf") {
-    let text = "", firstPage = "", metaTitle = "";
-    try { ({ text, firstPage, metaTitle } = await extractPdf(file)); } catch { /* image-only PDF → keep it anyway */ }
-    return [studyFromDoc(file, text, firstPage, metaTitle, true)];
+    let text = "", firstPage = "", metaTitle = "", parseError = "";
+    try {
+      ({ text, firstPage, metaTitle } = await extractPdf(file));
+    } catch (e: any) {
+      // Keep the file either way, but keep the reason too: a scanned page and
+      // a reader that failed to start look identical from here, and only one
+      // of them is about the document.
+      parseError = e?.message || String(e);
+      console.error(`PDF text extraction failed for ${file.name}:`, e);
+    }
+    return [studyFromDoc(file, text, firstPage, metaTitle, true, undefined, parseError)];
   }
   if (ext === "docx" || ext === "doc") {
     // mammoth handles .docx; .doc (legacy binary) throws and is reported as failed.

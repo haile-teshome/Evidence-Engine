@@ -92,3 +92,28 @@ def test_status_reports_whether_it_is_serving(built, monkeypatch):
     monkeypatch.setenv("EE_DIST_DIR", str(built.parent / "absent"))
     st = webapp.frontend_status()
     assert st["serving_frontend"] is False and "pnpm build" in st["hint"]
+
+
+def test_unknown_api_route_is_404_for_any_method(client):
+    """A POST to a route that does not exist must say so, not blame the method.
+
+    The catch-all was registered for GET only, so Starlette matched the path,
+    found no POST, and answered 405 "Method Not Allowed" before this handler
+    ran. That reads as a method mismatch and sends you hunting for the wrong
+    bug; the usual real cause is a backend running code from before the route
+    existed.
+    """
+    for method in ("post", "put", "patch", "delete"):
+        r = getattr(client, method)("/api/not/a/real/route")
+        assert r.status_code == 404, f"{method} gave {r.status_code}"
+        assert "No such endpoint" in r.json()["detail"]
+
+
+def test_posting_to_a_page_path_is_still_405(client):
+    """A static page genuinely cannot be posted to, so 405 is right there."""
+    r = client.post("/some/client/route")
+    assert r.status_code == 405
+
+
+def test_deep_link_still_serves_the_app_on_get(client):
+    assert client.get("/some/client/route").status_code == 200

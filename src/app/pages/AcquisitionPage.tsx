@@ -7,6 +7,8 @@ import { AIService } from "../lib/mockServices";
 import { apiConfig } from "../lib/apiClient";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
+import { ImportStudies } from "../components/ImportStudies";
+import { useStudyImport } from "../lib/useStudyImport";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
@@ -198,10 +200,13 @@ export function AcquisitionPage() {
   // file. Not persisted; web-fetched full texts keep only extracted text.
   const [pdfUrls, setPdfUrls] = useState<Record<string, string>>({});
   const [bulkOpen, setBulkOpen] = useState(false);
+  // Unmatched files become new studies, entering at this stage.
+  const studyImport = useStudyImport("full-text-acquisition");
   const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
   const [bulkBusy, setBulkBusy] = useState(false);
 
-  if (!s.results) return <EmptyState icon={FileSearch} title="No included articles yet" description="Run abstract screening first, then acquire the full text for included articles here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
+  if (!s.results) return <EmptyState icon={FileSearch} title="No included articles yet" description="Run abstract screening first, then acquire the full text for included articles here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }}
+    extra={<ImportStudies stage="full-text-acquisition" />} />;
   // Honour reviewer overrides: papers the user marked Keep at abstract
   // screening get their full text fetched here even if the AI excluded them.
   // Dedupe by paper_id: snowballed papers are appended to results without a
@@ -214,7 +219,8 @@ export function AcquisitionPage() {
         .map(r => [r.paper_id, r]),
     ).values(),
   );
-  if (included.length === 0) return <EmptyState icon={FileSearch} title="No included articles to acquire" description="The current abstract-screening run included 0 articles, so there is no full text to fetch. Include some articles (or restore a screening run that has includes) to acquire their full text here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
+  if (included.length === 0) return <EmptyState icon={FileSearch} title="No included articles to acquire" description="The current abstract-screening run included 0 articles, so there is no full text to fetch. Include some articles (or restore a screening run that has includes) to acquire their full text here." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }}
+    extra={<ImportStudies stage="full-text-acquisition" />} />;
 
   async function runFetch(onlyMissing = false) {
     const queue = onlyMissing ? included.filter(p => s.fullTexts[p.paper_id]?.status !== "found") : included;
@@ -312,6 +318,9 @@ export function AcquisitionPage() {
   async function applyBulk() {
     setBulkBusy(true);
     let ok = 0, fail = 0;
+    // Anything the reviewer left unmatched is a paper the review does not have
+    // yet, so it becomes a study rather than being dropped on the floor.
+    const unmatched = bulkRows.filter(r => !r.matchId).map(r => r.file);
     for (const row of bulkRows) {
       if (!row.matchId) continue;
       const p = included.find(x => x.paper_id === row.matchId);
@@ -326,7 +335,12 @@ export function AcquisitionPage() {
     setBulkBusy(false);
     setBulkOpen(false);
     setBulkRows([]);
-    toast.success(`Matched ${ok} file${ok === 1 ? "" : "s"}` + (fail ? `, ${fail} failed` : ""));
+    if (unmatched.length) await studyImport.importFiles(unmatched);
+    const parts = [];
+    if (ok) parts.push(`attached ${ok} to existing studies`);
+    if (unmatched.length) parts.push(`added ${unmatched.length} as new`);
+    if (fail) parts.push(`${fail} failed`);
+    if (parts.length) toast.success(parts.join(", "));
   }
 
   const records: FullTextRecord[] = included.map(p => {
@@ -460,6 +474,10 @@ export function AcquisitionPage() {
           {pending > 0 && <InlineStat icon={Clock} tone="neutral" value={pending} label="Not fetched" />}
         </>}
         actions={<>
+          <ImportStudies
+            stage="full-text-acquisition"
+            onFiles={files => { onBulkFiles(files); setBulkOpen(true); }}
+          />
           {running ? (
             <Button size="sm" variant="destructive" className="h-8 shadow-sm" onClick={() => s.cancelTask("fulltext-fetch")} title="Stop fetching">
               <X className="size-3.5 mr-1.5" />Cancel
@@ -515,9 +533,6 @@ export function AcquisitionPage() {
               </DropdownMenu>
             </>
           )}
-          <Button size="sm" variant="outline" className="h-8" onClick={() => setBulkOpen(true)}>
-            <Upload className="size-3.5 mr-1.5" />Bulk upload
-          </Button>
         </>}
       />
 
@@ -670,9 +685,13 @@ export function AcquisitionPage() {
       <Dialog open={bulkOpen} onOpenChange={(o) => { setBulkOpen(o); if (!o) setBulkRows([]); }}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Bulk upload &amp; match</DialogTitle>
+            <DialogTitle>Add studies</DialogTitle>
             <DialogDescription>
-              Upload several PDFs at once. Each file is auto-matched to a study by its filename; review the matches and fix any that are wrong before applying.
+
+              Files matching a study already in the review attach to it. The rest
+
+              are added as new studies.
+
             </DialogDescription>
           </DialogHeader>
 
@@ -703,7 +722,7 @@ export function AcquisitionPage() {
                   >
                     <SelectTrigger className="w-64 h-8 text-xs"><SelectValue placeholder="Choose a study" /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value={NONE}>Unmatched</SelectItem>
+                      <SelectItem value={NONE}>Add as a new study</SelectItem>
                       {included.map(p => (
                         <SelectItem key={p.paper_id} value={p.paper_id} className="text-xs">{p.Title.slice(0, 80)}</SelectItem>
                       ))}
@@ -750,7 +769,8 @@ function DropZone({ reason, warn, onFile }: { reason?: string; warn?: boolean; o
 }
 
 function MatchHint({ matched, score }: { matched: boolean; score: number }) {
-  if (!matched) return <div className="text-[11px] text-amber-700">No confident match. Choose a study.</div>;
+  // Unmatched is now a real outcome, not a problem to fix: it becomes a study.
+  if (!matched) return <div className="text-[11px] text-muted-foreground">Will be added as a new study</div>;
   const strong = score >= 0.6;
   return (
     <div className={`text-[11px] ${strong ? "text-emerald-700" : "text-muted-foreground"}`}>

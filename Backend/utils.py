@@ -85,7 +85,8 @@ class AIService:
         return (explicit or "").strip() or get_cred(provider) or keychain.get_key(provider) or env
 
     @staticmethod
-    def _build_model(model_name: str, keys: dict | None = None, seed: int | None = None):
+    def _build_model(model_name: str, keys: dict | None = None, seed: int | None = None,
+                     num_ctx: int | None = None):
         """Construct a chat model for `model_name`. Cloud providers (gpt/claude/
         gemini) require a key from the request or environment; anything else runs
         locally via Ollama and needs no key. Returns None if a required cloud key
@@ -131,7 +132,7 @@ class AIService:
             # extraction prompts instead of erroring.
             return ChatOllama(model=model_name, temperature=0, base_url=ollama_base,
                               seed=_seed, num_predict=4096,
-                              num_ctx=Config.OLLAMA_NUM_CTX)
+                              num_ctx=num_ctx or Config.OLLAMA_NUM_CTX)
         except Exception as e:
             print(f"[get_model] AI connection error for {model_name}: {e}")
             return None
@@ -179,10 +180,14 @@ class AIService:
         return AIService._build_model(model_name, keys)
 
     @staticmethod
-    def get_model(model_name: str, seed: int | None = None):
+    def get_model(model_name: str, seed: int | None = None, num_ctx: int | None = None):
         """Initialize a model. Cloud keys come from the user's per-request headers
-        (stored only in their browser) or backend environment variables."""
-        return AIService._build_model(model_name, None, seed=seed)
+        (stored only in their browser) or backend environment variables.
+
+        `num_ctx` raises the local context window for one call. Only data
+        extraction needs it: it feeds a whole paper where everything else feeds
+        an abstract, and a bigger window costs memory on every request."""
+        return AIService._build_model(model_name, None, seed=seed, num_ctx=num_ctx)
 
     # @staticmethod
     # def _extract_json(text: str) -> Optional[Any]:
@@ -3386,7 +3391,9 @@ class AITableExtractor:
     """
 
     @staticmethod
-    def extract_from_text(text: str, model_name: str) -> List[Dict]:
+    def extract_from_text(text: str, model_name: str,
+                          max_chars: int = 3000,
+                          num_ctx: Optional[int] = None) -> List[Dict]:
         """
         Ask the LLM to find tabular data in *text* and return it as a list of
         structured table dicts matching the same schema used by PDFService.
@@ -3396,7 +3403,10 @@ class AITableExtractor:
         if not text or len(text.strip()) < 50:
             return []
 
-        model = AIService.get_model(model_name)
+        # The window and the context must be sized together: a prompt longer
+        # than the model's context is silently truncated from the front, which
+        # reads as "the paper has no tables" rather than as a mistake.
+        model = AIService.get_model(model_name, num_ctx=num_ctx)
         if not model:
             return []
 
@@ -3409,7 +3419,7 @@ comparing groups.
 
 TEXT:
 \"\"\"
-{text[:3000]}
+{text[:max_chars]}
 \"\"\"
 
 OUTPUT RULES:

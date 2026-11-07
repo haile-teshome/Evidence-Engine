@@ -143,7 +143,41 @@ export type DocQaTurn = { question: string; answer: string; sources: { n: number
 // typecheck fine and silently drop the page/tier provenance the backend now
 // sends, which is the whole point of extracting tables deterministically.
 export type { ExtractedTable } from "./apiClient";
-export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[] };
+// Tried: which rungs of the extraction ladder ran for this paper and what each
+// found. Optional, because results saved before it existed have none.
+/**
+ * Whether a session holds anything worth saving.
+ *
+ * The saves used to ask whether Home had run, which was the same question only
+ * while every review started there. It no longer does: a reviewer can import
+ * their own PDFs at Full-Text Screening, or tune a search string on Planning,
+ * and never define a goal. Their work was not merely left unsaved either, the
+ * empty-history branch deleted the snapshot from under them.
+ */
+export function sessionHasWork(s: {
+  history?: unknown[] | null;
+  rawPapers?: unknown[] | null;
+  uniquePapers?: unknown[] | null;
+  results?: unknown[] | null;
+  fullTextResults?: unknown[] | null;
+  fullTexts?: Record<string, unknown> | null;
+  qualityReports?: unknown[] | null;
+  snowballResults?: unknown[] | null;
+  extractedPapers?: unknown[] | null;
+  textExtractions?: unknown[] | null;
+  metaExtractions?: unknown[] | null;
+  query?: string | null;
+  unifiedSearchQuery?: string | null;
+}): boolean {
+  const some = (v: unknown[] | null | undefined) => !!v && v.length > 0;
+  return some(s.history) || some(s.rawPapers) || some(s.uniquePapers) || some(s.results)
+    || some(s.fullTextResults) || some(s.qualityReports) || some(s.snowballResults)
+    || some(s.extractedPapers) || some(s.textExtractions) || some(s.metaExtractions)
+    || Object.keys(s.fullTexts || {}).length > 0
+    || !!(s.query || "").trim() || !!(s.unifiedSearchQuery || "").trim();
+}
+
+export type ExtractedPaper = { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: ExtractedTable[]; Tried?: string[] };
 
 // One archived title/abstract screening pass, kept so prior runs can be
 // compared or restored. `results` is the full result set after the pass, so a
@@ -257,11 +291,11 @@ type Ctx = {
   clearSimulationRuns: () => void;
 
   // Quality Assessment
-  rawPapers: Paper[] | null; setRawPapers: (v: Paper[] | null) => void;
+  rawPapers: Paper[] | null; setRawPapers: React.Dispatch<React.SetStateAction<Paper[] | null>>;
   // Records the reviewer marked as relevant "seed" studies (relevance feedback);
   // fed back into the grounded query builder to broaden concepts.
   seedIds: Set<string>; setSeedIds: React.Dispatch<React.SetStateAction<Set<string>>>;
-  uniquePapers: Paper[] | null; setUniquePapers: (v: Paper[] | null) => void;
+  uniquePapers: Paper[] | null; setUniquePapers: React.Dispatch<React.SetStateAction<Paper[] | null>>;
   duplicatesCount: number; setDuplicatesCount: (v: number) => void;
   qualityReports: QualityReport[] | null; setQualityReports: (v: QualityReport[] | null) => void;
   // Saved alternate appraisals: prior runs kept when a paper is re-appraised with a
@@ -315,7 +349,7 @@ type Ctx = {
   metaRun: MetaRunResult | null; setMetaRun: (v: MetaRunResult | null) => void;
 
   // Results
-  results: ScreenResult[] | null; setResults: (v: ScreenResult[] | null) => void;
+  results: ScreenResult[] | null; setResults: React.Dispatch<React.SetStateAction<ScreenResult[] | null>>;
   screeningDuration: number; setScreeningDuration: (v: number) => void;
   // Provenance for the corpus that abstract screening actually retrieved: the
   // per-database query and planned yield used for each source. PRISMA requires
@@ -324,7 +358,7 @@ type Ctx = {
   screeningPlan: ScreeningPlan | null; setScreeningPlan: (v: ScreeningPlan | null) => void;
   // Archive of every title/abstract screening pass (for compare / restore).
   screeningArchive: ScreeningPass[]; setScreeningArchive: React.Dispatch<React.SetStateAction<ScreeningPass[]>>;
-  fullTextResults: FullTextResult[] | null; setFullTextResults: (v: FullTextResult[] | null) => void;
+  fullTextResults: FullTextResult[] | null; setFullTextResults: React.Dispatch<React.SetStateAction<FullTextResult[] | null>>;
   ftDuration: number; setFtDuration: (v: number) => void;
 
   // Snowball
@@ -349,6 +383,12 @@ type Ctx = {
 
   // Extraction
   extractedPapers: ExtractedPaper[] | null; setExtractedPapers: (v: ExtractedPaper[] | null) => void;
+  // True when this session holds work. Every save gate reads it, so the local
+  // snapshot and the backend copy agree on what is worth keeping.
+  hasWork: boolean;
+  // Bumped whenever anything the snapshot writes changes. Both autosaves watch
+  // it, so neither can fall behind a stage the other knows about.
+  snapshotVersion: number;
   textExtractions: TextExtractionResult[]; setTextExtractions: React.Dispatch<React.SetStateAction<TextExtractionResult[]>>;
   // Writing Assistant: cached citation metadata enrichment + generated methods
   // summary, so switching tabs doesn't re-fetch everything.
@@ -684,7 +724,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
     sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model,
     // rawPapers repeats uniquePapers almost record for record; shared abstracts go once.
-    rawPapers: compactRawPapers(rawPapers, uniquePapers), uniquePapers, duplicatesCount, qualityReports, qualityArchive,
+    // seedIds is the reviewer's own choice of which papers the query should be
+    // refined against, and a Set does not survive JSON, so it goes as a list.
+    rawPapers: compactRawPapers(rawPapers, uniquePapers), seedIds: [...seedIds],
+    uniquePapers, duplicatesCount, qualityReports, qualityArchive,
     excludedByQuality: Array.from(excludedByQuality),
     qualityOverrides,
     gradeOutcomes,
@@ -693,7 +736,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     fullTextOverrides,
     rerankThreshold, rerankResults,
     // The newest pass's results copy is the live table itself; store a marker.
-    results, screeningArchive: compactArchive(screeningArchive, results), screeningDuration, screeningPlan, fullTextResults, ftDuration, snowballResults, snowballScreened, snowballChosen, snowballPlan, extractedPapers, prisma,
+    results, screeningArchive: compactArchive(screeningArchive, results), screeningDuration, screeningPlan,
+    fullTextResults, ftDuration,
+    // snowballSeeds is what the visible citations were fetched FROM. Without
+    // it, the warning that the seed set has changed since cannot fire, so a
+    // refresh quietly turns stale citations into current ones.
+        snowballResults, snowballScreened, snowballChosen, snowballSeeds, snowballPlan, extractedPapers, prisma,
     // Planning (search-design) outputs + per-tab run results so a session keeps
     // everything that's been run, including acquired full texts. Full-text BODIES
     // stay in the backend text cache and only their keys are saved; the store
@@ -755,6 +803,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setQualityReports(prev => pick(d.qualityReports, prev));
     setQualityArchive(prev => pick(d.qualityArchive, prev, []) ?? []);
     setExcludedByQuality(new Set(d.excludedByQuality || []));
+    if (Array.isArray(d.seedIds)) setSeedIds(new Set(d.seedIds));
     setQualityOverrides(Array.isArray(d.qualityOverrides) ? d.qualityOverrides : []);
     setGradeOutcomes(prev => pick(d.gradeOutcomes, prev, []) ?? []);
     setSearchLog(prev => pick(d.searchLog, prev, []) ?? []);
@@ -790,6 +839,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     setSnowballPlan(pick(d.snowballPlan, snowballPlan, null) ?? null);
     setSnowballScreened(prev => pick(d.snowballScreened, prev));
     setSnowballChosen(Array.isArray(d.snowballChosen) ? d.snowballChosen : null);
+    setSnowballSeeds(Array.isArray(d.snowballSeeds) ? d.snowballSeeds : null);
     setExtractedPapers(prev => pick(d.extractedPapers, prev));
     if (d.prisma) setPrisma(d.prisma);
     // Planning + per-tab run outputs.
@@ -854,6 +904,43 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // Restore the locally-saved snapshot once on mount, then keep it in sync
   // (debounced) so a refresh lands the user back in their review. Guarded so
   // the first empty render never wipes the saved snapshot before it's read.
+  // ── What the saves watch ──────────────────────────────────────────────────
+  // Everything the snapshot writes, in one list, counted as a version. Both
+  // autosaves watch that number instead of keeping their own list of fields.
+  //
+  // Two hand-kept lists is how this went wrong: the backend copy watched a
+  // shorter one, and the fields it was missing (acquired full texts, reviewer
+  // overrides on screening, the meta-analysis rows, every writing output) were
+  // exactly the ones a reviewer can spend an hour on without touching anything
+  // the list did watch. Reference identity is enough to detect a change,
+  // because every setter here replaces the value rather than mutating it.
+  const persisted: unknown[] = [
+    history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery,
+    perDbQueries, sources, numPerSource, perSourceLimits, searchSelection, searchFilters,
+    relevanceOverrides, model, rawPapers, seedIds, uniquePapers, duplicatesCount,
+    qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
+    searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
+    fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive,
+    screeningDuration, screeningPlan, fullTextResults, ftDuration,
+    snowballResults, snowballScreened, snowballChosen, snowballSeeds, snowballPlan,
+    extractedPapers, prisma, simulation, simulationQuery, simulationRuns, inUseRunId,
+    dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
+    writingEnriched, writingSummary, writingMethodsMain,
+    metaOutcome, metaMeasure, metaTau2Method, metaUseKnappHartung, metaExtractions, metaRun,
+  ];
+  const versionRef = useRef<{ seen: unknown[]; n: number }>({ seen: persisted, n: 0 });
+  if (versionRef.current.seen.length !== persisted.length
+      || versionRef.current.seen.some((v, i) => v !== persisted[i])) {
+    versionRef.current = { seen: persisted, n: versionRef.current.n + 1 };
+  }
+  const snapshotVersion = versionRef.current.n;
+
+  const hasWork = sessionHasWork({
+    history, rawPapers, uniquePapers, results, fullTextResults, fullTexts,
+    qualityReports, snowballResults, extractedPapers, textExtractions,
+    metaExtractions, query, unifiedSearchQuery,
+  });
+
   const localRestored = useRef(false);
   const lastSavedJson = useRef<string | null>(null);
   useEffect(() => {
@@ -865,7 +952,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const hasIdle = typeof w.requestIdleCallback === "function";
     const t = setTimeout(() => { if (hasIdle) idleId = w.requestIdleCallback(save, { timeout: 4000 }); else save(); }, 600);
     function save() {
-      if (history.length === 0) {
+      if (!hasWork) {
         try { localStorage.removeItem(LOCAL_SNAPSHOT_KEY); } catch { /* ignore */ }
         idbDel(LOCAL_SNAPSHOT_KEY).catch(() => { /* ignore */ });
         return;
@@ -902,15 +989,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         });
     }
     return () => { clearTimeout(t); if (idleId != null && hasIdle) w.cancelIdleCallback(idleId); };
-  }, [history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
-      sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model, rawPapers, uniquePapers, duplicatesCount,
-      qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
-      searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
-      fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive, fullTextResults,
-      snowballResults, snowballScreened, snowballChosen, snowballPlan, extractedPapers, prisma,
-      simulation, simulationRuns, inUseRunId, dbTestResults, agenticTrace, agenticSummary, textExtractions, fullTexts,
-      writingEnriched, writingSummary, writingMethodsMain,
-      currentSessionId, currentSessionTitle]);
+  }, [snapshotVersion, hasWork, currentSessionId, currentSessionTitle]);
 
   const restoreStarted = useRef(false);
   useEffect(() => {
@@ -990,6 +1069,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     snowballResults, setSnowballResults, snowballScreened, setSnowballScreened, snowballChosen, setSnowballChosen, snowballSeeds, setSnowballSeeds,
     snowballPlan, setSnowballPlan,
     extractedPapers, setExtractedPapers, fullTexts, setFullTexts, textExtractions, setTextExtractions, prisma, setPrisma,
+    hasWork, snapshotVersion,
     writingEnriched, setWritingEnriched, writingSummary, setWritingSummary,
     writingMethodsMain, setWritingMethodsMain,
     currentSessionId, setCurrentSessionId, currentSessionTitle, setCurrentSessionTitle,

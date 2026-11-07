@@ -22,6 +22,32 @@ function genId() {
 // before the LLM's nicer one arrives.
 const GOAL_LEADINS = /^(?:i\s+(?:want|would\s+like|need|wish|aim|plan|hope|am\s+looking)\s+to\s+(?:know|understand|find\s+out|learn|explore|investigate|examine|study|review|assess|evaluate|research|determine|see)(?:\s+(?:about|whether|if|how|what|the))?|what\s+(?:is|are|was|were)|how\s+(?:does|do|did|can|to)|can\s+you|could\s+you|please|tell\s+me\s+about|i'?m\s+interested\s+in|(?:a\s+)?(?:study|systematic\s+review|review|analysis|investigation|meta[-\s]analysis)\s+(?:of|on|about)|the\s+(?:relationship|association|effect|effects|impact|role|link|correlation)\s+(?:between|of|on)|explore|investigate|examine|assess|evaluate|determine|understand|is\s+there\s+(?:a|an)?)\s+/i;
 
+/** A name for a session, from whatever it actually contains.
+ *
+ * The research goal is the best name and used to be the only one, which left
+ * every review that started from imported PDFs, or from a search string typed
+ * on Planning, called "Untitled session". Several of those in the list are
+ * indistinguishable, which makes saving them nearly as useless as not saving
+ * them at all.
+ */
+function sessionName(s: any): string {
+  const goal = summarizeGoal(s.history?.[0]?.goal || "");
+  if (goal && goal !== "Untitled session") return goal;
+
+  const papers = s.rawPapers?.length || s.uniquePapers?.length || 0;
+  const firstTitle = (s.rawPapers?.[0]?.title || s.uniquePapers?.[0]?.title || "").trim();
+  if (firstTitle) {
+    const short = firstTitle.split(/\s+/).slice(0, 7).join(" ").slice(0, 60);
+    return papers > 1 ? `${short} +${papers - 1}` : short;
+  }
+
+  const q = (s.unifiedSearchQuery || s.query || "").trim();
+  if (q) return `Search: ${q.split(/\s+/).slice(0, 6).join(" ").slice(0, 50)}`;
+
+  return "Untitled session";
+}
+
+
 function summarizeGoal(goal: string): string {
   let g = (goal || "").trim().replace(/[?.!\s]+$/, "");
   for (let i = 0; i < 3; i++) {
@@ -151,7 +177,7 @@ export function SessionsPanel() {
     // no such cap, so it's the authoritative, fuller copy. Re-hydrate from it on
     // open. Guard against clobbering a DIFFERENT session or unsaved local work.
     if (s.currentSessionId && s.currentSessionId !== savedId) return;
-    if (!s.currentSessionId && s.history.length > 0) return;
+    if (!s.currentSessionId && s.hasWork) return;
     (async () => {
       try {
         const sess = await loadSession(savedId!);
@@ -215,14 +241,13 @@ export function SessionsPanel() {
       window.clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    if (user && s.history.length > 0) {
+    if (user && s.hasWork) {
       try {
         const id = s.currentSessionId || genId();
-        const firstGoal = s.history[0]?.goal || "";
         const title =
           s.currentSessionTitle && s.currentSessionTitle !== "Untitled session"
             ? s.currentSessionTitle
-            : summarizeGoal(firstGoal) || "Untitled session";
+            : sessionName(s);
         await saveSession(id, title, s.snapshot());
         await refresh();
       } catch (e) {
@@ -238,7 +263,7 @@ export function SessionsPanel() {
   useEffect(() => {
     if (!user) return;
     if (!backendReady) return;   // don't try to save before the backend is up
-    if (s.history.length === 0) return;
+    if (!s.hasWork) return;
 
     if (saveTimer.current) window.clearTimeout(saveTimer.current);
     // Debounce, then wait for an idle moment so serialising the session never
@@ -253,12 +278,11 @@ export function SessionsPanel() {
       setSyncStatus("saving");
       try {
         const id = s.currentSessionId || genId();
-        const firstGoal = s.history[0]?.goal || "";
         // Use a string-slice title up front so we never block on the LLM.
-        const fallbackTitle = summarizeGoal(firstGoal);
+        const fallbackTitle = sessionName(s);
         let title = s.currentSessionTitle && s.currentSessionTitle !== "Untitled session"
           ? s.currentSessionTitle
-          : fallbackTitle || "Untitled session";
+          : fallbackTitle;
 
         if (!s.currentSessionId) {
           s.setCurrentSessionId(id);
@@ -278,6 +302,9 @@ export function SessionsPanel() {
 
         // Upgrade the title via LLM exactly once per session, in the background.
         // Subsequent auto-saves will reuse the upgraded title via s.currentSessionTitle.
+        // Only from a research goal: a model given a paper title would hand back
+        // that paper's subject as the name of a review it is one study in.
+        const firstGoal = s.history[0]?.goal || "";
         if (!titledRef.current.has(id) && firstGoal) {
           titledRef.current.add(id);
           AIService.generateSessionTitle(firstGoal)
@@ -309,41 +336,12 @@ export function SessionsPanel() {
       if (saveTimer.current) window.clearTimeout(saveTimer.current);
       if (idleId != null && hasIdle) w.cancelIdleCallback(idleId);
     };
-    // Re-run when any major piece of the snapshot changes.
+    // One number instead of a hand-kept list of fields. The list this replaced
+    // was missing thirty-five of them, including acquired full texts, reviewer
+    // overrides and every meta-analysis row, so the backend copy of a session
+    // could sit an hour behind the work in front of the reviewer.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
-    user?.id,
-    backendReady,
-    s.history,
-    s.pico,
-    s.inclusion,
-    s.exclusion,
-    s.query,
-    s.rawPapers,
-    s.uniquePapers,
-    s.qualityReports,
-    s.qualityArchive,
-    s.results,
-    s.fullTextResults,
-    s.snowballResults,
-    s.snowballScreened,
-    s.extractedPapers,
-    s.textExtractions,
-    s.gradeOutcomes,
-    s.searchLog,
-    s.protocol,
-    s.protocolDeviations,
-    s.prismaChecklist,
-    // Search-planning outputs (per-database queries + optimization runs).
-    s.perDbQueries,
-    s.unifiedSearchQuery,
-    s.simulation,
-    s.simulationRuns,
-    s.dbTestResults,
-    s.agenticTrace,
-    s.agenticSummary,
-    s.prisma,
-  ]);
+  }, [user?.id, backendReady, s.snapshotVersion, s.hasWork]);
 
   if (!user) {
     return (

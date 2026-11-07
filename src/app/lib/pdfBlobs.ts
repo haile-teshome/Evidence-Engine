@@ -64,6 +64,26 @@ export function getPdfBlob(id: string): string | undefined {
   return blobs[id]?.url;
 }
 
+/** The stored file itself, for code that has to send the bytes somewhere.
+ *
+ * Writes go through a queue, and an import registers a file and asks for it
+ * back in the same tick, so the read has to wait for the write it is racing.
+ * The live object URL is the fallback: it exists from the moment the file is
+ * registered, whether or not IndexedDB has caught up or is available at all.
+ */
+export async function getPdfFile(id: string): Promise<Blob | undefined> {
+  await writeChain.catch(() => { /* a failed write is not a failed read */ });
+  const stored = await idbGet<StoredEntry>(fileKey(id)).catch(() => undefined);
+  if (stored?.blob) return stored.blob;
+  const url = blobs[id]?.url;
+  if (!url) return undefined;
+  try {
+    return await (await fetch(url)).blob();
+  } catch {
+    return undefined;
+  }
+}
+
 export function getPdfBlobMime(id: string): string | undefined {
   return blobs[id]?.mime;
 }

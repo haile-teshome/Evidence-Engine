@@ -24,6 +24,14 @@ pandas==2.2.2
 biopython>=1.85
 pypdf==4.3.1
 pdfplumber==0.11.4
+# Optional, not installed by default: the strongest deterministic table reader.
+# A layout model finds the table as a region and TableFormer reads its cells,
+# which is what a two-column journal page needs and what pdfplumber's text-layer
+# heuristics cannot do. ~1 GB of models on first use, so it is a deliberate
+# extra rather than part of the packaged app:
+#   pip install docling
+# The tier is lazy and guarded (Backend/docling_tables.py): absent, it is
+# skipped and the ladder falls through. EE_USE_DOCLING=0 turns it off.
 python-docx==1.1.2
 numpy==1.26.4
 # --- Screening prioritisation (active-learning mode) ---

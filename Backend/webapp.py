@@ -73,10 +73,23 @@ def mount_frontend(app: FastAPI, directory: Optional[Path] = None) -> bool:
     def root() -> FileResponse:
         return _index()
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+    # Every method, not just GET. Registered for GET alone, a POST to a path with
+    # no route matched the path but not the method, so Starlette answered 405
+    # "Method Not Allowed" before this handler ran. That is actively misleading:
+    # the honest answer for an unknown API route is 404, and the 405 sent a
+    # reader hunting for a method mismatch instead of a missing endpoint (most
+    # often a backend still running code from before the route was added).
+    @app.api_route(
+        "/{full_path:path}", include_in_schema=False,
+        methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
     def spa(full_path: str, request: Request):
         if full_path.startswith(API_PREFIXES):
-            return JSONResponse({"detail": "Not Found"}, status_code=404)
+            return JSONResponse(
+                {"detail": f"No such endpoint: /{full_path}"}, status_code=404)
+        if request.method not in ("GET", "HEAD"):
+            # A static page genuinely cannot be posted to, so here 405 is right.
+            return JSONResponse({"detail": "Method Not Allowed"}, status_code=405)
         candidate = (d / full_path).resolve()
         try:                      # refuse to serve outside dist (traversal)
             candidate.relative_to(d.resolve())

@@ -3,6 +3,8 @@ import { useStore } from "../lib/store";
 import { AIService } from "../lib/mockServices";
 import { effectiveAbstractDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
+import { ImportStudies } from "../components/ImportStudies";
+import { sendPdfToServer } from "../lib/pdfHandoff";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
@@ -36,20 +38,23 @@ export function ExtractionPage() {
 
   if (!s.results) return <div className="space-y-3">{projectBlock}{!projectBlock && <EmptyState icon={Table2} title="Screening not complete yet"
     description="Complete Abstract Screening first; included studies unlock table extraction here."
-    action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Table2 }} />}</div>;
+    action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Table2 }}
+    extra={<ImportStudies stage="table-extraction" />} />}</div>;
 
   // Honour reviewer overrides from abstract screening.
   const passed = s.results.filter(r => effectiveAbstractDecision(r, s.abstractOverrides) === "INCLUDE");
   if (passed.length === 0) return <div className="space-y-3">{projectBlock}{!projectBlock && <EmptyState icon={Table2} title="No included articles yet"
     description="No included studies available for extraction. Include studies in Abstract Screening first."
-    action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Table2 }} />}</div>;
+    action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Table2 }}
+    extra={<ImportStudies stage="table-extraction" />} />}</div>;
 
   async function extract() {
     const { abort } = s.startTask("table-extract", [{ id: "tbl", label: "Extracting tables", status: "running" }]);
     s.updateTask("table-extract", { progress: { done: 0, total: passed.length } });
     const signal = abort.signal;
     try {
-      const out: { Paper_Title: string; Paper_URL: string; Source: string; Extracted_Tables: any[] }[] = [];
+      const out: { Paper_Title: string; Paper_URL: string; Source: string;
+                   Extracted_Tables: any[]; Tried?: string[] }[] = [];
       for (let i = 0; i < passed.length; i++) {
         if (signal.aborted) break;
         const p = passed[i];
@@ -58,7 +63,10 @@ export function ExtractionPage() {
           detail: p.Title.slice(0, 80),
         });
         try {
-          const tables = await AIService.extractTables({
+          // The reviewer's own PDF lives in the browser; the readers that work
+          // on the file need it on the server first.
+          await sendPdfToServer(p.paper_id);
+          const { tables, tried } = await AIService.extractTablesTraced({
             Title: p.Title,
             URL: p.URL,
             Source: p.Source,
@@ -67,7 +75,8 @@ export function ExtractionPage() {
             // Use the cached full text if Full-Text Acquisition has fetched it.
             full_text: s.fullTexts[p.paper_id]?.text || "",
           }, signal);
-          out.push({ Paper_Title: p.Title, Paper_URL: p.URL, Source: p.Source, Extracted_Tables: tables });
+          out.push({ Paper_Title: p.Title, Paper_URL: p.URL, Source: p.Source,
+                     Extracted_Tables: tables, Tried: tried });
         } catch (e: any) {
           if (signal.aborted) break;
           console.error(`table-extract ${i + 1} failed:`, e?.message);
@@ -133,6 +142,7 @@ export function ExtractionPage() {
           {ep && withoutTables > 0 && <InlineStat icon={AlertTriangle} tone="amber" value={withoutTables} label="No tables" />}
         </>}
         actions={<>
+          <ImportStudies stage="table-extraction" />
           <div className="flex items-center gap-1.5">
             <label className="text-xs text-muted-foreground">Format</label>
             <Select value={format} onValueChange={v => setFormat(v as Format)}>
@@ -331,7 +341,21 @@ function PaperTablesDetail({ paper, format }: { paper: ExtractedPaper; format: F
               </TabsContent>
             ))}
           </Tabs>
-        ) : <Alert><AlertDescription>No tables found in this article. Click the title above to open it and check for tables in figures or the full text.</AlertDescription></Alert>}
+        ) : (
+          <Alert>
+            <AlertDescription className="space-y-1.5">
+              <div>No tables found in this article. Click the title above to open it and check for tables in figures or the full text.</div>
+              {/* What was actually tried. Without it, a paper that genuinely has
+                  no tables and one whose file never reached the readers look
+                  exactly the same. */}
+              {paper.Tried?.length ? (
+                <ul className="text-xs text-muted-foreground list-disc pl-4 space-y-0.5">
+                  {paper.Tried.map((line, i) => <li key={i}>{line}</li>)}
+                </ul>
+              ) : null}
+            </AlertDescription>
+          </Alert>
+        )}
       </div>
 
       {/* Full-screen view of a single table. */}
@@ -439,6 +463,8 @@ type ExtractedPaper = {
   Paper_URL: string;
   Source: string;
   Extracted_Tables: { title: string; type?: string; data: string[][]; caption?: string }[];
+  // Which rungs of the extraction ladder ran, and what each found.
+  Tried?: string[];
 };
 
 const TABLE_TYPE_FILL: Record<string, string> = {

@@ -6,12 +6,16 @@ import { Button } from "./ui/button";
 // guidance, and an optional next action. Use instead of a bare alert so
 // "nothing here yet" reads as intentional rather than unfinished.
 export function EmptyState({
-  icon: Icon, title, description, action,
+  icon: Icon, title, description, action, extra,
 }: {
   icon: LucideIcon;
   title: string;
   description?: ReactNode;
   action?: { label: string; onClick: () => void; icon?: LucideIcon };
+  // A second way out, beside the action. Every stage that reads an earlier one
+  // offers its own import here, so a reviewer who did the earlier work
+  // elsewhere can start from this stage instead of walking back through it.
+  extra?: ReactNode;
 }) {
   const AIcon = action?.icon;
   return (
@@ -21,10 +25,15 @@ export function EmptyState({
       </div>
       <h3 className="font-medium">{title}</h3>
       {description && <p className="text-sm text-muted-foreground mt-1 max-w-md">{description}</p>}
-      {action && (
-        <Button size="sm" className="mt-4" onClick={action.onClick}>
-          {AIcon && <AIcon className="size-3.5 mr-1.5" />}{action.label}
-        </Button>
+      {(action || extra) && (
+        <div className="flex flex-wrap items-center justify-center gap-2 mt-4">
+          {action && (
+            <Button size="sm" onClick={action.onClick}>
+              {AIcon && <AIcon className="size-3.5 mr-1.5" />}{action.label}
+            </Button>
+          )}
+          {extra}
+        </div>
       )}
     </div>
   );

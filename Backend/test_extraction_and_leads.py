@@ -173,8 +173,15 @@ class TestConfidence:
         t = next(iter(EF.NUMERIC_TYPES))
         assert EF._confidence(t, 128, "", "we enrolled 128 patients") == "low"
 
-    def test_text_value_with_a_quote_is_high(self):
-        assert EF._confidence("text", "randomised", "the trial was randomised", "...") == "high"
+    def test_text_value_with_a_quote_from_the_paper_is_high(self):
+        src = "We enrolled 128 patients. The trial was randomised and double blind."
+        assert EF._confidence("text", "randomised", "the trial was randomised", src) == "high"
+
+    def test_text_value_whose_quote_is_not_in_the_paper_is_low(self):
+        """The same fabrication guard the numbers get. A model asked for 60 fields
+        will invent its own supporting sentence, often by echoing the field's
+        description back, and an unverified quote must not arrive pre-accepted."""
+        assert EF._confidence("text", "moderate", "risk of bias from confounding", "...") == "low"
 
     def test_text_value_without_a_quote_is_low(self):
         assert EF._confidence("text", "randomised", "", "...") == "low"

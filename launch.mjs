@@ -41,7 +41,16 @@ const LOCK_FILE = path.join(EE_CACHE, "launcher.pid");            // single-inst
 const LOG_FILE = path.join(EE_CACHE, "launcher.log");             // what this run did
 const BACKEND_LOG = path.join(EE_CACHE, "backend.log");           // the backend's own output
 try { fs.mkdirSync(EE_CACHE, { recursive: true }); } catch { /* exists */ }
-const DEFAULT_MODEL = "hf.co/mradermacher/leads-mistral-7b-v1-GGUF";  // default local screener
+// Two models, because the stages want different things of them. LEADS-Mistral
+// is fine-tuned for per-PICO screening verdicts and wins on that; asked to
+// extract fields from a paper it returns no usable JSON at all (measured: 0 of
+// 8 known values, four times slower), which is why the backend routes every
+// non-screening task to a general-purpose model. That model has to be on the
+// machine for extraction to work, so it is downloaded here too.
+const MODELS = [
+  { tag: "hf.co/mradermacher/leads-mistral-7b-v1-GGUF", what: "screening" },   // ~4 GB
+  { tag: "qwen2.5:7b", what: "extraction and everything else" },               // ~4.7 GB
+];
 
 const started = [];               // child processes we spawned (to clean up)
 // Set when the backend process exits by itself. Everything the app asks of /api
@@ -391,18 +400,37 @@ function installOllama() {
   return findOllama();
 }
 
-// Pull the default screening model if it isn't present. Runs in the BACKGROUND
-// (it's ~4 GB) so the app opens immediately; Ollama resumes the pull if quit.
+// Pull whichever default models are missing. Runs in the BACKGROUND (about
+// 9 GB between them) so the app opens immediately; Ollama resumes a pull if the
+// app is quit part-way. One at a time: two concurrent pulls share the same
+// bandwidth and finish later than two sequential ones.
 async function ensureModel(ollamaBin) {
+  let installed = [];
   try {
     const r = await fetch(`${OLLAMA_URL}api/tags`);
-    const j = await r.json();
-    if ((j.models || []).some((m) => (m.name || "").startsWith(DEFAULT_MODEL))) return;
+    installed = ((await r.json()).models || []).map((m) => m.name || "");
   } catch { /* server not answering tags yet — pull anyway */ }
-  log(`Downloading the default AI model in the background (~4 GB): ${DEFAULT_MODEL}`);
-  log("The app is usable now; local screening works once the download finishes.");
-  const p = spawn(ollamaBin, ["pull", DEFAULT_MODEL], { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
-  started.push(p);
+
+  const missing = MODELS.filter((m) => !installed.some((t) => t.startsWith(m.tag)));
+  if (!missing.length) return;
+
+  for (const m of missing) {
+    log(`Downloading the local model for ${m.what} in the background: ${m.tag}`);
+  }
+  log("The app is usable now; local AI works once the downloads finish.");
+
+  const pullNext = (i) => {
+    if (i >= missing.length) return;
+    const p = spawn(ollamaBin, ["pull", missing[i].tag],
+                    { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
+    started.push(p);
+    p.on("exit", (code) => {
+      log(code === 0 ? `Downloaded ${missing[i].tag}`
+                     : `Could not download ${missing[i].tag} (exit ${code})`);
+      pullNext(i + 1);
+    });
+  };
+  pullNext(0);
 }
 
 function openDefaultBrowser(url) {

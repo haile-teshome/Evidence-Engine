@@ -11,6 +11,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
+import { ImportStudies } from "../components/ImportStudies";
 import { Download, Copy, Loader2, BookOpen, RefreshCw, Search, ExternalLink, CheckCircle2, AlertTriangle } from "lucide-react";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
@@ -687,7 +688,8 @@ export function WritingPage() {
     return (
       <EmptyState icon={BookOpen} title="No articles yet"
         description="Run a search on the Home page to gather included studies, then come back to export citations and draft your methods."
-        action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }} />
+        action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }}
+        extra={<ImportStudies stage="writing" />} />
     );
   }
 
@@ -707,6 +709,7 @@ export function WritingPage() {
           {missingCount > 0 && !enriching && <><PaneDivider /><InlineStat icon={AlertTriangle} tone="amber" value={missingCount} label="Missing metadata" /></>}
         </>}
         actions={<>
+          <ImportStudies stage="writing" />
           <Button variant="outline" size="sm" className="h-8" onClick={() => enrichAll(includedPapers, true)} disabled={enriching} title="Re-fetch full metadata (authors, journal, year) for every article">
             {enriching ? <Loader2 className="size-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="size-3.5 mr-1.5" />}Re-fetch
           </Button>

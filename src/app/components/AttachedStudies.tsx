@@ -4,6 +4,7 @@ import { useStudyImport } from "../lib/useStudyImport";
 import { getPdfBlob } from "../lib/pdfBlobs";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
+import { ImportStudies } from "./ImportStudies";
 import { Badge } from "./ui/badge";
 import { Trash2, X, FileText, Loader2, ExternalLink } from "lucide-react";
 
@@ -49,6 +50,11 @@ export function AttachedStudies({
             </Button>
           </div>
         </DialogHeader>
+
+        {/* Files, a whole folder, or a pasted list. The chat bar's "+" only
+            ever offered individual files. */}
+        <ImportStudies stage="home" label="Add studies" />
+
 
         {uploaded.length === 0 ? (
           <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">

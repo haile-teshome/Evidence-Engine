@@ -26,6 +26,7 @@ import {
   Image as ImageIcon, ExternalLink,
 } from "lucide-react";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
+import { ImportStudies } from "../components/ImportStudies";
 import {
   gradeCertainty, GRADE_DOWNGRADE_DOMAINS, GRADE_UPGRADE_FACTORS, GradeOutcome,
 } from "../lib/apiClient";
@@ -426,13 +427,6 @@ export function QualityPage() {
     return [...m.entries()].map(([label, rs]) => ({ label, reports: rs }));
   }, [reports]);
 
-  // All hooks are declared above; only now is it safe to bail out early.
-  if (s.history.length === 0) {
-    return <EmptyState icon={ShieldCheck} title="No research goal yet"
-      description="Define your research question on the Home page, then screen and appraise your included studies here."
-      action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }} />;
-  }
-
   const kept = reports ? reports.filter(r => !s.excludedByQuality.has(r.paper_id)).length : 0;
 
   // The figure + paper list are scoped to the active instrument tab.
@@ -443,6 +437,20 @@ export function QualityPage() {
     : activeReports, [activeReports, q]);
   const pagedQ = usePagedRows(filtered);
   const selected = activeReports.find(r => r.paper_id === selectedId) ?? activeReports[0] ?? null;
+
+  // Every hook really is above this line now, which is the only reason the
+  // bail-out is safe: starting a new session empties the history under a
+  // mounted page, and skipping the hooks below on that render is what React
+  // reports as "rendered fewer hooks than expected".
+  // Studies, not a research question, are what this stage appraises: a
+  // reviewer who arrives with their own included studies gets to work on them
+  // even though they never wrote a goal in this app.
+  if (s.history.length === 0 && !s.results?.length && !s.fullTextResults?.length) {
+    return <EmptyState icon={ShieldCheck} title="No research goal yet"
+      description="Define your research question on the Home page, then screen and appraise your included studies here."
+      action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }}
+      extra={<ImportStudies stage="quality-assessment" />} />;
+  }
 
   return (
     <div className="space-y-4">
@@ -475,7 +483,8 @@ export function QualityPage() {
             return papers.length === 0 ? (
               <EmptyState icon={ShieldCheck} title="No included articles yet"
                 description="Run Abstract or Full-Text screening first; included studies flow here for risk-of-bias appraisal."
-                action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Search }} />
+                action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Search }}
+                extra={<ImportStudies stage="quality-assessment" />} />
             ) : (
               <div className="text-xs text-muted-foreground px-1">
                 {papers.length} included article{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text yet, abstract-only appraisal"}
@@ -508,6 +517,7 @@ export function QualityPage() {
               {summaryCounts.no_info > 0 && <InlineStat icon={HelpCircle} value={summaryCounts.no_info} label="Unclear" tone="neutral" />}
             </>}
             actions={<>
+              <ImportStudies stage="quality-assessment" />
               <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
                 <SelectTrigger className="h-8 w-[140px] text-xs" title="Framework: re-run all articles with one instrument, or auto-match each to its study design.">
                   <SelectValue placeholder="Auto-match" />

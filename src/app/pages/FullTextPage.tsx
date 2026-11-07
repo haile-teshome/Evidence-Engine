@@ -1,6 +1,8 @@
 import { Fragment, useState, useMemo, useEffect } from "react";
 import { usePagedRows } from "../lib/usePagedRows";
 import { ShowMore } from "../components/ShowMore";
+import { ImportStudies } from "../components/ImportStudies";
+import { excludeImported } from "../lib/importedAt";
 import { useStore } from "../lib/store";
 import { AIService, formatDuration, FullTextResult } from "../lib/mockServices";
 import { RapidScreen } from "../components/RapidScreen";
@@ -173,7 +175,8 @@ export function FullTextPage() {
     a.splice(fi, 1); a.splice(ti, 0, from); return a;
   });
 
-  if (!s.results) return <EmptyState icon={FileSearch} title="No screening results yet" description="Run abstract screening first to unlock per-criterion full-text evaluation." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
+  if (!s.results) return <EmptyState icon={FileSearch} title="No screening results yet" description="Run abstract screening first to unlock per-criterion full-text evaluation." action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }}
+    extra={<ImportStudies stage="full-text-screening" />} />;
 
   // The queue uses EFFECTIVE abstract decisions, so a paper the reviewer
   // rescued at the abstract stage (by checking its Keep box) now joins the
@@ -183,7 +186,8 @@ export function FullTextPage() {
   // full-text pass already ran, keep showing it even when the CURRENT abstract
   // run includes 0 papers (e.g. after restoring a different screening pass), so
   // completed full-text work isn't hidden by swapping abstract runs.
-  if (passed.length === 0 && !s.fullTextResults) return <EmptyState icon={FileSearch} title="No articles passed abstract screening" description="The current screening run included 0 articles. Adjust your inclusion criteria and re-run abstract screening, or restore a run that has included articles." action={{ label: "Back to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }} />;
+  if (passed.length === 0 && !s.fullTextResults) return <EmptyState icon={FileSearch} title="No articles passed abstract screening" description="The current screening run included 0 articles. Adjust your inclusion criteria and re-run abstract screening, or restore a run that has included articles." action={{ label: "Back to Abstract Screening", onClick: () => s.setPage("abstract"), icon: FileSearch }}
+    extra={<ImportStudies stage="full-text-screening" />} />;
 
   // Screen `targets`. When `append`, keep the existing results and add the new
   // rows (used to screen papers added after the first run, e.g. via snowball);
@@ -259,7 +263,10 @@ export function FullTextPage() {
   const allCriteria = [...s.inclusion, ...s.exclusion];
   // Papers in the queue that haven't been screened at full text yet (e.g. added
   // later via snowball). Offer to screen just these without redoing the rest.
-  const newPapers = ft ? passed.filter(p => !ft.some(r => r.paper_id === p.paper_id)) : [];
+  // Same rule as abstract screening: an imported row carries the record into
+  // this stage's queue without claiming the stage has judged it.
+  const judged = new Set(excludeImported(ft || []).map(r => r.paper_id));
+  const newPapers = ft ? passed.filter(p => !judged.has(p.paper_id)) : [];
   // How much of the queue will actually be read at full length. A record with
   // no acquired text is screened on its abstract, which is a different claim.
   const ftReady = passed.filter(p => {
@@ -364,6 +371,7 @@ export function FullTextPage() {
                 )}
               </>}
               actions={<>
+                <ImportStudies stage="full-text-screening" />
                 {ftMissing > 0 && (
                   <Button size="sm" variant="outline" className="h-8 shadow-sm" onClick={() => s.setPage("acquisition")}
                           title="Collect the missing full texts before judging them">

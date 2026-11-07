@@ -22,6 +22,7 @@ type PaperRef = { paper_id: string; title: string; url?: string; source?: string
 
 type Counts = {
   identified: number;
+  other_sources?: number;
   source_counts?: Record<string, number>;
   duplicates_removed: number;
   after_duplicates?: number;
@@ -275,7 +276,10 @@ export function PrismaFlow({
     ? Object.values(counts.ft_exclusion_breakdown).reduce((s, v) => s + v, 0)
     : 0;
   const included = counts.included_final ?? 0;
-  const otherSources = 0;
+  // Records the reviewer imported part-way through, which PRISMA 2020 puts
+  // under "other sources" rather than among the database results. Still
+  // editable, like every other number on the diagram.
+  const otherSources = counts.other_sources ?? 0;
 
   // ---- Editable overrides ---------------------------------------------------
   type N = Record<string, number>;

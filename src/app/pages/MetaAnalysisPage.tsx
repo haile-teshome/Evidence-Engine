@@ -22,6 +22,7 @@ import { SourcePane, TablePane, AskPane } from "../components/EvidenceWorkspace"
 import { AIService, type ExtractedTable } from "../lib/apiClient";
 import { Sigma, Play, Calculator, X as XIcon, AlertTriangle, ChevronDown, FileText, ListChecks, Percent } from "lucide-react";
 import { ControlPane, InlineStat, PaneDivider } from "../components/ControlPane";
+import { ImportStudies } from "../components/ImportStudies";
 import { EmptyState } from "../components/EmptyState";
 import { toast } from "sonner";
 
@@ -850,12 +851,14 @@ export function MetaAnalysisPage() {
   if (!s.results) {
     return <EmptyState icon={Sigma} title="Screening not complete yet"
       description="Run abstract screening first. The studies it includes are what gets extracted and pooled here."
-      action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }} />;
+      action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }}
+      extra={<ImportStudies stage="meta-analysis" />} />;
   }
   if (candidatePapers.length === 0) {
     return <EmptyState icon={Sigma} title="No included articles to meta-analyse"
       description="The current screening run included 0 articles, so there are no effect sizes to pool. Include some articles, or restore a run that has includes."
-      action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }} />;
+      action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Sigma }}
+      extra={<ImportStudies stage="meta-analysis" />} />;
   }
 
   return (
@@ -880,6 +883,7 @@ export function MetaAnalysisPage() {
           <InlineStat icon={FileText} value={candidatePapers.length} label="Ready to extract" />
         )}
         actions={<>
+          <ImportStudies stage="meta-analysis" />
           {/* Say what is missing rather than leaving a greyed-out button and no
               explanation of what would un-grey it. Shown whether or not there
               are already extractions, since the outcome can be cleared after a
