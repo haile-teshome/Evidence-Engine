@@ -293,6 +293,57 @@ describe("stage gating", () => {
     } as any);
   };
 
+  it("QualityPage shows its own controls before anything has been screened", () => {
+    /* It used to replace itself with a "No research goal yet" signpost, which
+       hid the instrument note, the integrity tab and the appraise action behind
+       a card about a different page. The panel that lists included articles
+       says what is missing in place instead. */
+    const view = renderPage(QualityPage);
+    expect(view.container.textContent).not.toMatch(/no research goal yet/i);
+    expect(view.container.textContent).toMatch(/risk of bias/i);
+    expect(view.container.textContent).toMatch(/research integrity/i);
+    // With nothing included there is nothing to run, so the appraise action
+    // is not offered: the panel says what to do instead.
+    expect(view.container.textContent).toMatch(/no included articles yet/i);
+    expect(screen.queryByRole("button", { name: /^appraise$/i })).toBeNull();
+  });
+
+  it("QualityPage previews the appraisal panel before anything is appraised", () => {
+    /* The page used to end at the Appraise button, so what this stage produces,
+       and which articles it would cover, were invisible until after a run. */
+    const view = renderPage(QualityPage, (st: any) => {
+      st.setFullTextResults([{
+        paper_id: "p1", Title: "Bianconi 2024", Source: "PubMed", URL: "",
+        Abstract: "a", Decision: "Include", Reason: "",
+      }] as any);
+      st.setFullTexts({
+        p1: { paper_id: "p1", title: "Bianconi 2024", url: "", source: "PubMed",
+              status: "found", text: "full body" },
+      } as any);
+    });
+
+    const text = view.container.textContent || "";
+    // The sections it will fill, standing empty: counts, the article list and
+    // the pane that shows one article's domains.
+    expect(text).toMatch(/appraised/i);                 // the stat row
+    expect(text).toMatch(/low.*some.*high/is);          // ... with every count at zero
+    expect(text).toMatch(/included studies/i);          // the left card
+    // ... searchable, the same box as after a run
+    expect(view.container.querySelector("input")?.getAttribute("placeholder"))
+      .toMatch(/filter 1 article/i);
+    expect(text).toContain("Bianconi 2024");            // the article it would cover
+    expect(text).toMatch(/full text/i);                 // and what it has to read
+    expect(text).toMatch(/auto-match/i);                // instrument picker, usable now
+    expect(text).toMatch(/not appraised yet/i);         // the detail pane, empty
+    // The run action sits in the control pane, where Re-run sits once there
+    // are appraisals, rather than as a separate full-width button.
+    expect(screen.getByRole("button", { name: /^appraise$/i })).toBeTruthy();
+    expect(text).toContain("\u2014");                    // judgement column, still empty
+    // The blurb and the count line are gone.
+    expect(text).not.toMatch(/audit-logged/i);
+    expect(text).not.toMatch(/included article \(/i);
+  });
+
   it("SimulationPage looks the same with or without a research question", () => {
     /* Checking one search string across several databases is a reason to be
        here on its own, so the page is neither gated on a goal set elsewhere nor

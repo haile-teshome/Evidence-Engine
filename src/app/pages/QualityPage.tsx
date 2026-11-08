@@ -442,15 +442,13 @@ export function QualityPage() {
   // bail-out is safe: starting a new session empties the history under a
   // mounted page, and skipping the hooks below on that render is what React
   // reports as "rendered fewer hooks than expected".
-  // Studies, not a research question, are what this stage appraises: a
-  // reviewer who arrives with their own included studies gets to work on them
-  // even though they never wrote a goal in this app.
-  if (s.history.length === 0 && !s.results?.length && !s.fullTextResults?.length) {
-    return <EmptyState icon={ShieldCheck} title="No research goal yet"
-      description="Define your research question on the Home page, then screen and appraise your included studies here."
-      action={{ label: "Go to Home", onClick: () => s.setPage("home"), icon: Search }}
-      extra={<ImportStudies stage="quality-assessment" />} />;
-  }
+  // Studies, not a research question, are what this stage appraises, and the
+  // page no longer replaces itself with a card asking for one. A reviewer
+  // arriving with their own included studies sees the appraisal controls, the
+  // instrument picker and the integrity tab straight away, and the panel that
+  // lists the included articles says what is missing in place. Replacing the
+  // whole page hid every one of its own components behind a signpost.
+  // `s.history` is read nowhere else here, so nothing below depends on it.
 
   return (
     <div className="space-y-4">
@@ -468,28 +466,17 @@ export function QualityPage() {
       {qualityTab === "appraisal" && (<>
       {!reports && (
         <>
-          <Alert>
-            <AlertDescription>
-              <p>
-                Risk-of-bias appraisal of your <strong className="font-semibold text-foreground">included</strong> articles,
-                with a rubric matched to each study design (RoB 2, ROBINS-I, JBI, AMSTAR 2). Uses the acquired
-                full text where available for better judgments. Reviewer overrides are audit-logged.
-              </p>
-            </AlertDescription>
-          </Alert>
           {(() => {
             const { papers, stage } = includedPapers();
             const withFT = papers.filter(p => s.fullTexts[p.id]?.text).length;
+            // The panel below lists the articles and says which have full
+            // text, so a count line above it repeated the same thing.
             return papers.length === 0 ? (
               <EmptyState icon={ShieldCheck} title="No included articles yet"
                 description="Run Abstract or Full-Text screening first; included studies flow here for risk-of-bias appraisal."
                 action={{ label: "Go to Abstract Screening", onClick: () => s.setPage("abstract"), icon: Search }}
                 extra={<ImportStudies stage="quality-assessment" />} />
-            ) : (
-              <div className="text-xs text-muted-foreground px-1">
-                {papers.length} included article{papers.length === 1 ? "" : "s"} ({stage} screening){withFT ? ` · ${withFT} with full text` : " · no full text yet, abstract-only appraisal"}
-              </div>
-            );
+            ) : null;
           })()}
           {task && task.status === "running" && (
             <TaskProgressCard
@@ -498,10 +485,150 @@ export function QualityPage() {
               onCancel={() => s.cancelTask("quality-assess")}
             />
           )}
-          <Button onClick={() => runAssess()} disabled={running || includedPapers().papers.length === 0} size="lg" className="w-full"
-                  title="Run an AI risk-of-bias appraisal on every included article">
-            <ShieldCheck className="size-4 mr-2" />{running ? "Appraising…" : "Appraise Risk of Bias on Included Articles"}
-          </Button>
+          {/* The sections this stage produces, standing empty, the way Planning
+              shows its database panes before anything has been counted. The
+              page used to end at the button, so what an appraisal looks like,
+              and which articles it would cover, were invisible until after a
+              run. Values are absent rather than faked: every count is zero and
+              the judgement column is a dash. */}
+          {(() => {
+            const { papers } = includedPapers();
+            if (!papers.length) return null;
+            // Whichever instrument the run would use: the one picked, or the
+            // first available. Its domains are the rows an appraisal fills.
+            const previewInstrument = instruments.find(i => i.id === bulkInstrument) || instruments[0] || null;
+            const previewDomains = previewInstrument?.domains ?? [];
+            return (
+              <>
+                <ControlPane
+                  stats={<>
+                    <InlineStat icon={ShieldCheck} value={0} label="Appraised" />
+                    <PaneDivider />
+                    <InlineStat icon={CheckCircle2} value={0} label="Low" tone="success" />
+                    <InlineStat icon={AlertTriangle} value={0} label="Some" tone="amber" />
+                    <InlineStat icon={ShieldAlert} value={0} label="High" tone="danger" />
+                  </>}
+                  actions={<>
+                    <ImportStudies stage="quality-assessment" />
+                    <Select value={bulkInstrument} onValueChange={setBulkInstrument} disabled={running || instruments.length === 0}>
+                      <SelectTrigger className="h-8 w-[140px] text-xs" title="Framework: appraise every article with one instrument, or auto-match each to its study design.">
+                        <SelectValue placeholder="Auto-match" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__auto">Auto-match</SelectItem>
+                        {["internal_validity", "reporting", "certainty"]
+                          .filter(ax => instruments.some(i => i.axis === ax))
+                          .map(ax => (
+                            <div key={ax}>
+                              <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{AXIS_LABEL[ax]}</div>
+                              {instruments.filter(i => i.axis === ax).map(i => (
+                                <SelectItem key={i.id} value={i.id}>
+                                  {i.short_name}{i.legacy ? " (legacy)" : ""}
+                                </SelectItem>
+                              ))}
+                            </div>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                    <Button size="sm" className="h-8 shadow-sm"
+                            title="Run an AI risk-of-bias appraisal on every included article"
+                            onClick={() => runAssess(bulkInstrument !== "__auto" ? bulkInstrument : undefined)}
+                            disabled={running}>
+                      <ShieldCheck className="size-3.5 mr-1.5" />{running ? "Appraising…" : "Appraise"}
+                    </Button>
+                  </>}
+                />
+
+                {/* The heading and its outputs, as after a run. Both exports
+                    are dead until there is an appraisal to export: the bias
+                    figure is drawn from the judgements, and there are none. */}
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <h3 className="font-medium">Risk-of-bias appraisal</h3>
+                  <div className="flex items-center gap-1 ml-auto">
+                    <Button variant="ghost" size="sm" disabled
+                            className="size-8 px-0 text-muted-foreground"
+                            title="Export appraisals (CSV + JSON). Nothing appraised yet.">
+                      <FileDown className="size-4" />
+                    </Button>
+                    <Button variant="ghost" size="sm" disabled
+                            className="size-8 px-0 text-muted-foreground"
+                            title="Export bias figure (SVG). Nothing appraised yet.">
+                      <ImageIcon className="size-4" />
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Two cards side by side, as on Planning: the studies on the
+                    left, the appraisal of one of them on the right. Every
+                    judgement cell is empty, and the domain names are the
+                    instrument's own, so nothing here claims an appraisal that
+                    has not happened. */}
+                <div className="flex gap-3 h-[calc(100vh-22rem)] min-h-[32rem]">
+                  {/* LEFT: included studies, searchable */}
+                  <Card className="w-80 shrink-0 p-0 overflow-hidden flex flex-col">
+                    <div className="px-3 py-2 border-b flex items-center justify-between">
+                      <span className="text-xs uppercase tracking-wide text-muted-foreground">Included studies</span>
+                      <span className="text-xs text-muted-foreground tabular-nums">{papers.length}</span>
+                    </div>
+                    <div className="p-2 border-b">
+                      <div className="relative">
+                        <Search className="size-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                        <Input value="" readOnly
+                               placeholder={`Filter ${papers.length} article${papers.length === 1 ? "" : "s"}…`}
+                               className="pl-7 h-8 text-sm" />
+                      </div>
+                    </div>
+                    <div className="overflow-auto flex-1">
+                      {papers.map((paper, i) => (
+                        <div key={paper.id}
+                             className={`px-3 py-2.5 border-b border-l-2 ${i === 0 ? "bg-primary/10 border-l-primary" : "border-l-transparent"}`}>
+                          <div className="flex items-center gap-1.5 mb-1">
+                            <span className="text-xs text-muted-foreground">—</span>
+                            <span className="text-[11px] text-muted-foreground">
+                              {s.fullTexts[paper.id]?.text ? "full text" : "abstract only"}
+                            </span>
+                          </div>
+                          <div className="text-sm leading-snug line-clamp-2" title={paper.title}>
+                            {paper.title || "Untitled"}
+                          </div>
+                          <div className="flex gap-0.5 flex-wrap mt-1.5">
+                            {previewDomains.map(d => (
+                              <span key={d.id} title={d.name} className="size-2.5 rounded-sm bg-muted-foreground/20" />
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+
+                  {/* RIGHT: the appraisal of the selected study */}
+                  <Card className="flex-1 min-w-0 p-0 overflow-hidden flex flex-col">
+                    <div className="border-b p-3">
+                      <div className="font-medium leading-tight">{papers[0]?.title || "Untitled"}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        Not appraised yet{previewInstrument ? ` · ${previewInstrument.short_name}` : ""}
+                      </div>
+                    </div>
+                    {previewDomains.length === 0 ? (
+                      <div className="flex-1 flex items-center justify-center text-muted-foreground text-sm">
+                        Not appraised yet.
+                      </div>
+                    ) : (
+                      <div className="flex-1 overflow-auto divide-y">
+                        {previewDomains.map(d => (
+                          <div key={d.id} className="flex items-start gap-3 px-3 py-2.5">
+                            <span className="size-2.5 rounded-sm bg-muted-foreground/20 mt-1 shrink-0" />
+                            <span className="flex-1 text-sm">{d.name}</span>
+                            <span className="text-xs text-muted-foreground/60">—</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Card>
+                </div>
+              </>
+            );
+          })()}
         </>
       )}
 
