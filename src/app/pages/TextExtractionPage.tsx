@@ -2605,7 +2605,7 @@ export function TextExtractionPage() {
                           ? "This field was never answered: the group of fields it was asked in failed. Run the form again to fill it."
                           : value
                             ? "The model gave no sentence for this value, so there is nothing to check it against. Treat it as unverified."
-                            : "The model read the article and found nothing for this field. That the paper does not report it is itself a finding, and it is recorded as a dash rather than left blank."}
+                            : "The model read the article and found nothing for this field."}
                       </div>
                     )}
 
