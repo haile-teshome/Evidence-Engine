@@ -319,12 +319,130 @@ def _confidence(field_type: str, value: Any, quote: str, text: str) -> str:
     # risk-of-bias column can be invented and look verified.
     if not quote_in_text(quote, text):
         return "low"
+    # A verdict with no words to check. "No" shares nothing with any sentence,
+    # so its quote can neither support nor contradict it, and counting that as
+    # verified is how a cohort study arrived with "immortal time bias: No" and
+    # an animal study with a risk-of-bias judgement on every domain of an
+    # instrument written for human trials, all pre-accepted.
+    if not _content_words(str(value)):
+        return "low"
     # The quote is in the paper. Whether it is the sentence THIS value came
     # from is a separate question, and the one that was never asked.
     if not supported_by_quote(value, quote):
         return "low"
     # Supported, but by a sentence reporting another paper's result.
     return "low" if attributed_elsewhere(quote) else "high"
+
+
+# The labelled sections a paper makes its declarations in. These are the fields
+# a review must report whether or not a model found them, and the ones where a
+# partial answer is a reporting failure rather than a rough edge.
+_DECLARATION_NAMES = (
+    r"disclosures?|conflicts? of interest|competing interests?"
+    r"|declarations? of (?:competing )?interest|funding|financial support"
+    r"|acknowledge?ments?|data availability|ethics(?: approval| statement)?"
+    r"|notes?|author contributions?|references"
+)
+# Either on a line of its own ("Funding") or inline with a colon
+# ("Disclosures: TFC is ..."), which is how the two journals measured do it.
+_DECLARATION_HEADING = re.compile(
+    r"(?:^[ \t]*(?:" + _DECLARATION_NAMES + r")\b[:.]?[ \t]*$)"
+    r"|(?:\b(?:" + _DECLARATION_NAMES + r")[ \t]*:)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# Below this share of its section, the answer is a sentence out of a
+# declaration rather than the declaration. Measured on two papers: a complete
+# answer covered 90 % and 92 % of its section, a partial one 8 % and 41 %.
+_WHOLE_DECLARATION = 0.5
+
+
+def _find_loose(text: str, quote: str) -> int:
+    """Where `quote` starts in `text`, allowing for the line breaks a PDF adds.
+
+    A quote is compared word by word, not character by character: the text
+    layer breaks a sentence wherever the column ended, so "disclosed by\nthe
+    other authors" has a newline exactly where the quote has a space.
+    """
+    if not text or not quote:
+        return -1
+    head = quote[:160]
+    at = text.find(head)
+    if at >= 0:
+        return at
+    words = head.split()
+    if len(words) < 3:
+        return -1
+    hit = re.search(r"\s+".join(re.escape(w) for w in words), text)
+    return hit.start() if hit else -1
+
+
+def declaration_span(text: str, at: int) -> Optional[Tuple[int, int]]:
+    """The labelled declaration section containing offset `at`, if any."""
+    if not text or at < 0:
+        return None
+    marks = [m.start() for m in _DECLARATION_HEADING.finditer(text)]
+    if not marks:
+        return None
+    before = [m for m in marks if m <= at]
+    if not before:
+        return None
+    start = max(before)
+    after = [m for m in marks if m > at]
+    return (start, min(after) if after else len(text))
+
+
+def partial_declaration(value: Any, quote: str, text: str) -> bool:
+    """Is this one sentence of a declaration the paper makes at greater length?
+
+    A paper's funding and conflicts are mandatory reporting items, and the
+    model answers them with a single quotable sentence. One journal's
+    disclosure section names a specific author's industry positions and then
+    closes with "No potential conflicts of interests are disclosed by the other
+    authors"; asked for the conflicts, the model returned that closing
+    sentence. It is true, it is verbatim, its quote checks out, and as the
+    conflicts of interest for that paper it is wrong. The same section-closing
+    effect dropped a second grant number from the funding field.
+
+    So: the quote sits inside a labelled declaration section, and the value
+    covers less than half of it. A complete answer covers nearly all of its
+    section, which is what separates the two.
+    """
+    text = text or ""
+    quote = (quote or "").strip()
+    answer = str(value if value is not None else "").strip()
+    if len(quote) < 20 or len(answer) < 20:
+        return False
+    at = _find_loose(text, quote)
+    if at < 0:
+        return False
+    span = declaration_span(text, at)
+    if not span:
+        return False
+    section = text[span[0]:span[1]]
+    if len(section) < 120:
+        return False
+    return (len(answer) / len(section)) < _WHOLE_DECLARATION
+
+
+def grounded_in_text(value: Any, text: str, ratio: float = 0.8) -> bool:
+    """Are the value's own words in the document at all?
+
+    Used to accept a longer answer to a declaration without checking it
+    against a single sentence, which a multi-sentence answer can never match.
+    It is an anti-fabrication check, not a provenance one.
+    """
+    want = _content_words(str(value if value is not None else ""))
+    if not want:
+        return False
+    have = set(_content_words(text or ""))
+    hits = sum(1 for w in want if w in have)
+    return hits >= ratio * len(want)
+
+
+def partial_declarations(fields: List[Dict], text: str) -> List[str]:
+    """Names of fields holding one sentence of a longer declaration."""
+    return [str(f.get("name") or "") for f in (fields or [])
+            if partial_declaration(f.get("value"), f.get("source_quote") or "", text)]
 
 
 def colliding_fields(fields: List[Dict]) -> List[str]:
@@ -437,6 +555,8 @@ def extract_form(text: str, tables: str, fields: List[Dict], model_name: str,
         elif _blank(value):
             value = None
         conf = _confidence(ftype, value, quote, src)
+        if conf == "high" and partial_declaration(value, quote, text):
+            conf = "low"
         # Human-in-the-loop policy: numbers always verified; text verified when
         # the model gave no source or low confidence.
         needs_review = (ftype in NUMERIC_TYPES) or conf in ("low", "none")
@@ -459,8 +579,14 @@ def extract_form(text: str, tables: str, fields: List[Dict], model_name: str,
                           "paper, so it may not be this study's own result")
             elif ftype in NUMERIC_TYPES and not _num_in_text(_num(value) or 0, quote):
                 reason = "the number does not appear in the sentence quoted for it"
+            elif ftype not in NUMERIC_TYPES and not _content_words(str(value)):
+                reason = ("a one-word verdict cannot be checked against the sentence "
+                          "quoted for it, so it needs a human")
             elif ftype not in NUMERIC_TYPES and not supported_by_quote(value, quote):
                 reason = "the sentence quoted for this does not mention the value"
+            elif partial_declaration(value, quote, text):
+                reason = ("the paper's own declaration on this runs longer than the "
+                          "sentence quoted, so this may be part of the answer")
         out_fields.append({
             "name": name, "type": ftype, "value": value,
             "source_quote": quote, "confidence": conf, "needs_review": needs_review,

@@ -737,6 +737,144 @@ class TestUnsupportedFields:
         assert EF.unsupported_fields(None) == []
 
 
+DISCLOSURE_PAPER = (
+    "We thank the staff for their help.\n"
+    "Funding\n"
+    "FP was supported by a grant from the National Cancer\n"
+    "Institute (R01CA200234). DN, PLN and TFC were supported by a grant\n"
+    "from the National Cancer Institute (P50CA211015).\n"
+    "Notes\n"
+    "Role of the funder: The National Cancer Institute played no role in the\n"
+    "design and conduct of the study.\n"
+    "Disclosures: TFC is cofounder, major stock holder and board member of\n"
+    "Katmai Pharmaceuticals, holds stock options of Notable Labs, and has\n"
+    "provided consulting services to Roche, Bayer, Amgen and others, none of\n"
+    "which had any role in this work or in the preparation of this report.\n"
+    "No potential conflicts of interests are disclosed by\nthe other authors.\n"
+    "Author contributions: FP and TFC conceived of the study.\n"
+)
+
+SHORT_DISCLOSURE_PAPER = (
+    "Funding\n"
+    "This research did not receive any specific grant from funding agencies\n"
+    "in the public, commercial, or not-for-profit sectors.\n"
+    "Disclosures\n"
+    "The authors have no personal, financial, or institutional interest in any\n"
+    "of the drugs, materials, or devices described in this article.\n"
+)
+
+
+class TestPartialDeclaration:
+    """One sentence of a declaration the paper makes at greater length.
+
+    Funding and conflicts of interest are mandatory reporting items, and the
+    model answers them with a single quotable sentence. One journal's
+    disclosure section names an author's industry positions and then closes
+    with "No potential conflicts of interests are disclosed by the other
+    authors"; asked for the conflicts, the model returned that closing
+    sentence. It is true, verbatim, and its quote checks out. As the conflicts
+    of interest for that paper it is wrong.
+    """
+
+    def test_the_closing_sentence_of_a_long_disclosure_is_partial(self):
+        value = "No potential conflicts of interests are disclosed by the other authors."
+        assert EF.partial_declaration(value, value, DISCLOSURE_PAPER)
+
+    def test_one_grant_of_two_is_partial(self):
+        value = "FP was supported by a grant from the National Cancer Institute (R01CA200234)."
+        assert EF.partial_declaration(value, value, DISCLOSURE_PAPER)
+
+    def test_a_declaration_that_is_the_whole_section_is_not_partial(self):
+        """The direction that matters: most papers declare in one sentence, and
+        flagging those would make the flag meaningless."""
+        value = ("The authors have no personal, financial, or institutional interest in any "
+                 "of the drugs, materials, or devices described in this article.")
+        assert not EF.partial_declaration(value, value, SHORT_DISCLOSURE_PAPER)
+
+    def test_a_one_sentence_funding_statement_is_not_partial(self):
+        value = ("This research did not receive any specific grant from funding agencies "
+                 "in the public, commercial, or not-for-profit sectors.")
+        assert not EF.partial_declaration(value, value, SHORT_DISCLOSURE_PAPER)
+
+    def test_a_value_outside_any_declaration_section_is_not_partial(self):
+        # Results and methods are not declarations, and a sentence from them is
+        # an ordinary extraction however long the section around it.
+        text = "Results\nThe median OS of our cohort was 15.64 months. " + ("Filler. " * 200)
+        value = "The median OS of our cohort was 15.64 months."
+        assert not EF.partial_declaration(value, value, text)
+
+    def test_a_short_value_is_not_judged(self):
+        # "272" is not a declaration, and comparing its length to a section
+        # would flag every number in the back matter.
+        assert not EF.partial_declaration("272", "a quote of some reasonable length here",
+                                          DISCLOSURE_PAPER)
+
+    def test_a_quote_the_paper_does_not_contain_is_not_judged(self):
+        assert not EF.partial_declaration(
+            "an invented declaration of some length", "a sentence that is not in the paper at all",
+            DISCLOSURE_PAPER)
+
+    def test_it_finds_the_sentence_across_a_line_break(self):
+        """The PDF breaks a sentence wherever the column ended, so the quote has
+        a space exactly where the text has a newline."""
+        assert EF._find_loose(DISCLOSURE_PAPER,
+                              "No potential conflicts of interests are disclosed by the other") >= 0
+
+    def test_partial_declarations_names_the_fields(self):
+        value = "No potential conflicts of interests are disclosed by the other authors."
+        got = EF.partial_declarations(
+            [{"name": "coi", "value": value, "source_quote": value},
+             {"name": "n", "value": "272", "source_quote": "We enrolled 272 patients here."}],
+            DISCLOSURE_PAPER)
+        assert got == ["coi"]
+
+
+class TestGroundedInText:
+    def test_a_value_whose_words_are_in_the_paper_is_grounded(self):
+        assert EF.grounded_in_text(
+            "FP was supported by a grant from the National Cancer Institute",
+            DISCLOSURE_PAPER)
+
+    def test_an_invented_value_is_not(self):
+        assert not EF.grounded_in_text(
+            "Funded by the Wellcome Trust and the Gates Foundation", DISCLOSURE_PAPER)
+
+    def test_nothing_is_not_grounded(self):
+        assert not EF.grounded_in_text("", DISCLOSURE_PAPER)
+
+
+class TestAVerdictCannotVerifyItself:
+    """A one-word judgement with no words to check.
+
+    "No" shares nothing with any sentence, so its quote can neither support nor
+    contradict it. Counting that as verified is how a cohort study arrived with
+    "immortal time bias: No" and an animal study with a risk-of-bias judgement
+    on every domain of an instrument written for human trials, none of them
+    flagged for anyone to look at.
+    """
+
+    def test_a_bare_no_is_not_confident(self):
+        out = EF.extract_form(
+            "The study was a retrospective cohort of 272 patients.", "",
+            [{"name": "immortal", "type": "text"}], "m",
+            StubAI(StubModel('{"extractions":[{"name":"immortal","value":"No",'
+                             '"source_quote":"The study was a retrospective cohort of 272 patients."}]}')))
+        f = out["fields"][0]
+        assert f["confidence"] == "low"
+        assert f["needs_review"] is True
+        assert "one-word verdict" in f["review_reason"]
+
+    def test_a_verdict_with_a_reason_is_judged_on_its_words(self):
+        out = EF.extract_form(
+            "The study was a retrospective cohort of 272 patients.", "",
+            [{"name": "design", "type": "text"}], "m",
+            StubAI(StubModel('{"extractions":[{"name":"design","value":"retrospective cohort",'
+                             '"source_quote":"The study was a retrospective cohort of 272 patients."}]}')))
+        f = out["fields"][0]
+        assert f["confidence"] == "high"
+        assert f["review_reason"] == ""
+
+
 class TestCollidingFields:
     """A field holding another field's answer.
 
@@ -910,6 +1048,77 @@ class TestReAskingCopiedFields:
                       json={"text": "Methods. " * 200, "fields": self._fields()}).json()
 
         assert body["values"]["os"] == "15.64 months"
+
+    def test_a_partial_declaration_is_re_asked_and_the_fuller_answer_kept(self, monkeypatch):
+        """The whole declaration spans several sentences, so it can never match
+        one quoted sentence. What is checked is that it is longer and that its
+        words are in the paper."""
+        c, _ = self._client()
+        partial = "No potential conflicts of interests are disclosed by the other authors."
+        full = ("TFC is cofounder, major stock holder and board member of Katmai "
+                "Pharmaceuticals, holds stock options of Notable Labs, and has provided "
+                "consulting services to Roche, Bayer, Amgen and others")
+        calls = []
+
+        other = "FP and TFC conceived of the study."
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            names = [f["name"] for f in fields]
+            calls.append(names)
+            if len(names) == 1:
+                return {"fields": [{"name": names[0], "value": full, "type": "text",
+                                    "status": "reported", "confidence": "high",
+                                    "source_quote": partial, "needs_review": False}]}
+            # Different values, so the fields do not read as copies of each
+            # other: the partial declaration is the only thing wrong here.
+            return {"fields": [
+                {"name": "os", "value": partial, "type": "text", "status": "reported",
+                 "confidence": "high", "source_quote": partial, "needs_review": False},
+                {"name": "followup", "value": other, "type": "text", "status": "reported",
+                 "confidence": "high", "source_quote": other, "needs_review": False}]}
+
+        import extraction_forms
+        for name in ("colliding_fields", "unsupported_fields",
+                     "partial_declarations", "grounded_in_text"):
+            monkeypatch.setattr(extraction_forms, name, getattr(EF, name))
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": DISCLOSURE_PAPER, "fields": self._fields()}).json()
+
+        assert any(len(cl) == 1 for cl in calls), f"nothing was re-asked: {calls}"
+        assert "Katmai" in body["values"]["os"], body["values"]["os"]
+
+    def test_an_invented_fuller_answer_is_refused(self, monkeypatch):
+        """Longer is not better if the words are not in the paper."""
+        c, _ = self._client()
+        partial = "No potential conflicts of interests are disclosed by the other authors."
+        invented = ("Funded by the Wellcome Trust, the Gates Foundation and the "
+                    "Rockefeller Institute, with no competing interests anywhere")
+
+        other = "FP and TFC conceived of the study."
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            names = [f["name"] for f in fields]
+            if len(names) == 1:
+                return {"fields": [{"name": names[0], "value": invented, "type": "text",
+                                    "status": "reported", "confidence": "high",
+                                    "source_quote": partial, "needs_review": False}]}
+            return {"fields": [
+                {"name": "os", "value": partial, "type": "text", "status": "reported",
+                 "confidence": "high", "source_quote": partial, "needs_review": False},
+                {"name": "followup", "value": other, "type": "text", "status": "reported",
+                 "confidence": "high", "source_quote": other, "needs_review": False}]}
+
+        import extraction_forms
+        for name in ("colliding_fields", "unsupported_fields",
+                     "partial_declarations", "grounded_in_text"):
+            monkeypatch.setattr(extraction_forms, name, getattr(EF, name))
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": DISCLOSURE_PAPER, "fields": self._fields()}).json()
+
+        assert "Wellcome" not in body["values"]["os"]
+        assert body["values"]["os"] == partial
 
     def test_a_field_the_paper_does_not_report_is_not_re_asked(self, monkeypatch):
         """Both detectors only name a field that has a value. Re-asking every

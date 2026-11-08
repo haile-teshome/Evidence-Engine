@@ -4766,14 +4766,22 @@ def extract_fields(req: ExtractFieldsRequest):
     # Two ways a field comes back holding something that is not its answer, and
     # neither is visible in the value: it copied a neighbour's, or it cites a
     # sentence that does not contain it. Both get asked again on their own.
-    doubtful = list(dict.fromkeys(
-        extraction_forms.colliding_fields(raw_fields)
-        + extraction_forms.unsupported_fields(raw_fields)))
+    # Three ways a field comes back holding something that is not its answer,
+    # none of them visible in the value: it copied a neighbour's, it cites a
+    # sentence that does not contain it, or it is one sentence of a declaration
+    # the paper makes at greater length. All get asked again on their own.
+    doubtful: Dict[str, str] = {}
+    for name in extraction_forms.colliding_fields(raw_fields):
+        doubtful.setdefault(name, "copied")
+    for name in extraction_forms.unsupported_fields(raw_fields):
+        doubtful.setdefault(name, "unsupported")
+    for name in extraction_forms.partial_declarations(raw_fields, text):
+        doubtful.setdefault(name, "partial")
     if doubtful:
         by_name = {f["name"]: f for f in ef_fields}
         print(f"[extract_fields] re-asking {len(doubtful)} doubtful field(s): "
-              f"{', '.join(doubtful)}")
-        for name in doubtful:
+              + ", ".join(f"{n} ({why})" for n, why in doubtful.items()))
+        for name, why in doubtful.items():
             spec = by_name.get(name)
             if not spec:
                 continue
@@ -4787,12 +4795,22 @@ def extract_fields(req: ExtractFieldsRequest):
             # only when the new answer is better supported than the old one,
             # because a second guess is not automatically a better one.
             if got and not again.get("error"):
-                # Only when the new answer is better supported than the old
-                # one: a second guess is not automatically a better one, and
+                # A second guess is not automatically a better one, and
                 # churning the value would lose whatever the reviewer had
-                # already read. Both detectors only ever name a field that has
-                # a value, so there is no empty case to rescue here.
-                if not extraction_forms.unsupported_fields([got]):
+                # already read, so the replacement has to be an improvement on
+                # the terms the field was re-asked for.
+                if why == "partial":
+                    # A complete declaration runs over several sentences, so it
+                    # can never match one quoted sentence. What is checked is
+                    # that it is longer and that its words are in the paper.
+                    old_len = len(str(
+                        next((f.get("value") for f in raw_fields
+                              if f["name"] == name), "") or ""))
+                    better = (len(str(got.get("value") or "")) > old_len
+                              and extraction_forms.grounded_in_text(got.get("value"), text))
+                else:
+                    better = not extraction_forms.unsupported_fields([got])
+                if better:
                     raw_fields = [got if f["name"] == name else f for f in raw_fields]
     # A group that failed contributes no fields, so a partial answer is still an
     # answer; only say the whole thing failed when all of it did.
