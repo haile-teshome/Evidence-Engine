@@ -38,7 +38,12 @@ pdfplumber==0.11.4
 # The tier stays lazy and guarded (Backend/docling_tables.py), so a build or a
 # machine without it skips that rung instead of failing. EE_USE_DOCLING=0 turns
 # it off.
-docling==2.87.0
+#
+# Not on Intel Macs: PyTorch stopped publishing x86_64 macOS wheels after 2.2.2,
+# and docling's floor for torch and torchvision cannot be met with what is left,
+# so asking for it there fails the whole install rather than that one feature.
+# Those machines get every other rung of the ladder and no OCR.
+docling==2.87.0; sys_platform != "darwin" or platform_machine != "x86_64"
 python-docx==1.1.2
 numpy==1.26.4
 # --- Screening prioritisation (active-learning mode) ---
