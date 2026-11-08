@@ -201,3 +201,46 @@ describe("keeping or rejecting a value", () => {
     expect(container.querySelector(".line-through")).not.toBeNull();
   });
 });
+
+// A blank cell said nothing about why it was blank. "The paper does not report
+// this" is a finding a review records; "nothing read this field" is work left
+// to do. They were the same dash.
+describe("an empty cell in the table", () => {
+  const seedRow = (cell: Record<string, string> | undefined) => {
+    localStorage.setItem("ee:extract-rows", JSON.stringify([{
+      paper_id: "p1", title: "Bianconi 2024",
+      values: { design: "" },
+      meta: { design: { source_quote: "", confidence: "none", needs_review: true } },
+      status: { design: "accepted" },
+      ...(cell ? { cell } : {}),
+    }]));
+  };
+
+  // Both empty cases read as a dash, because a column of "Not reported" beside
+  // a hundred others is unreadable. What tells them apart is the hover text, so
+  // that is what is pinned here.
+  const hover = () =>
+    document.querySelector("td span[title]")?.getAttribute("title") || "";
+
+  it("says the model read the article and found nothing", () => {
+    seedRow({ design: "not_reported" });
+    renderPage(seedReview);
+    expect(document.body.textContent).toContain("\u2014");
+    expect(hover()).toMatch(/read the article and found no value/i);
+  });
+
+  it("says plainly when nothing has read the field yet", () => {
+    seedRow({ design: "unread" });
+    renderPage(seedReview);
+    expect(document.body.textContent).toContain("\u2014");
+    expect(hover()).toMatch(/nothing read this field/i);
+  });
+
+  it("claims nothing for rows extracted before the status existed", () => {
+    // Never "the paper does not report it" by default: that would put a
+    // finding nobody established into the review.
+    seedRow(undefined);
+    renderPage(seedReview);
+    expect(hover()).not.toMatch(/found no value/i);
+  });
+});

@@ -84,6 +84,150 @@ class TestBuildPrompt:
         assert isinstance(EF.build_prompt(TEXT, "", []), str)
 
 
+class TestTextBudget:
+    """How much of the article gets sent.
+
+    A fixed 30,000-character prefix was the reason funding, conflicts of
+    interest, grant numbers and data availability came back blank: in two real
+    papers those statements begin at 90 % and 80 % of the way through, so they
+    were never in the prompt. The budget comes from the context now.
+    """
+
+    def test_it_scales_with_the_context(self):
+        assert EF.text_budget(32768) > EF.text_budget(8192) > EF.text_budget(4096)
+
+    def test_the_app_s_context_holds_a_whole_journal_article(self):
+        # The two papers this was measured on are 41.6k and 45.1k characters.
+        assert EF.text_budget(32768) >= 60_000
+
+    def test_the_tables_come_out_of_the_same_budget(self):
+        assert EF.text_budget(32768, tables_chars=8000) == EF.text_budget(32768) - 8000
+
+    def test_it_never_goes_below_a_usable_floor(self):
+        # A context too small for a paper should still get a prompt that asks a
+        # real question rather than one holding two sentences.
+        assert EF.text_budget(1) == EF.MIN_TEXT_CHARS
+        assert EF.text_budget(32768, tables_chars=10**9) == EF.MIN_TEXT_CHARS
+
+    def test_a_caller_that_names_no_context_gets_a_cautious_budget(self):
+        """Ollama's default window is 2048 or 4096 tokens when nobody asks.
+
+        Sending more than the window holds is cut by the server instead, which
+        is the same loss as truncating here and harder to notice.
+        """
+        assert EF.text_budget(None) == EF.text_budget(EF.ASSUMED_NUM_CTX)
+        assert EF.text_budget(None) < EF.text_budget(32768)
+
+
+class TestWindow:
+    """Which part of the article survives when all of it will not fit."""
+
+    BACK_MATTER = "Funding: this work was supported by grant ABC123."
+
+    def _paper(self, size=200_000):
+        return ("INTRO " + "a" * (size // 2) + " RESULTS " + "b" * (size // 2)
+                + " " + self.BACK_MATTER)
+
+    def test_a_paper_that_fits_is_sent_whole(self):
+        assert EF.window(TEXT, 100_000) == TEXT
+
+    def test_it_keeps_the_front(self):
+        assert EF.window(self._paper(), 40_000).startswith("INTRO")
+
+    def test_it_keeps_the_back_matter(self):
+        """The failure this exists for: funding and conflicts of interest sit in
+        the last tenth of a paper, and a prefix drops that whole class of
+        field."""
+        assert self.BACK_MATTER in EF.window(self._paper(), 40_000)
+
+    def test_it_stays_within_the_budget(self):
+        assert len(EF.window(self._paper(), 40_000)) <= 40_000
+
+    def test_it_says_where_the_gap_is(self):
+        # A reviewer reading a quote needs to know the middle is not there.
+        assert EF.OMITTED_MARKER in EF.window(self._paper(), 40_000)
+
+    def test_a_budget_too_small_to_split_still_returns_text(self):
+        for budget in (0, -5, 10, 300, EF.MIN_SEGMENT_CHARS):
+            got = EF.window(self._paper(), budget)
+            assert isinstance(got, str)
+            if budget > 0:
+                assert len(got) <= max(budget, len(self._paper()))
+
+    def test_the_old_prefix_would_have_lost_it(self):
+        # Pins the regression rather than just the fix.
+        paper = self._paper()
+        assert self.BACK_MATTER not in paper[:30_000]
+
+
+class TestFieldStatus:
+    """Why a cell is empty.
+
+    An empty value meant two different things: the paper does not report this,
+    and nothing ever read it. A review writes the first one down as a finding
+    and has to go back and do the second.
+    """
+
+    def _status(self, out, name):
+        return next(f["status"] for f in out["fields"] if f["name"] == name)
+
+    def test_a_value_is_reported(self):
+        out = _extract('{"extractions": [{"name": "sample_size", "value": 128, '
+                       '"source_quote": "We enrolled 128 patients"}]}')
+        assert self._status(out, "sample_size") == "reported"
+
+    def test_a_null_the_model_returned_is_not_reported(self):
+        # The model read the article and says the value is not in it.
+        out = _extract('{"extractions": [{"name": "sample_size", "value": null, '
+                       '"source_quote": ""}]}')
+        assert self._status(out, "sample_size") == "not_reported"
+
+    def test_a_field_the_model_never_mentioned_is_unread(self):
+        out = _extract('{"extractions": [{"name": "sample_size", "value": 128, '
+                       '"source_quote": "We enrolled 128 patients"}]}')
+        assert self._status(out, "mean_age") == "unread"
+        assert self._status(out, "design") == "unread"
+
+    def test_a_failed_group_is_unread_and_not_mistaken_for_an_answer(self):
+        """The important one. A reply cut off mid-JSON returns every field
+        empty, and reading that as "the paper reports none of this" would write
+        a whole column of findings that nobody established."""
+        out = _extract("not json at all")
+        assert out["error"]
+        for name in ("sample_size", "mean_age", "design"):
+            assert self._status(out, name) == "unread"
+
+    def test_no_model_is_unread(self):
+        out = EF.extract_form(TEXT, "", FIELDS, "m", StubAI(None))
+        for f in out["fields"]:
+            assert f["status"] == "unread"
+
+    def test_an_empty_string_counts_as_not_reported(self):
+        out = _extract('{"extractions": [{"name": "design", "value": "", '
+                       '"source_quote": ""}]}')
+        assert self._status(out, "design") == "not_reported"
+
+
+class TestTheBackMatterReachesTheModel:
+    """End to end over extract_form: the article's tail is in the prompt."""
+
+    def test_a_field_stated_only_at_the_end_is_sent(self):
+        sentinel = "Funding: supported by grant R01CA200234."
+        paper = "Methods. " + ("filler sentence. " * 2500) + sentinel
+        assert len(paper) > 40_000
+        assert sentinel not in paper[:30_000]      # the old behaviour lost it
+
+        model = StubModel('{"extractions": []}')
+        EF.extract_form(paper, "", FIELDS, "m", StubAI(model), num_ctx=32768)
+
+        assert sentinel in model.prompts[0]
+
+    def test_the_context_it_was_told_about_is_the_one_it_opens(self):
+        ai = StubAI(StubModel('{"extractions": []}'))
+        EF.extract_form(TEXT, "", FIELDS, "m", ai, num_ctx=32768)
+        assert ai.num_ctx == 32768
+
+
 class TestExtractForm:
     def test_returns_one_entry_per_requested_field(self):
         out = _extract('{"extractions":[{"name":"sample_size","value":128,"source_quote":"128 patients"}]}')
@@ -433,6 +577,218 @@ class TestFieldGroups:
         monkeypatch.setattr(extraction_forms, "extract_form", fake)
         c.post("/api/extract/fields", json={"text": "Methods. " * 100, "fields": self._fields(6)})
         assert seen == [6]
+
+
+class TestCollidingFields:
+    """A field holding another field's answer.
+
+    Asked for twelve at once, a model that cannot find a field sometimes hands
+    back a neighbour's answer rather than nothing, and the copy is
+    indistinguishable from a real extraction: it has a value, and a quote that
+    really is in the paper. It is how "study period" came back as "15.64
+    months" from the sentence giving the median overall survival.
+    """
+
+    def test_two_fields_with_the_same_value_and_quote_are_copies(self):
+        quote = "The median OS of our cohort (n = 272) was 15.64 months."
+        got = EF.colliding_fields([
+            {"name": "os", "value": "15.64 months", "source_quote": quote},
+            {"name": "followup", "value": "15.64 months", "source_quote": quote},
+        ])
+        assert sorted(got) == ["followup", "os"]
+
+    def test_one_sentence_supporting_several_fields_is_not_a_copy(self):
+        """The ordinary case, which must not be re-asked: a methods sentence is
+        the source for the design, the sample size and the comparator at once."""
+        quote = "We randomised 128 adults to metformin or placebo in a double-blind trial."
+        assert EF.colliding_fields([
+            {"name": "n", "value": "128", "source_quote": quote},
+            {"name": "drug", "value": "metformin", "source_quote": quote},
+            {"name": "design", "value": "randomised", "source_quote": quote},
+        ]) == []
+
+    def test_the_same_value_from_different_sentences_is_not_a_copy(self):
+        # Two fields can legitimately share a number: a trial's randomised and
+        # analysed counts are often equal, and each has its own source.
+        assert EF.colliding_fields([
+            {"name": "randomised", "value": "128", "source_quote": "We randomised 128 adults."},
+            {"name": "analysed", "value": "128", "source_quote": "All 128 were analysed."},
+        ]) == []
+
+    def test_empty_fields_are_not_copies_of_each_other(self):
+        assert EF.colliding_fields([
+            {"name": "a", "value": None, "source_quote": ""},
+            {"name": "b", "value": "", "source_quote": ""},
+        ]) == []
+
+    def test_a_value_with_no_real_quote_is_left_alone(self):
+        # Nothing to have copied: without a source there is no shared sentence,
+        # and the field is already flagged as unverified.
+        assert EF.colliding_fields([
+            {"name": "a", "value": "5", "source_quote": ""},
+            {"name": "b", "value": "5", "source_quote": "n=5"},
+        ]) == []
+
+    def test_it_survives_junk(self):
+        assert EF.colliding_fields([]) == []
+        assert EF.colliding_fields(None) == []
+
+
+class TestReAskingCopiedFields:
+    """The endpoint asks a copied field again, on its own."""
+
+    def _fields(self):
+        return [{"id": "os", "label": "Median OS", "type": "text"},
+                {"id": "followup", "label": "Study period", "type": "text"}]
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        import api
+        return TestClient(api.app), api
+
+    def test_a_copied_field_is_asked_again_alone_and_replaced(self, monkeypatch):
+        c, _ = self._client()
+        quote = "The median OS of our cohort (n = 272) was 15.64 months."
+        calls = []
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            calls.append([f["name"] for f in fields])
+            if len(fields) == 1 and fields[0]["name"] == "followup":
+                # Alone, with no neighbour to copy from, it finds the real one.
+                return {"fields": [{"name": "followup", "value": "2015-2021",
+                                    "type": "text", "status": "reported",
+                                    "source_quote": "During the study period (2015-2021)",
+                                    "confidence": "high", "needs_review": False}]}
+            return {"fields": [{"name": n, "value": "15.64 months", "type": "text",
+                                "status": "reported", "source_quote": quote,
+                                "confidence": "high", "needs_review": False}
+                               for n in [f["name"] for f in fields]]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "colliding_fields",
+                            EF.colliding_fields)      # the real detector
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 200, "fields": self._fields()}).json()
+
+        assert ["os", "followup"] in calls, "the first pass asks them together"
+        assert ["followup"] in calls or ["os"] in calls, "no field was re-asked alone"
+        assert body["values"]["followup"] == "2015-2021"
+
+    def test_a_failed_re_ask_keeps_the_value_the_reviewer_could_correct(self, monkeypatch):
+        """An empty cell is worse than a wrong one here: the reviewer can see a
+        wrong value against its quote and fix it, and cannot see nothing."""
+        c, _ = self._client()
+        quote = "The median OS of our cohort (n = 272) was 15.64 months."
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            if len(fields) == 1:
+                return {"fields": [], "error": "the model did not return usable JSON"}
+            return {"fields": [{"name": f["name"], "value": "15.64 months", "type": "text",
+                                "status": "reported", "source_quote": quote,
+                                "confidence": "high", "needs_review": False}
+                               for f in fields]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "colliding_fields", EF.colliding_fields)
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 200, "fields": self._fields()}).json()
+
+        assert body["values"]["followup"] == "15.64 months"
+
+    def test_nothing_is_re_asked_when_nothing_collided(self, monkeypatch):
+        c, _ = self._client()
+        calls = []
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            calls.append([f["name"] for f in fields])
+            return {"fields": [{"name": f["name"], "value": f["name"], "type": "text",
+                                "status": "reported", "source_quote": f"a sentence about {f['name']} in the paper",
+                                "confidence": "high", "needs_review": False}
+                               for f in fields]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "colliding_fields", EF.colliding_fields)
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        c.post("/api/extract/fields",
+               json={"text": "Methods. " * 200, "fields": self._fields()}).json()
+
+        assert calls == [["os", "followup"]], f"a second pass ran for nothing: {calls}"
+
+
+class TestTheEndpointSendsTheWholeArticle:
+    """The endpoint used to slice the text to 30,000 characters as well.
+
+    Two truncations, the same number, and the inner one is sized to the
+    context. The outer one simply deleted the last third of every long paper
+    before the extractor could decide anything, which is why funding,
+    conflicts of interest and data availability came back blank.
+    """
+
+    def _fields(self, n):
+        return [{"id": f"f{i}", "label": f"Field {i}", "type": "text"} for i in range(n)]
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+        import api
+        return TestClient(api.app), api
+
+    def test_the_article_reaches_the_extractor_whole(self, monkeypatch):
+        c, _ = self._client()
+        sentinel = "Funding: supported by grant R01CA200234."
+        paper = "Methods. " + ("filler sentence. " * 2500) + sentinel
+        assert len(paper) > 40_000
+        assert sentinel not in paper[:30_000]
+        seen = {}
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            seen["text"] = text
+            return {"fields": []}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        c.post("/api/extract/fields", json={"text": paper, "fields": self._fields(4)})
+
+        assert seen["text"] == paper
+        assert sentinel in seen["text"]
+
+    def test_the_status_of_each_field_reaches_the_reviewer(self, monkeypatch):
+        c, _ = self._client()
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            return {"fields": [
+                {"name": "f0", "value": "v", "type": "text", "source_quote": "q",
+                 "confidence": "high", "needs_review": False, "status": "reported"},
+                {"name": "f1", "value": None, "type": "text", "source_quote": "",
+                 "confidence": "none", "needs_review": True, "status": "not_reported"},
+                {"name": "f2", "value": None, "type": "text", "source_quote": "",
+                 "confidence": "none", "needs_review": True, "status": "unread"},
+            ]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 100, "fields": self._fields(3)}).json()
+
+        assert {f["id"]: f["status"] for f in body["fields"]} == {
+            "f0": "reported", "f1": "not_reported", "f2": "unread"}
+
+    def test_a_field_with_no_status_is_treated_as_unread(self, monkeypatch):
+        """Never "not_reported" by default: that would put a finding nobody
+        established into the review."""
+        c, _ = self._client()
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            return {"fields": [{"name": "f0", "value": None, "type": "text",
+                                "source_quote": "", "confidence": "none",
+                                "needs_review": True}]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 100, "fields": self._fields(1)}).json()
+        assert body["fields"][0]["status"] == "unread"
 
 
 class TestMissingModel:

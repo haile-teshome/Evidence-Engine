@@ -8,7 +8,7 @@
 // compare sample sizes you had to open fourteen sheets.
 import { describe, it, expect } from "vitest";
 
-import { tabSheets } from "../TextExtractionPage";
+import { tabSheets, fieldsForStudy, NOT_REPORTED } from "../TextExtractionPage";
 
 const fields = [
   { id: "author", label: "First author", type: "text", options: [] },
@@ -77,5 +77,89 @@ describe("tabSheets", () => {
     ], fields as any, rows as any);
 
     expect(sheets.map(s => s.name)).toEqual(["Survival"]);
+  });
+});
+
+// An empty cell meant two different things, and the reviewer could not tell
+// which: the paper does not report this, or nothing ever read it. The first is
+// a finding the review writes down; the second is work still to do. A blank
+// column in an exported workbook reads as the second whichever it was.
+describe("an empty cell in the export", () => {
+  const rows = [
+    { paper_id: "p1", title: "Bianconi 2024", values: { n: 272, os: "", author: "" },
+      status: {}, cell: { n: "reported", os: "not_reported", author: "unread" } },
+  ] as any;
+
+  it("writes down a value the paper does not report", () => {
+    const [sheet] = tabSheets(
+      [{ name: "Survival", fieldIds: ["os"], studies: null }], fields as any, rows);
+    expect(sheet.body).toEqual([["Bianconi 2024", NOT_REPORTED]]);
+  });
+
+  it("leaves a cell nothing read blank, so it still looks like work to do", () => {
+    const [sheet] = tabSheets(
+      [{ name: "Identification", fieldIds: ["author"], studies: null }], fields as any, rows);
+    expect(sheet.body).toEqual([["Bianconi 2024", ""]]);
+  });
+
+  it("prefers the value whenever there is one", () => {
+    const [sheet] = tabSheets(
+      [{ name: "Survival", fieldIds: ["n"], studies: null }], fields as any, rows);
+    expect(sheet.body).toEqual([["Bianconi 2024", "272"]]);
+  });
+
+  it("does not write 'not reported' over a value the reviewer rejected", () => {
+    // Rejected means "this is wrong", not "the paper is silent".
+    const rejected = [{ paper_id: "p1", title: "Bianconi 2024", values: { n: 272 },
+                        status: { n: "rejected" }, cell: { n: "reported" } }] as any;
+    const [sheet] = tabSheets(
+      [{ name: "Survival", fieldIds: ["n"], studies: null }], fields as any, rejected);
+    expect(sheet.body).toEqual([["Bianconi 2024", ""]]);
+  });
+
+  it("falls back to a blank for rows extracted before the status existed", () => {
+    const old = [{ paper_id: "p1", title: "Bianconi 2024", values: { os: "" }, status: {} }] as any;
+    const [sheet] = tabSheets(
+      [{ name: "Survival", fieldIds: ["os"], studies: null }], fields as any, old);
+    expect(sheet.body).toEqual([["Bianconi 2024", ""]]);
+  });
+});
+
+// Asking a mouse paper for a clinical cohort's baseline table is how the
+// preclinical sheet came back holding one. A tab scoped to some studies is
+// already hidden for the others, so asking achieved nothing but a wrong value.
+describe("fieldsForStudy", () => {
+  const tabs = [
+    { name: "Identification", fieldIds: ["author"], studies: null },
+    { name: "Clinical", fieldIds: ["n"], studies: ["p1"] },
+    { name: "Preclinical", fieldIds: ["os"], studies: ["p2"] },
+  ];
+
+  it("asks a study only the fields of the tabs that cover it", () => {
+    expect(fieldsForStudy(tabs, fields as any, "p1").map(f => f.id))
+      .toEqual(["author", "n"]);
+    expect(fieldsForStudy(tabs, fields as any, "p2").map(f => f.id))
+      .toEqual(["author", "os"]);
+  });
+
+  it("includes every unscoped tab for every study", () => {
+    expect(fieldsForStudy(tabs, fields as any, "p9").map(f => f.id)).toEqual(["author"]);
+  });
+
+  it("asks the whole form when there are no tabs", () => {
+    expect(fieldsForStudy(null, fields as any, "p1")).toHaveLength(fields.length);
+    expect(fieldsForStudy([], fields as any, "p1")).toHaveLength(fields.length);
+  });
+
+  it("asks the whole form for a study no tab claims at all", () => {
+    // Better than an empty row with nothing to explain it.
+    const scoped = [{ name: "Clinical", fieldIds: ["n"], studies: ["p1"] }];
+    expect(fieldsForStudy(scoped, fields as any, "p2")).toHaveLength(fields.length);
+  });
+
+  it("ignores a tab whose fields were deleted", () => {
+    const stale = [{ name: "Gone", fieldIds: ["removed"], studies: ["p1"] },
+                   { name: "Clinical", fieldIds: ["n"], studies: ["p1"] }];
+    expect(fieldsForStudy(stale, fields as any, "p1").map(f => f.id)).toEqual(["n"]);
   });
 });

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { useStore, TextExtractionResult, TextEvidenceItem } from "../lib/store";
+import { useStore, useStageModel, TextExtractionResult, TextEvidenceItem } from "../lib/store";
 import { AIService } from "../lib/mockServices";
 import { Card } from "../components/ui/card";
 import { ImportStudies } from "../components/ImportStudies";
@@ -101,11 +101,28 @@ const THIN_TEXT = 400;
 const FIELDS_PER_CALL = 12;
 
 /** One row of extracted values for one study. */
+/** Why a cell is empty. "reported" means it holds a value. */
+export type CellStatus = "reported" | "not_reported" | "unread";
+
+/**
+ * What a review writes in a cell the paper does not report.
+ *
+ * A dash, which is the convention in a published review table, rather than the
+ * words: the cell is read down a column beside a hundred others, and the
+ * distinction from a cell nothing read is carried by the hover text and the
+ * source dialog instead of by two words in every row.
+ */
+export const NOT_REPORTED = "\u2014";
+
 export type FormRow = {
   paper_id: string;
   title: string;
   values: Record<string, any>;
   status?: Record<string, "suggested" | "accepted" | "rejected">;
+  // An empty cell used to mean two things: the paper does not report it, and
+  // nothing ever read it. The first belongs in the review; the second is work
+  // still to do, and a reviewer cannot tell them apart from a blank.
+  cell?: Record<string, CellStatus>;
 };
 
 /**
@@ -122,8 +139,15 @@ export function tabSheets(
   rows: FormRow[],
 ): { name: string; head: string[]; body: string[][] }[] {
   const byId = new Map(fields.map(f => [f.id, f]));
-  const cell = (r: FormRow, id: string) =>
-    (r.status?.[id] === "rejected" ? "" : String(r.values?.[id] ?? "").trim());
+  const cell = (r: FormRow, id: string) => {
+    if (r.status?.[id] === "rejected") return "";
+    const value = String(r.values?.[id] ?? "").trim();
+    if (value) return value;
+    // A blank column in an exported workbook reads as an extraction nobody
+    // finished. "Not reported" is a finding, and the reviewer who checks this
+    // against the paper needs to see which of the two it was.
+    return r.cell?.[id] === "not_reported" ? NOT_REPORTED : "";
+  };
 
   return tabs.map((tab, ti) => {
     const cols = tab.fieldIds.map(id => byId.get(id)).filter(Boolean) as FormField[];
@@ -136,6 +160,32 @@ export function tabSheets(
       body: mine.map(r => [r.title || "Untitled", ...cols.map(c => cell(r, c.id))]),
     };
   }).filter(sheet => sheet.head.length > 1);
+}
+
+/**
+ * The fields to extract for one study: the fields of the tabs that cover it.
+ *
+ * A tab can be scoped to a list of studies, and the table already hides it for
+ * the others. Extraction ignored that and asked every field of every paper,
+ * which is how a preclinical sheet came back holding a clinical cohort's
+ * baseline table, and how one paper's columns were filled with results its
+ * discussion had cited from somebody else's work. Asking only what the sheet
+ * covers cannot produce those values at all.
+ *
+ * A study that no tab claims is read against the whole form, because the
+ * alternative is an empty row and no way to see why.
+ */
+export function fieldsForStudy<T extends { id: string }>(
+  tabs: FormTabSpec[] | null | undefined,
+  fields: T[],
+  paperId: string,
+): T[] {
+  if (!tabs || !tabs.length) return fields;
+  const covered = new Set(
+    tabs.filter(t => !t.studies || t.studies.includes(paperId))
+        .flatMap(t => t.fieldIds));
+  const mine = fields.filter(f => covered.has(f.id));
+  return mine.length ? mine : fields;
 }
 
 const DEFAULT_FORM_FIELDS: FormField[] = [
@@ -242,6 +292,7 @@ const notifyImport = () => importWatchers.forEach(f => f());
 
 export function TextExtractionPage() {
   const s = useStore();
+  const extractModel = useStageModel("text-extraction");
   const [query, setQuery] = useState(PRESETS[0]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [listQ, setListQ] = useState("");
@@ -290,7 +341,7 @@ export function TextExtractionPage() {
                         // Set when the reviewer typed the value themselves, with
                         // what the model had said: an extraction table that cannot
                         // show which cells a human corrected is not an audit trail.
-                        edited?: boolean; original?: string }>; status: Record<string, "suggested" | "accepted" | "rejected"> }[]>(
+                        edited?: boolean; original?: string }>; status: Record<string, "suggested" | "accepted" | "rejected">; cell?: Record<string, CellStatus> }[]>(
     () => recall<any[]>("ee:extract-rows", Array.isArray) || []);
   // Not while a run is going: that would serialise the whole table once per
   // article. The run ends, formBusy clears, and this writes the finished set.
@@ -816,7 +867,7 @@ export function TextExtractionPage() {
 
 
 
-          body: JSON.stringify({ sheets: [payload[k]], model: s.model }),
+          body: JSON.stringify({ sheets: [payload[k]], model: extractModel }),
 
 
 
@@ -857,7 +908,7 @@ export function TextExtractionPage() {
           })),
 
 
-          model: s.model,
+          model: extractModel,
 
 
         }),
@@ -1504,7 +1555,7 @@ export function TextExtractionPage() {
       }
     }
 
-    const rows: { paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }>; status: Record<string, "suggested" | "accepted" | "rejected"> }[] = [];
+    const rows: { paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }>; status: Record<string, "suggested" | "accepted" | "rejected">; cell: Record<string, CellStatus> }[] = [];
     let done = 0;
     // An article that fails produces no row. Silently, that reads as a paper
     // which reports nothing, so each failure is kept and reported at the end.
@@ -1512,8 +1563,9 @@ export function TextExtractionPage() {
     // Local (Ollama) serves one request at a time, so run in series — it also
     // makes the live label exact. Cloud / GPU-served models batch well, so fan
     // out to saturate them.
-    const CONCURRENCY = /^(claude|gpt|gemini)/i.test(s.model) ? 8 : 1;
+    const CONCURRENCY = /^(claude|gpt|gemini)/i.test(extractModel) ? 8 : 1;
     const spec = fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options, description: f.description }));
+    const specFor = (paperId: string) => fieldsForStudy(formTabs, spec, paperId);
     try {
       for (let i = 0; i < targets.length; i += CONCURRENCY) {
         const batch = targets.slice(i, i + CONCURRENCY);
@@ -1528,26 +1580,40 @@ export function TextExtractionPage() {
             const values: Record<string, any> = {};
             const meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }> = {};
             const status: Record<string, "suggested" | "accepted" | "rejected"> = {};
+            const cell: Record<string, CellStatus> = {};
             let callError = "";
             // In groups, so the model is answering a question it can finish,
             // and so a form of two hundred fields reports progress rather than
             // appearing to hang for minutes.
-            for (let k = 0; k < spec.length; k += FIELDS_PER_CALL) {
-              const group = spec.slice(k, k + FIELDS_PER_CALL);
-              if (spec.length > FIELDS_PER_CALL) {
-                setFormCurrent(`${p.title || "Untitled"} · fields ${k + 1}-${k + group.length} of ${spec.length}`);
+            const mySpec = specFor(p.paper_id);
+            for (let k = 0; k < mySpec.length; k += FIELDS_PER_CALL) {
+              const group = mySpec.slice(k, k + FIELDS_PER_CALL);
+              if (mySpec.length > FIELDS_PER_CALL) {
+                setFormCurrent(`${p.title || "Untitled"} · fields ${k + 1}-${k + group.length} of ${mySpec.length}`);
               }
               const rich = await AIService.extractFieldsRich(
                 textFor[p.paper_id] || p.text || "", group, p.title || "", undefined, tables);
               Object.assign(values, rich.values || {});
               for (const rf of rich.fields || []) {
                 meta[rf.id] = { source_quote: rf.source_quote || "", confidence: rf.confidence || "none", needs_review: !!rf.needs_review };
-                // Pre-accept confident, unflagged suggestions; flag the rest for review.
-                status[rf.id] = (rf.needs_review || rf.confidence !== "high") ? "suggested" : "accepted";
+                cell[rf.id] = (rf.status as CellStatus) || "unread";
+                // "Not reported" is an answer, so it is not held for review.
+                // Everything else: pre-accept confident, unflagged suggestions
+                // and flag the rest, including anything nothing managed to read.
+                status[rf.id] = cell[rf.id] === "not_reported"
+                  ? "accepted"
+                  : (rf.needs_review || rf.confidence !== "high") ? "suggested" : "accepted";
               }
               if (rich.error && !callError) callError = rich.error;
             }
-            for (const f of fields) if (!(f.id in status)) status[f.id] = String(values[f.id] ?? "").trim() ? "suggested" : "accepted";
+            for (const f of mySpec) {
+              if (f.id in status) continue;
+              // Absent from every reply: nothing read this field. It is work
+              // remaining, not a settled blank, which is what calling it
+              // accepted used to make it look like.
+              cell[f.id] = String(values[f.id] ?? "").trim() ? "reported" : "unread";
+              status[f.id] = "suggested";
+            }
             const filled = Object.values(values).filter(v => String(v ?? "").trim()).length;
             if (callError && !filled) failures.push({ title: p.title || "Untitled", why: callError });
             else if (!filled) {
@@ -1558,7 +1624,7 @@ export function TextExtractionPage() {
                   : "no field could be filled from this text",
               });
             }
-            rows.push({ paper_id: p.paper_id, title: p.title || "Untitled", values, meta, status });
+            rows.push({ paper_id: p.paper_id, title: p.title || "Untitled", values, meta, status, cell });
             setFormRows([...rows]);
           } catch (e: any) {
             failures.push({ title: p.title || "Untitled", why: e?.message || "the request failed" });
@@ -2464,6 +2530,7 @@ export function TextExtractionPage() {
                 const meta = row.meta?.[field.id];
                 const value = String(row.values[field.id] ?? "").trim();
                 const quote = (meta?.source_quote || "").trim();
+                const cellState = row.cell?.[field.id];
                 const text = s.fullTexts[row.paper_id]?.text || "";
                 const ctx = quote ? quoteInContext(text, quote) : null;
                 const at = quote ? quotePosition(text, quote) : null;
@@ -2509,11 +2576,15 @@ export function TextExtractionPage() {
                         reviewer has to be able to tell them apart. */}
                     {!quote && (
                       <div className="text-sm text-muted-foreground">
-                        {!meta
+                        {/* The run says which of the two empty cases this is.
+                            Rows extracted before it did fall back to whether
+                            the field has any metadata, which is the same
+                            distinction read indirectly. */}
+                        {(cellState ? cellState === "unread" : !meta)
                           ? "This field was never answered: the group of fields it was asked in failed. Run the form again to fill it."
                           : value
                             ? "The model gave no sentence for this value, so there is nothing to check it against. Treat it as unverified."
-                            : "The model found nothing for this field in this paper. An empty cell is the honest answer when the paper does not report it."}
+                            : "The model read the article and found nothing for this field. That the paper does not report it is itself a finding, and it is recorded as a dash rather than left blank."}
                       </div>
                     )}
 
@@ -2612,7 +2683,11 @@ export function TextExtractionPage() {
                                 <span className={`mt-1 size-1.5 rounded-full shrink-0 ${m?.edited ? "bg-sky-500" : dot}`}
                                       title={m?.edited
                                         ? `You edited this. The model had: ${m.original || "(nothing)"}`
-                                        : `AI confidence: ${conf}${m?.source_quote ? `\nSource: "${m.source_quote}"` : ""}`} />
+                                        : r.cell?.[f.id] === "not_reported"
+                                          ? "The model read the article and found no value for this field."
+                                          : r.cell?.[f.id] === "unread"
+                                            ? "Nothing read this field yet."
+                                            : `AI confidence: ${conf}${m?.source_quote ? `\nSource: "${m.source_quote}"` : ""}`} />
                                 <div className="flex-1 min-w-0">
                                   {editing && editing.paperId === r.paper_id && editing.fieldId === f.id ? (
                                     <textarea
@@ -2647,7 +2722,17 @@ export function TextExtractionPage() {
                                                       text-foreground/90 hover:underline
                                                       decoration-dotted underline-offset-2
                                                       ${st === "rejected" ? "line-through opacity-50" : ""}`}>
-                                    {val || <span className="text-muted-foreground/40">—</span>}
+                                    {/* Three states, not two, but a column of
+                                        "Not reported" is unreadable next to a
+                                        hundred others. Both empty cases show a
+                                        dash; the one the model answered is the
+                                        darker of the two, and the hover text
+                                        and the source dialog say which it is. */}
+                                    {val || (
+                                      <span className={r.cell?.[f.id] === "not_reported"
+                                        ? "text-muted-foreground"
+                                        : "text-muted-foreground/40"}>{NOT_REPORTED}</span>
+                                    )}
                                   </button>
                                   )}
                                   {/* Both verbs on every cell, whatever the model

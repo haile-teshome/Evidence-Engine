@@ -21,7 +21,7 @@ langchain's HumanMessage, and adds no state.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from langchain_core.messages import HumanMessage
@@ -115,14 +115,74 @@ def _field_lines(fields: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-# 12000 characters is about a quarter of a journal article, which ends part
-# way through the methods: every number in the results and the tables sits
-# past it, so the model answers from the abstract or invents one. Measured on
-# a 42k-character paper, 7 fields whose answers are all in the results:
-# 1/7 correct at 12k, 4/7 at 30k, 7/7 at 30k with a context that holds it.
+# How much of the article to send.
+#
+# A fixed prefix was the reason extraction returned blanks for funding,
+# conflicts of interest, grant numbers and data availability: those sit in a
+# paper's back matter, 80 to 90 % of the way in, so a 30,000-character prefix
+# never showed them to the model at all. Measured on two papers (41.6k and
+# 45.1k characters), 8 such fields: 3 filled at 30,000 characters, 8 of 8 on
+# the whole text, with no other change.
+#
+# So the limit is the context, which is the real limit, and it is computed
+# rather than guessed. Characters per token were measured with Ollama's own
+# prompt_eval_count on those two papers: 3.33 for a clean two-column PDF and
+# 2.65 for one whose text layer lost its spaces, because run-together words
+# tokenise far worse. The constant sits well below the worse of the two,
+# because the two costs are not symmetric: windowing a little early loses the
+# middle of an unusually long paper, while underestimating by a few per cent
+# overruns the context and the reply comes back cut mid-JSON, which loses every
+# field in the group. 2.2 still holds a whole typical article, and leaves room
+# for text that tokenises down to about 2.05 characters per token.
+CHARS_PER_TOKEN = 2.2
+# Held back for the system prompt, the field list, the JSON schema and the
+# model's own answer, which for a 12-field group with quotes runs to about 900
+# tokens. Generous, because overrunning the context costs the whole reply: it
+# is cut mid-JSON and every field in the group comes back empty.
+RESERVE_TOKENS = 4000
+# A caller that does not say what context it opened gets a budget that fits the
+# small default Ollama uses when nobody asks (2048 or 4096 tokens). Sending more
+# than the window holds is silently truncated by the server, which is the same
+# failure as truncating here but harder to see. The app always passes num_ctx.
+ASSUMED_NUM_CTX = 8192
+# Fewer characters than this cannot answer an extraction form, so the budget
+# never drops below it even if the arithmetic says so.
+MIN_TEXT_CHARS = 4000
+# The shortest head or tail worth sending if the article has to be windowed.
+MIN_SEGMENT_CHARS = 1500
+# What a reviewer sees in the quote when the middle was dropped.
+OMITTED_MARKER = "\n\n[... middle of the article omitted ...]\n\n"
+
+
+def text_budget(num_ctx: Optional[int] = None, tables_chars: int = 0) -> int:
+    """How many characters of article text fit alongside everything else."""
+    usable = max(0, (num_ctx or ASSUMED_NUM_CTX) - RESERVE_TOKENS)
+    return max(MIN_TEXT_CHARS, int(usable * CHARS_PER_TOKEN) - max(0, tables_chars))
+
+
+def window(text: str, budget: int) -> str:
+    """The part of the article to send when all of it does not fit.
+
+    Head AND tail, never a prefix. The front holds the design, population and
+    methods; the back holds funding, conflicts of interest, data availability
+    and the author contributions. A prefix drops that whole class of field, and
+    a review reports funding and conflicts whether or not a model found them.
+    """
+    if budget <= 0 or len(text) <= budget:
+        return text
+    if budget <= len(OMITTED_MARKER) + 2 * MIN_SEGMENT_CHARS:
+        return text[:budget]
+    # A quarter to the tail: in the two papers measured, the funding statement
+    # began at 90 % and 80 % of the way through, so a fifth was not enough.
+    room = budget - len(OMITTED_MARKER)
+    tail = max(MIN_SEGMENT_CHARS, int(room * 0.25))
+    head = room - tail
+    return text[:head] + OMITTED_MARKER + text[-tail:]
+
+
 def build_prompt(text: str, tables: str, fields: List[Dict],
-                 max_text: int = 30000, max_tables: int = 8000) -> str:
-    body = text[:max_text] if text else "(no study text provided)"
+                 max_text: Optional[int] = None, max_tables: int = 8000) -> str:
+    body = window(text, max_text) if (text and max_text) else (text or "(no study text provided)")
     tbl = f"\n\nTABLES (extracted from the full text):\n{tables[:max_tables]}\n" if tables else ""
     schema = (
         '{"extractions": [{"name": "<field name>", '
@@ -154,6 +214,37 @@ def _confidence(field_type: str, value: Any, quote: str, text: str) -> str:
     return "high" if quote_in_text(quote, text) else "low"
 
 
+def colliding_fields(fields: List[Dict]) -> List[str]:
+    """Names of fields that hold another field's answer rather than their own.
+
+    Asked for twelve fields at once, a model that cannot find one of them will
+    sometimes hand back a neighbour's answer instead of nothing. It is how
+    "median follow-up" came back holding the median overall survival, quoting
+    the sentence that gives the overall survival, and how "study period" came
+    back as "15.64 months" when the study ran from 2015 to 2021.
+
+    The detection is narrow on purpose. One sentence supporting several fields
+    is ordinary: "we randomised 128 adults to metformin or placebo" is the
+    source for the design, the sample size and the comparator. So the value has
+    to be identical as well before this is a copy rather than a shared source,
+    and when it is, at most one of the fields can be right.
+
+    Every field in the group is returned, because which of them owns the answer
+    cannot be told from here: the caller asks each one again on its own, where
+    there is no neighbour to copy from.
+    """
+    groups: Dict[Tuple[str, str], List[str]] = {}
+    for f in fields or []:
+        value = str(f.get("value") or "").strip().lower()
+        quote = str(f.get("source_quote") or "").strip().lower()
+        # Both halves have to be there: a dozen empty fields are not copies of
+        # each other, and a value with no quote has no shared source to share.
+        if not value or len(quote) < 20:
+            continue
+        groups.setdefault((value, quote), []).append(str(f.get("name") or ""))
+    return [name for names in groups.values() if len(names) > 1 for name in names]
+
+
 def extract_form(text: str, tables: str, fields: List[Dict], model_name: str,
                  ai_service, num_ctx: Optional[int] = None) -> Dict[str, Any]:
     """Return per-field extractions with provenance and review flags.
@@ -171,10 +262,12 @@ def extract_form(text: str, tables: str, fields: List[Dict], model_name: str,
     if not model:
         return {"fields": [{"name": f["name"], "type": f.get("type", "text"),
                             "value": None, "source_quote": "", "confidence": "none",
-                            "needs_review": True, "error": "model unavailable"} for f in fields],
+                            "needs_review": True, "status": "unread",
+                            "error": "model unavailable"} for f in fields],
                 "model": model_name, "error": "model unavailable"}
 
-    prompt = build_prompt(text, tables, fields)
+    budget = text_budget(num_ctx, len(tables or ""))
+    prompt = build_prompt(text, tables, fields, max_text=budget)
     raw_by_name: Dict[str, Dict] = {}
     error = ""
     try:
@@ -209,8 +302,21 @@ def extract_form(text: str, tables: str, fields: List[Dict], model_name: str,
         # Human-in-the-loop policy: numbers always verified; text verified when
         # the model gave no source or low confidence.
         needs_review = (ftype in NUMERIC_TYPES) or conf in ("low", "none")
+        # Why a cell is empty, which the caller already knows here and used to
+        # throw away. A field the model answered with null is the model saying
+        # the paper does not report it; a field missing from the reply, or a
+        # whole group that failed, was never read. The reviewer has to tell
+        # those apart: the first belongs in the review as "not reported", the
+        # second is work still to do.
+        if not _blank(value):
+            status = "reported"
+        elif error or name not in raw_by_name:
+            status = "unread"
+        else:
+            status = "not_reported"
         out_fields.append({
             "name": name, "type": ftype, "value": value,
             "source_quote": quote, "confidence": conf, "needs_review": needs_review,
+            "status": status,
         })
     return {"fields": out_fields, "model": model_name, "error": error}

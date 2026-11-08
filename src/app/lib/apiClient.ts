@@ -515,6 +515,10 @@ export const AIService = {
     fields: {
       id: string; label: string; type: string; value: any;
       source_quote: string; confidence: "high" | "low" | "none"; needs_review: boolean;
+      // Why the value is empty, when it is: "not_reported" is the model saying
+      // the paper does not report this field, "unread" means no answer for it
+      // ever came back. A blank cell cannot tell a reviewer which.
+      status?: "reported" | "not_reported" | "unread";
     }[];
     // Set when the call reached the model and the model's answer was unusable
     // (most often cut off part-way through). Every field comes back empty in

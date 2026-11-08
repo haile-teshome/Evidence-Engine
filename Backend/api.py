@@ -55,6 +55,7 @@ from leads_screening import (
     screen_paper_leads,
 )
 import instruments as _inst
+import pdf_text_repair
 
 import time
 import requests
@@ -3490,7 +3491,14 @@ def _extract_text_from_pdf(pdf_bytes: bytes) -> Optional[str]:
                 # Some pages (scanned / encrypted) can fail individually; skip them.
                 continue
         text = "\n".join(parts).strip()
-        return text if text and len(text) > 200 else None
+        if not text or len(text) <= 200:
+            return None
+        # Some publishers' fonts spell symbols as letters, so the text layer
+        # says "10mM" where the paper says "10 µM" and "ratio ¼ 3.96" where it
+        # says "=". Nothing downstream can recover either: a model reads the
+        # wrong unit correctly, and the quote it cites matches the text, so
+        # verifying against the document confirms the error.
+        return pdf_text_repair.repair(text, pdf_bytes)
     except Exception as e:
         print(f"[pdf_extract] {e}")
         return None
@@ -4735,8 +4743,12 @@ def extract_fields(req: ExtractFieldsRequest):
     raw_fields: List[Dict[str, Any]] = []
     failures: List[str] = []
     for group in groups:
+        # The whole text: extract_form sizes it to the context it opens. Slicing
+        # here as well is how funding, conflicts of interest and data
+        # availability came back blank on every paper longer than 30,000
+        # characters, which is most of them.
         got = extraction_forms.extract_form(
-            text=text[:30000], tables=(req.tables or ""), fields=group,
+            text=text, tables=(req.tables or ""), fields=group,
             model_name=model_name, ai_service=AIService,
             num_ctx=Config.EXTRACTION_NUM_CTX)
         raw_fields.extend(got.get("fields") or [])
@@ -4745,6 +4757,30 @@ def extract_fields(req: ExtractFieldsRequest):
     if len(groups) > 1:
         print(f"[extract_fields] {len(ef_fields)} fields in {len(groups)} groups, "
               f"{len(failures)} failed")
+
+    # Ask again, one field at a time, for any field that came back holding
+    # another field's answer. Asked twelve at a time a model that cannot find a
+    # field sometimes copies a neighbour instead of returning nothing, and the
+    # copy is indistinguishable from a real answer: it has a value and a quote,
+    # and the quote is genuinely in the paper. Alone, there is nothing to copy.
+    repeats = extraction_forms.colliding_fields(raw_fields)
+    if repeats:
+        by_name = {f["name"]: f for f in ef_fields}
+        print(f"[extract_fields] re-asking {len(repeats)} copied field(s): "
+              f"{', '.join(repeats)}")
+        for name in repeats:
+            spec = by_name.get(name)
+            if not spec:
+                continue
+            again = extraction_forms.extract_form(
+                text=text, tables=(req.tables or ""), fields=[spec],
+                model_name=model_name, ai_service=AIService,
+                num_ctx=Config.EXTRACTION_NUM_CTX)
+            got = (again.get("fields") or [None])[0]
+            # Only on a clean answer: a failed re-ask must not turn a value the
+            # reviewer could at least see and correct into an empty cell.
+            if got and not again.get("error"):
+                raw_fields = [got if f["name"] == name else f for f in raw_fields]
     # A group that failed contributes no fields, so a partial answer is still an
     # answer; only say the whole thing failed when all of it did.
     result = {
@@ -4764,6 +4800,10 @@ def extract_fields(req: ExtractFieldsRequest):
             "id": fid, "label": label_by_id.get(fid, fid), "type": ef["type"],
             "value": values[fid], "source_quote": ef["source_quote"],
             "confidence": ef["confidence"], "needs_review": ef["needs_review"],
+            # "reported" / "not_reported" / "unread". An empty cell meant both
+            # "this paper does not report it" and "nothing ever read this
+            # field", and a review has to be able to write the first one down.
+            "status": ef.get("status", "unread"),
         })
     # An empty row and a failed call look identical to the reviewer, so the
     # failure travels with the result instead of only reaching the server log.
