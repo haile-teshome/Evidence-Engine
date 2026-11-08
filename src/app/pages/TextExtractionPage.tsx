@@ -338,6 +338,7 @@ export function TextExtractionPage() {
   const [formProgress, setFormProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
   const [formCurrent, setFormCurrent] = useState<string>("");
   const [formRows, setFormRows] = useState<{ paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean;
+                        /** Why the app flagged it, when it has a reason to give. */ review_reason?: string;
                         // Set when the reviewer typed the value themselves, with
                         // what the model had said: an extraction table that cannot
                         // show which cells a human corrected is not an audit trail.
@@ -1555,7 +1556,7 @@ export function TextExtractionPage() {
       }
     }
 
-    const rows: { paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }>; status: Record<string, "suggested" | "accepted" | "rejected">; cell: Record<string, CellStatus> }[] = [];
+    const rows: { paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean; review_reason?: string }>; status: Record<string, "suggested" | "accepted" | "rejected">; cell: Record<string, CellStatus> }[] = [];
     let done = 0;
     // An article that fails produces no row. Silently, that reads as a paper
     // which reports nothing, so each failure is kept and reported at the end.
@@ -1578,7 +1579,7 @@ export function TextExtractionPage() {
               .map((t: any) => [t.caption, ...(t.rows || []).map((r: any[]) => r.join(" | "))].join("\n"))
               .join("\n\n");
             const values: Record<string, any> = {};
-            const meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean }> = {};
+            const meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean; review_reason?: string }> = {};
             const status: Record<string, "suggested" | "accepted" | "rejected"> = {};
             const cell: Record<string, CellStatus> = {};
             let callError = "";
@@ -1595,7 +1596,8 @@ export function TextExtractionPage() {
                 textFor[p.paper_id] || p.text || "", group, p.title || "", undefined, tables);
               Object.assign(values, rich.values || {});
               for (const rf of rich.fields || []) {
-                meta[rf.id] = { source_quote: rf.source_quote || "", confidence: rf.confidence || "none", needs_review: !!rf.needs_review };
+                meta[rf.id] = { source_quote: rf.source_quote || "", confidence: rf.confidence || "none",
+                                needs_review: !!rf.needs_review, review_reason: rf.review_reason || "" };
                 cell[rf.id] = (rf.status as CellStatus) || "unread";
                 // "Not reported" is an answer, so it is not held for review.
                 // Everything else: pre-accept confident, unflagged suggestions
@@ -2571,6 +2573,19 @@ export function TextExtractionPage() {
                         )}
                       </div>
                     </div>
+
+                    {/* Why the app flagged a value it did fill. Without this the
+                        reviewer sees a cell marked for review, a quote that is
+                        plainly in the paper, and no way to tell what the app
+                        thinks is wrong with it. */}
+                    {meta?.review_reason && (
+                      <div className="rounded-md border border-amber-300/70 bg-amber-50
+                                      dark:border-amber-800/50 dark:bg-amber-950/30
+                                      px-2.5 py-2 text-xs leading-snug
+                                      text-amber-800 dark:text-amber-200">
+                        Check this one: {meta.review_reason}.
+                      </div>
+                    )}
 
                     {/* An empty cell has three quite different meanings and the
                         reviewer has to be able to tell them apart. */}

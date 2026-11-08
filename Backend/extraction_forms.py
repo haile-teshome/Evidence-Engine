@@ -193,9 +193,112 @@ def build_prompt(text: str, tables: str, fields: List[Dict],
         f"EXTRACTION FORM (fill every field):\n{_field_lines(fields)}\n\n"
         "For each field: first find the exact supporting sentence or table cell, "
         "then record the value. Match the requested arm/outcome/timepoint precisely. "
+        "The source_quote must be the sentence the value appears in, copied "
+        "verbatim; if you cannot find the value in a sentence, the field is not "
+        "reported.\n"
+        "Take only what THIS article reports about its own study. Its "
+        "introduction and discussion describe other studies' findings, and "
+        "those are not this article's data.\n"
+        "If the article reports a field in more than one place, for more than "
+        "one group, or in separate statements covering different parties (for "
+        "example one author's conflicts and the remaining authors'), give every "
+        "one of them in the value, separated by '; '. A partial answer to a "
+        "field the article answers fully is wrong.\n"
         "If a field is not reported, use null and an empty source_quote.\n"
         f"Return ONLY this JSON object:\n{schema}\n"
     )
+
+
+# Words that carry no evidence, so matching on them would mean nothing.
+_EMPTY_WORDS = {
+    "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "by", "for",
+    "from", "with", "was", "were", "is", "are", "be", "been", "has", "have",
+    "had", "this", "that", "these", "those", "it", "its", "as", "not", "no",
+    "there", "their", "which", "when", "than", "then", "also", "both",
+}
+
+
+def _content_words(s: str) -> List[str]:
+    """The words in `s` that could be matched against a source sentence."""
+    words = re.sub(r"[^0-9A-Za-z\u00b5\u0370-\u03ff.]+", " ", (s or "").lower()).split()
+    out = []
+    for w in words:
+        w = w.strip(".")
+        if not w or w in _EMPTY_WORDS:
+            continue
+        # Short words carry no evidence unless they are numbers: "5" does, "se"
+        # does not.
+        if len(w) < 3 and not any(ch.isdigit() for ch in w):
+            continue
+        out.append(w)
+    return out
+
+
+# A sentence that credits its finding to another paper. Both halves are needed:
+# a citation alone is ordinary in a methods sentence ("dosed per the Stupp
+# protocol (Stupp et al., 2005)"), and a reporting verb alone is how a paper
+# describes its own results.
+_CITATION = re.compile(
+    r"\bet\s?al\b"                                  # (Rizzo et al., 2017)
+    r"|\([A-Z][A-Za-z\u00c0-\u024f'`-]+,?\s+\d{4}\)"      # (Rizzo, 2017)
+    r"|\[\d{1,3}(?:\s?[,\u2013-]\s?\d{1,3})*\]"             # [26], [14-16]
+)
+# Verbs that report a finding. Deliberately not "according to": a methods
+# sentence citing the protocol it followed ("dosed according to the Stupp
+# protocol (Stupp et al., 2005)") describes this study's own treatment, and
+# flagging it would train the reviewer to ignore the flag.
+_ATTRIBUTION = re.compile(
+    r"\b(showed|shown|reported|reports|demonstrated|found|observed|describes"
+    r"|described|suggested|suggests|concluded)\b",
+    re.IGNORECASE,
+)
+
+
+def attributed_elsewhere(quote: str) -> bool:
+    """Does this sentence credit its finding to a different paper?
+
+    A clinical study of two anti-seizure drugs returned "300 and 800 µM" as its
+    in vitro concentration. The value really is in the sentence it cites, so
+    checking the value against its quote passes. The sentence reads "the
+    inhibitory effect ... was observed at concentrations between 300 and 800 µM
+    (Rizzo et al., 2017)": it is somebody else's cell-culture work, discussed,
+    and the study did no in vitro work at all.
+
+    Nothing about the value says so, and a review that pools it has pooled a
+    number from a paper it never screened. This does not reject the value,
+    because a methods sentence legitimately cites the protocol it followed; it
+    marks it for a human, which is what the flag is for.
+    """
+    text = quote or ""
+    return bool(_CITATION.search(text)) and bool(_ATTRIBUTION.search(text))
+
+
+def supported_by_quote(value: Any, quote: str) -> bool:
+    """Does the cited sentence actually say the value?
+
+    The whole contract of locate-then-extract is that the quote is the sentence
+    the value was read from. That was never checked: the quote was verified to
+    exist somewhere in the paper, which it always does, and the value was
+    checked against the whole paper rather than against its own quote.
+
+    So a value lifted from a different sentence arrived pre-verified. A clinical
+    paper's "in vitro concentration" came back as "300 and 800 µM" -- a figure
+    from work its discussion cites, not from the study -- quoting a sentence
+    containing neither number, and was marked high confidence and not flagged.
+
+    Half the value's content words have to appear in the quote, which allows the
+    paraphrase an extraction normally is ("retrospective cohort" for "an
+    observational, retrospective single-center study") while rejecting a value
+    the sentence does not mention at all.
+    """
+    want = _content_words(str(value if value is not None else ""))
+    if not want:
+        return True                                   # nothing to check
+    have = set(_content_words(quote))
+    if not have:
+        return False
+    hits = sum(1 for w in want if w in have)
+    return hits >= max(1, (len(want) + 1) // 2)
 
 
 def _confidence(field_type: str, value: Any, quote: str, text: str) -> str:
@@ -205,13 +308,23 @@ def _confidence(field_type: str, value: Any, quote: str, text: str) -> str:
         n = _num(value)
         if n is None:
             return "low"
-        grounded = bool(quote) and _num_in_text(n, text + " " + quote)
+        # In its own quote, not merely somewhere in the paper. A paper contains
+        # hundreds of numbers; that one of them matches says nothing about
+        # whether this sentence is where this field's number came from.
+        grounded = bool(quote) and _num_in_text(n, quote)
         return "high" if grounded else "low"
     # text/categorical/date: the quote IS the evidence, so it has to be in the
     # paper. Without this a model that echoes the field's own description back as
     # its source scores high and arrives pre-accepted, which is how a whole
     # risk-of-bias column can be invented and look verified.
-    return "high" if quote_in_text(quote, text) else "low"
+    if not quote_in_text(quote, text):
+        return "low"
+    # The quote is in the paper. Whether it is the sentence THIS value came
+    # from is a separate question, and the one that was never asked.
+    if not supported_by_quote(value, quote):
+        return "low"
+    # Supported, but by a sentence reporting another paper's result.
+    return "low" if attributed_elsewhere(quote) else "high"
 
 
 def colliding_fields(fields: List[Dict]) -> List[str]:
@@ -243,6 +356,31 @@ def colliding_fields(fields: List[Dict]) -> List[str]:
             continue
         groups.setdefault((value, quote), []).append(str(f.get("name") or ""))
     return [name for names in groups.values() if len(names) > 1 for name in names]
+
+
+def unsupported_fields(fields: List[Dict]) -> List[str]:
+    """Names of fields whose value is not in the sentence they cite.
+
+    A different failure from a copied answer, and a more common one: the model
+    finds a value somewhere, then attaches a sentence that reads as if it were
+    the source. Both have a value and a real quote, and neither can be told
+    from a sound extraction by looking at the value alone.
+    """
+    out = []
+    for f in fields or []:
+        value = f.get("value")
+        quote = str(f.get("source_quote") or "").strip()
+        if _blank(value) or len(quote) < 20:
+            continue
+        ftype = (f.get("type") or "text").lower()
+        if ftype in NUMERIC_TYPES:
+            n = _num(value)
+            ok = n is not None and _num_in_text(n, quote)
+        else:
+            ok = supported_by_quote(value, quote)
+        if not ok:
+            out.append(str(f.get("name") or ""))
+    return out
 
 
 def extract_form(text: str, tables: str, fields: List[Dict], model_name: str,
@@ -314,9 +452,18 @@ def extract_form(text: str, tables: str, fields: List[Dict], model_name: str,
             status = "unread"
         else:
             status = "not_reported"
+        reason = ""
+        if not _blank(value) and quote:
+            if attributed_elsewhere(quote):
+                reason = ("the sentence this was read from credits it to another "
+                          "paper, so it may not be this study's own result")
+            elif ftype in NUMERIC_TYPES and not _num_in_text(_num(value) or 0, quote):
+                reason = "the number does not appear in the sentence quoted for it"
+            elif ftype not in NUMERIC_TYPES and not supported_by_quote(value, quote):
+                reason = "the sentence quoted for this does not mention the value"
         out_fields.append({
             "name": name, "type": ftype, "value": value,
             "source_quote": quote, "confidence": conf, "needs_review": needs_review,
-            "status": status,
+            "status": status, "review_reason": reason,
         })
     return {"fields": out_fields, "model": model_name, "error": error}

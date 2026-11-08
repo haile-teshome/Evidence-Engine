@@ -579,6 +579,164 @@ class TestFieldGroups:
         assert seen == [6]
 
 
+class TestSupportedByQuote:
+    """Does the cited sentence actually say the value?
+
+    The contract of locate-then-extract is that the quote is the sentence the
+    value was read from, and that was never checked. The quote was verified to
+    exist somewhere in the paper, which it always does, and a number was
+    checked against the whole paper rather than against its own quote. So a
+    value lifted from a different sentence arrived marked high confidence and
+    not flagged for review.
+    """
+
+    def test_a_value_its_sentence_does_not_mention_is_unsupported(self):
+        assert not EF.supported_by_quote(
+            "300 and 800 \u03bcM",
+            "Interestingly, better results were obtained with drug concentrations "
+            "exceeding the doses typically administered for seizure control.")
+
+    def test_a_paraphrase_of_its_sentence_is_supported(self):
+        # An extraction is normally a paraphrase, and must not be punished.
+        assert EF.supported_by_quote(
+            "retrospective cohort",
+            "An observational, retrospective single-center study was conducted")
+
+    def test_a_verbatim_value_is_supported(self):
+        assert EF.supported_by_quote(
+            "15.64 months", "The median OS of our cohort (n = 272) was 15.64 months.")
+
+    def test_a_one_word_value_in_its_sentence_is_supported(self):
+        assert EF.supported_by_quote(
+            "Italy", "Department of Neuroscience, University of Turin, Turin, Italy")
+
+    def test_a_long_value_from_another_sentence_is_unsupported(self):
+        assert not EF.supported_by_quote(
+            "TFC is cofounder, major stock holder and board member of Katmai",
+            "Notes: Role of the funder: The National Cancer Institute played no role "
+            "in the design and conduct of the study.")
+
+    def test_nothing_to_check_is_not_a_failure(self):
+        assert EF.supported_by_quote("", "any sentence")
+        assert EF.supported_by_quote(None, "any sentence")
+
+    def test_a_value_with_no_sentence_is_unsupported(self):
+        assert not EF.supported_by_quote("15.64 months", "")
+
+
+class TestAttribution:
+    """Whose finding is this?
+
+    A clinical study of two anti-seizure drugs returned "300 and 800 uM" as its
+    in vitro concentration. The number really is in the sentence it cites, so
+    the support check passes; the sentence is somebody else's cell-culture work,
+    discussed, and the study did no in vitro work at all. A review that pooled
+    it would have pooled a number from a paper it never screened.
+    """
+
+    def test_a_cited_finding_is_attributed_elsewhere(self):
+        assert EF.attributed_elsewhere(
+            "The inhibitory effect was observed at concentrations between 300 and "
+            "800 \u03bcM (Rizzo et al., 2017).")
+
+    def test_a_numbered_citation_counts(self):
+        assert EF.attributed_elsewhere("Previous studies reported a benefit [26].")
+
+    def test_a_methods_sentence_citing_its_own_protocol_is_not(self):
+        """The false positive that would matter: this is the study's own
+        treatment, and flagging it would teach the reviewer to ignore flags."""
+        assert not EF.attributed_elsewhere(
+            "Patients received temozolomide according to the Stupp protocol "
+            "(Stupp et al., 2005).")
+
+    def test_the_study_s_own_result_is_not(self):
+        assert not EF.attributed_elsewhere(
+            "The median OS of our cohort (n = 272) was 15.64 months.")
+
+    def test_a_citation_without_a_finding_is_not(self):
+        assert not EF.attributed_elsewhere("Glioblastoma is the commonest glioma (3).")
+
+
+class TestConfidenceReadsTheQuote:
+    def _field(self, out, name="sample_size"):
+        return next(f for f in out["fields"] if f["name"] == name)
+
+    def test_a_number_elsewhere_in_the_paper_is_not_grounded_in_this_quote(self):
+        """272 is in the text, but not in the sentence offered as its source."""
+        out = EF.extract_form(
+            "We enrolled 272 patients. The mean age was 42.5 years.", "", FIELDS, "m",
+            StubAI(StubModel('{"extractions":[{"name":"sample_size","value":272,'
+                             '"source_quote":"The mean age was 42.5 years."}]}')))
+        f = self._field(out)
+        assert f["confidence"] == "low"
+        assert f["needs_review"] is True
+        assert "does not appear in the sentence" in f["review_reason"]
+
+    def test_a_text_value_its_quote_does_not_mention_is_flagged(self):
+        out = EF.extract_form(
+            "The trial was randomised. Patients were followed for a year.", "",
+            [{"name": "design", "type": "text"}], "m",
+            StubAI(StubModel('{"extractions":[{"name":"design","value":"double blind crossover",'
+                             '"source_quote":"Patients were followed for a year."}]}')))
+        f = self._field(out, "design")
+        assert f["confidence"] == "low"
+        assert "does not mention the value" in f["review_reason"]
+
+    def test_a_value_credited_to_another_paper_is_flagged(self):
+        text = ("The inhibitory effect of LAC on cell cycle progression was observed "
+                "at concentrations between 300 and 800 uM (Rizzo et al., 2017).")
+        out = EF.extract_form(
+            text, "", [{"name": "conc", "type": "text"}], "m",
+            StubAI(StubModel('{"extractions":[{"name":"conc","value":"300 and 800 uM",'
+                             f'"source_quote":"{text}"}}]}}')))
+        f = self._field(out, "conc")
+        assert f["confidence"] == "low", f
+        assert f["needs_review"] is True
+        assert "another paper" in f["review_reason"]
+
+    def test_a_sound_extraction_keeps_its_confidence_and_says_nothing(self):
+        out = EF.extract_form(
+            "We enrolled 128 patients.", "", [{"name": "design", "type": "text"}], "m",
+            StubAI(StubModel('{"extractions":[{"name":"design","value":"enrolled 128 patients",'
+                             '"source_quote":"We enrolled 128 patients."}]}')))
+        f = self._field(out, "design")
+        assert f["confidence"] == "high"
+        assert f["needs_review"] is False
+        assert f["review_reason"] == ""
+
+
+class TestUnsupportedFields:
+    def test_it_names_a_field_whose_quote_does_not_support_it(self):
+        assert EF.unsupported_fields([
+            {"name": "a", "type": "text", "value": "double blind crossover",
+             "source_quote": "Patients were followed for a year in this study."},
+        ]) == ["a"]
+
+    def test_it_leaves_a_supported_field_alone(self):
+        assert EF.unsupported_fields([
+            {"name": "a", "type": "text", "value": "randomised",
+             "source_quote": "The trial was randomised and double blind throughout."},
+        ]) == []
+
+    def test_a_number_has_to_be_in_its_own_quote(self):
+        assert EF.unsupported_fields([
+            {"name": "n", "type": "number", "value": 272,
+             "source_quote": "The mean age was 42.5 years in this cohort."},
+        ]) == ["n"]
+
+    def test_an_empty_field_is_not_unsupported(self):
+        assert EF.unsupported_fields([
+            {"name": "a", "type": "text", "value": None, "source_quote": ""}]) == []
+
+    def test_a_field_with_no_real_quote_is_left_to_the_confidence_flag(self):
+        assert EF.unsupported_fields([
+            {"name": "a", "type": "text", "value": "x", "source_quote": "n=5"}]) == []
+
+    def test_it_survives_junk(self):
+        assert EF.unsupported_fields([]) == []
+        assert EF.unsupported_fields(None) == []
+
+
 class TestCollidingFields:
     """A field holding another field's answer.
 
@@ -696,6 +854,84 @@ class TestReAskingCopiedFields:
                       json={"text": "Methods. " * 200, "fields": self._fields()}).json()
 
         assert body["values"]["followup"] == "15.64 months"
+
+    def test_an_unsupported_value_is_also_re_asked(self, monkeypatch):
+        """The commoner failure: the model finds a value somewhere and attaches
+        a sentence that reads as if it were the source."""
+        c, _ = self._client()
+        calls = []
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            names = [f["name"] for f in fields]
+            calls.append(names)
+            if names == ["os"]:
+                return {"fields": [{"name": "os", "value": "15.64 months", "type": "text",
+                                    "status": "reported", "confidence": "high",
+                                    "source_quote": "The median OS of our cohort was 15.64 months.",
+                                    "needs_review": False}]}
+            return {"fields": [{"name": n, "value": "15.64 months", "type": "text",
+                                "status": "reported", "confidence": "high",
+                                "source_quote": "Death was considered as a failure event in the analysis.",
+                                "needs_review": False} for n in names]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "unsupported_fields", EF.unsupported_fields)
+        monkeypatch.setattr(extraction_forms, "colliding_fields", EF.colliding_fields)
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 200, "fields": self._fields()}).json()
+
+        assert ["os"] in calls, f"the unsupported field was never re-asked: {calls}"
+        quote = next(f["source_quote"] for f in body["fields"] if f["id"] == "os")
+        assert "median OS" in quote, "the better-supported answer was not kept"
+
+    def test_a_re_ask_that_is_no_better_supported_is_not_kept(self, monkeypatch):
+        """A second guess is not automatically a better one, and churning the
+        value would lose whatever the reviewer had already read."""
+        c, _ = self._client()
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            names = [f["name"] for f in fields]
+            bad = "Death was considered as a failure event in the analysis."
+            if names == ["os"] or names == ["followup"]:
+                return {"fields": [{"name": names[0], "value": "a different wrong answer",
+                                    "type": "text", "status": "reported",
+                                    "confidence": "high", "source_quote": bad,
+                                    "needs_review": False}]}
+            return {"fields": [{"name": n, "value": "15.64 months", "type": "text",
+                                "status": "reported", "confidence": "high",
+                                "source_quote": bad, "needs_review": False} for n in names]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "unsupported_fields", EF.unsupported_fields)
+        monkeypatch.setattr(extraction_forms, "colliding_fields", EF.colliding_fields)
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        body = c.post("/api/extract/fields",
+                      json={"text": "Methods. " * 200, "fields": self._fields()}).json()
+
+        assert body["values"]["os"] == "15.64 months"
+
+    def test_a_field_the_paper_does_not_report_is_not_re_asked(self, monkeypatch):
+        """Both detectors only name a field that has a value. Re-asking every
+        empty one would double the calls for a paper that reports less."""
+        c, _ = self._client()
+        calls = []
+
+        def fake(*, text, tables, fields, model_name, ai_service, num_ctx=None):
+            names = [f["name"] for f in fields]
+            calls.append(names)
+            return {"fields": [{"name": n, "value": None, "type": "text",
+                                "status": "not_reported", "confidence": "none",
+                                "source_quote": "", "needs_review": True} for n in names]}
+
+        import extraction_forms
+        monkeypatch.setattr(extraction_forms, "unsupported_fields", EF.unsupported_fields)
+        monkeypatch.setattr(extraction_forms, "colliding_fields", EF.colliding_fields)
+        monkeypatch.setattr(extraction_forms, "extract_form", fake)
+        c.post("/api/extract/fields",
+               json={"text": "Methods. " * 200, "fields": self._fields()})
+
+        assert calls == [["os", "followup"]], f"an empty field was re-asked: {calls}"
 
     def test_nothing_is_re_asked_when_nothing_collided(self, monkeypatch):
         c, _ = self._client()

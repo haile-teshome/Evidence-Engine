@@ -519,6 +519,8 @@ export const AIService = {
       // the paper does not report this field, "unread" means no answer for it
       // ever came back. A blank cell cannot tell a reviewer which.
       status?: "reported" | "not_reported" | "unread";
+      /** Why this value wants a human, when there is a specific reason. */
+      review_reason?: string;
     }[];
     // Set when the call reached the model and the model's answer was unusable
     // (most often cut off part-way through). Every field comes back empty in

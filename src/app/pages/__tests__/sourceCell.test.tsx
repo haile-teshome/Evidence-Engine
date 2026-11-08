@@ -244,3 +244,42 @@ describe("an empty cell in the table", () => {
     expect(hover()).not.toMatch(/found no value/i);
   });
 });
+
+// A cell the app has flagged, with a quote that is plainly in the paper, gives
+// the reviewer nothing to act on unless it says what it thinks is wrong.
+describe("why a filled value was flagged", () => {
+  const seedFlagged = (reason: string) => {
+    localStorage.setItem("ee:extract-rows", JSON.stringify([{
+      paper_id: "p1", title: "Bianconi 2024",
+      values: { design: "300 and 800 \u03bcM" },
+      meta: { design: {
+        source_quote: "Both drugs were generally well tolerated.",
+        confidence: "low", needs_review: true, review_reason: reason } },
+      status: { design: "suggested" },
+      cell: { design: "reported" },
+    }]));
+  };
+
+  it("says the sentence credits the value to another paper", () => {
+    seedFlagged("the sentence this was read from credits it to another paper, so it "
+                + "may not be this study's own result");
+    renderPage(seedReview);
+    fireEvent.click(screen.getAllByTitle("Click for the source, double-click to edit")[0]);
+    expect(screen.getByText(/credits it to another paper/i)).toBeTruthy();
+  });
+
+  it("says the quote does not mention the value", () => {
+    seedFlagged("the sentence quoted for this does not mention the value");
+    renderPage(seedReview);
+    fireEvent.click(screen.getAllByTitle("Click for the source, double-click to edit")[0]);
+    expect(screen.getByText(/does not mention the value/i)).toBeTruthy();
+  });
+
+  it("says nothing when there is nothing wrong", () => {
+    localStorage.setItem("ee:extract-rows", JSON.stringify(
+      rowWith("The median OS of our cohort (n = 272) was 15.64 months.")));
+    renderPage(seedReview);
+    fireEvent.click(screen.getAllByTitle("Click for the source, double-click to edit")[0]);
+    expect(screen.queryByText(/Check this one/i)).toBeNull();
+  });
+});

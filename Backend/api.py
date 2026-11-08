@@ -4763,12 +4763,17 @@ def extract_fields(req: ExtractFieldsRequest):
     # field sometimes copies a neighbour instead of returning nothing, and the
     # copy is indistinguishable from a real answer: it has a value and a quote,
     # and the quote is genuinely in the paper. Alone, there is nothing to copy.
-    repeats = extraction_forms.colliding_fields(raw_fields)
-    if repeats:
+    # Two ways a field comes back holding something that is not its answer, and
+    # neither is visible in the value: it copied a neighbour's, or it cites a
+    # sentence that does not contain it. Both get asked again on their own.
+    doubtful = list(dict.fromkeys(
+        extraction_forms.colliding_fields(raw_fields)
+        + extraction_forms.unsupported_fields(raw_fields)))
+    if doubtful:
         by_name = {f["name"]: f for f in ef_fields}
-        print(f"[extract_fields] re-asking {len(repeats)} copied field(s): "
-              f"{', '.join(repeats)}")
-        for name in repeats:
+        print(f"[extract_fields] re-asking {len(doubtful)} doubtful field(s): "
+              f"{', '.join(doubtful)}")
+        for name in doubtful:
             spec = by_name.get(name)
             if not spec:
                 continue
@@ -4778,9 +4783,17 @@ def extract_fields(req: ExtractFieldsRequest):
                 num_ctx=Config.EXTRACTION_NUM_CTX)
             got = (again.get("fields") or [None])[0]
             # Only on a clean answer: a failed re-ask must not turn a value the
-            # reviewer could at least see and correct into an empty cell.
+            # reviewer could at least see and correct into an empty cell. And
+            # only when the new answer is better supported than the old one,
+            # because a second guess is not automatically a better one.
             if got and not again.get("error"):
-                raw_fields = [got if f["name"] == name else f for f in raw_fields]
+                # Only when the new answer is better supported than the old
+                # one: a second guess is not automatically a better one, and
+                # churning the value would lose whatever the reviewer had
+                # already read. Both detectors only ever name a field that has
+                # a value, so there is no empty case to rescue here.
+                if not extraction_forms.unsupported_fields([got]):
+                    raw_fields = [got if f["name"] == name else f for f in raw_fields]
     # A group that failed contributes no fields, so a partial answer is still an
     # answer; only say the whole thing failed when all of it did.
     result = {
@@ -4804,6 +4817,10 @@ def extract_fields(req: ExtractFieldsRequest):
             # "this paper does not report it" and "nothing ever read this
             # field", and a review has to be able to write the first one down.
             "status": ef.get("status", "unread"),
+            # Why it wants a human, when there is a specific reason: the
+            # provenance dialog shows this instead of making the reviewer work
+            # out what is wrong with a cell the app has flagged.
+            "review_reason": ef.get("review_reason", ""),
         })
     # An empty row and a failed call look identical to the reviewer, so the
     # failure travels with the result instead of only reaching the server log.
