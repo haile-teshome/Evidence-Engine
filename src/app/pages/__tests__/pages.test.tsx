@@ -293,18 +293,24 @@ describe("stage gating", () => {
     } as any);
   };
 
-  it("SimulationPage can be started without a research question", () => {
-    /* A reviewer who already has a search string should be able to tune and
-       count it here rather than being sent back to write a question for it. */
-    const view = renderPage(SimulationPage);
-    expect(view.container.textContent).toMatch(/start a search plan/i);
+  it("SimulationPage looks the same with or without a research question", () => {
+    /* Checking one search string across several databases is a reason to be
+       here on its own, so the page is neither gated on a goal set elsewhere nor
+       put behind a card that asks for one: the same planner either way, with
+       the base query box empty and ready to paste into. */
+    const fresh = renderPage(SimulationPage);
+    expect(fresh.container.textContent).not.toMatch(/start a search plan/i);
+    expect(fresh.container.textContent).toMatch(/base query/i);
+    expect(fresh.container.textContent).toMatch(/adapt to databases/i);
 
-    const box = view.container.querySelector("textarea")!;
+    const box = fresh.container.querySelector("textarea")!;
     fireEvent.change(box, { target: { value: "glioma AND temozolomide" } });
-    fireEvent.click(screen.getByRole("button", { name: /use this query/i }));
+    expect((box as HTMLTextAreaElement).value).toBe("glioma AND temozolomide");
+    fresh.unmount();
 
-    // The planner proper, not the starting card.
-    expect(view.container.textContent).not.toMatch(/start a search plan/i);
+    const asked = renderPage(SimulationPage, planningState);
+    expect(asked.container.textContent).toMatch(/base query/i);
+    expect(asked.container.textContent).toMatch(/adapt to databases/i);
   });
 
   it("SimulationPage shows the run history expanded by default", async () => {

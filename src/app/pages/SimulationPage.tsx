@@ -386,7 +386,6 @@ export function SimulationPage() {
   // rather than per review: someone who wants the query editor wide wants it
   // wide every time. Wrapped because storage throws in private windows.
   const HISTORY_KEY = "ee:planning-history-collapsed";
-  const [draftQuery, setDraftQuery] = useState("");
   const [historyCollapsed, setHistoryCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem(HISTORY_KEY) === "1"; } catch { return false; }
   });
@@ -394,45 +393,11 @@ export function SimulationPage() {
     try { localStorage.setItem(HISTORY_KEY, historyCollapsed ? "1" : "0"); } catch { /* ignore */ }
   }, [historyCollapsed]);
 
-  // Planning normally picks up the query Home builds from a research question.
-  // But a reviewer who already has a search string, from a protocol, a
-  // colleague, or a published review, should be able to tune and count it here
-  // without writing the question again: a query is the only thing this page
-  // actually needs.
-  if (s.history.length === 0 && !s.unifiedSearchQuery.trim() && !s.query.trim()) {
-    return (
-      <Card className="max-w-2xl mx-auto p-5 space-y-3">
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <ClipboardList className="size-4 text-primary" />Start a search plan
-        </div>
-        <p className="text-sm text-muted-foreground">
-          Paste a search string to tune per database and count its yield, or define a
-          research question on Home and have one built for you.
-        </p>
-        <Textarea value={draftQuery} onChange={e => setDraftQuery(e.target.value)}
-                  className="font-mono text-xs min-h-[120px]"
-                  placeholder={'("glioblastoma"[MeSH Terms] OR glioma) AND (temozolomide OR TMZ)'} />
-        <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" disabled={!draftQuery.trim()}
-                  onClick={() => {
-                    const q = draftQuery.trim();
-                    s.setQuery(q);
-                    s.setUnifiedSearchQuery(q);
-                  }}>
-            <Play className="size-3.5 mr-1.5" />Use this query
-          </Button>
-          <Button size="sm" variant="outline" onClick={() => s.setPage("home")}>
-            <ClipboardList className="size-3.5 mr-1.5" />Define a question on Home
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Without a research question there is no PICO, so the AI refinement here has
-          nothing to judge relevance against. Editing, counting and comparing queries
-          all work.
-        </p>
-      </Card>
-    );
-  }
+  // Not gated on a research question, and not behind a card that asks for one
+  // either. A reviewer who wants to check one search string across several
+  // databases arrives with the string and nothing else: they get the same page
+  // as everyone, with the base query box empty and ready to paste into.
+  // `s.history` is read nowhere else here, so nothing below depends on it.
 
   const updateUnified = (v: string) => {
     s.setUnifiedSearchQuery(v);
