@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { useStore, useStageModel, TextExtractionResult, TextEvidenceItem } from "../lib/store";
+import { useEta } from "../lib/eta";
 import { AIService } from "../lib/mockServices";
 import { Card } from "../components/ui/card";
 import { ImportStudies } from "../components/ImportStudies";
@@ -337,6 +338,9 @@ export function TextExtractionPage() {
   const [formBusy, setFormBusy] = useState(false);
   const [formProgress, setFormProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
   const [formCurrent, setFormCurrent] = useState<string>("");
+  // Articles, not fields: a field group finishes in seconds and an article can
+  // take minutes, so the article is the unit whose pace predicts the rest.
+  const formEta = useEta(formProgress.done, formProgress.total, formBusy);
   const [formRows, setFormRows] = useState<{ paper_id: string; title: string; values: Record<string, any>; meta: Record<string, { source_quote: string; confidence: string; needs_review: boolean;
                         /** Why the app flagged it, when it has a reason to give. */ review_reason?: string;
                         // Set when the reviewer typed the value themselves, with
@@ -2398,7 +2402,9 @@ export function TextExtractionPage() {
                     <Loader2 className="size-3 animate-spin shrink-0" />
                     <span className="truncate">{formCurrent ? <>Extracting <span className="text-foreground/70">{formCurrent}</span></> : "Extracting…"}</span>
                   </span>
-                  <span className="tabular-nums shrink-0">{formProgress.done} / {formProgress.total}</span>
+                  <span className="tabular-nums shrink-0">
+                    {formProgress.done} / {formProgress.total}{formEta ? ` \u00b7 ${formEta}` : ""}
+                  </span>
                 </div>
               </div>
             )}

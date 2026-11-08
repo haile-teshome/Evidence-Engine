@@ -4,6 +4,7 @@ import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
 import { Loader2, X, Sparkles } from "lucide-react";
 import { TaskRecord } from "../lib/store";
+import { useEta } from "../lib/eta";
 
 function fmt(ms: number) {
   const s = Math.floor(ms / 1000);
@@ -38,18 +39,12 @@ export function TaskProgressCard({
       ? Math.round((task.progress.done / task.progress.total) * 100)
       : null;
 
-  // Live ETA from throughput so far: elapsed / items done → time per item,
-  // projected over the remaining items. Recomputes on the 500ms tick above.
+  // Time left, from the median of recent item timings rather than the average
+  // since the start, and counting down between items instead of climbing. The
+  // old version did the opposite of both and the number bounced all run.
   const done = task.progress?.done ?? 0;
   const total = task.progress?.total ?? 0;
-  let eta: string | null = null;
-  if (task.status === "running" && total > 0) {
-    if (done > 0 && done < total) {
-      eta = `~${fmt(((Date.now() - task.startedAt) / done) * (total - done))} left`;
-    } else if (done === 0) {
-      eta = "estimating…";
-    }
-  }
+  const eta = useEta(done, total, task.status === "running");
 
   return (
     <Card className="overflow-hidden border-primary/20">
