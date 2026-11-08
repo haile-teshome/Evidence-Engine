@@ -1,5 +1,6 @@
 import { Fragment, useMemo, useState, useEffect, type ReactNode } from "react";
 import { useStore } from "../lib/store";
+import { ModelStage, MODEL_STAGES, modelForStage } from "../lib/stageModels";
 import { Card } from "../components/ui/card";
 import { Button } from "../components/ui/button";
 import { Badge } from "../components/ui/badge";
@@ -338,6 +339,15 @@ function fromFullTextResult(r: FullTextResult): PaperMeta {
 
 export function WritingPage() {
   const s = useStore();
+  // Which model ran which stage. Read by the audit log, the RAISE disclosure
+  // and the manifest line, so it is resolved once here: with a model chosen per
+  // stage, a single "model" value would misreport every stage the reviewer set
+  // differently, and this page is where the review reports what the AI did.
+  const modelsForStages = (stages: ModelStage[]) =>
+    [...new Set(stages.map(st => modelForStage(st, s.stageModels, s.model)))].join(", ");
+  const stageModelRecord = Object.fromEntries(
+    MODEL_STAGES.map(st => [st.id, modelForStage(st.id, s.stageModels, s.model)]));
+  const overriddenStages = MODEL_STAGES.filter(st => s.stageModels[st.id]);
 
   // Walk back through the pipeline to find the best available paper set.
   const { includedPapers, stage } = useMemo(() => {
@@ -409,12 +419,16 @@ export function WritingPage() {
     rerankResults: s.rerankResults,
     model: s.model,
     manifest: reproManifest ? {
+      // Per-stage models belong in the manifest: with a model chosen per stage,
+      // one "model" line no longer says what produced a given decision, and
+      // this file is the record a reviewer files with the review.
+      stage_models: stageModelRecord,
       seed: reproManifest.seed,
       prompt_version: reproManifest.prompt_version,
       temperature: reproManifest.temperature,
       local_models: (reproManifest.local_models || []).map((m: any) => ({ name: m.name, digest: m.digest })),
     } : null,
-  }), [s.qualityReports, s.rerankResults, s.model, reproManifest]);
+  }), [s.qualityReports, s.rerankResults, s.model, s.stageModels, reproManifest]);
   const exportAudit = (kind: "json" | "csv") => {
     const stamped = { ...auditLog, generated_at: new Date().toISOString() };
     const date = new Date().toISOString().slice(0, 10);
@@ -531,7 +545,8 @@ export function WritingPage() {
         model: s.model,
         // RAISE: stages where AI made/suggested judgements (for the AI-use subsection)
         ai_model: modelName,
-        ai_steps: aiSteps.map(st => ({ stage: st.stage, purpose: st.purpose, oversight: st.oversight })),
+        ai_models_by_stage: stageModelRecord,
+        ai_steps: aiSteps.map(st => ({ stage: st.stage, purpose: st.purpose, oversight: st.oversight, model: st.model })),
       };
 
       const r = await fetch("/api/writing/summary", {
@@ -655,32 +670,32 @@ export function WritingPage() {
   // judgements (eligibility, appraisal, extraction, synthesis, drafting).
   const modelName = s.model || "the configured large language model";
   const aiSteps = useMemo(() => {
-    const steps: { stage: string; purpose: string; judgement: boolean; oversight: string }[] = [];
+    const steps: { stage: string; purpose: string; judgement: boolean; oversight: string; model: string }[] = [];
     const has = (v: any) => Array.isArray(v) ? v.length > 0 : !!v;
     if (has(s.unifiedSearchQuery) || has(s.simulationRuns) || has(s.history))
-      steps.push({ stage: "Search strategy development", purpose: "Suggested and expanded database search strings (synonyms, controlled vocabulary).", judgement: true, oversight: "Search strings were reviewed and editable by the reviewer before execution." });
+      steps.push({ stage: "Search strategy development", purpose: "Suggested and expanded database search strings (synonyms, controlled vocabulary).", judgement: true, oversight: "Search strings were reviewed and editable by the reviewer before execution." , model: modelsForStages(["home", "planning"]) });
     if (has(s.rerankResults))
-      steps.push({ stage: "Relevance ranking", purpose: "Ranked retrieved records by relevance to the review question.", judgement: true, oversight: "Used to prioritise screening order; no records were excluded on this basis alone." });
+      steps.push({ stage: "Relevance ranking", purpose: "Ranked retrieved records by relevance to the review question.", judgement: true, oversight: "Used to prioritise screening order; no records were excluded on this basis alone." , model: modelsForStages(["home"]) });
     if (has(s.results)) {
       const ov = Object.keys(s.abstractOverrides || {}).length;
-      steps.push({ stage: "Title and abstract screening", purpose: "Suggested eligibility decisions (include/exclude) with reasons from title/abstract.", judgement: true, oversight: `Reviewer-facing decisions with override capability${ov ? `; ${ov} AI decision(s) were overridden by a reviewer` : ""}.` });
+      steps.push({ stage: "Title and abstract screening", purpose: "Suggested eligibility decisions (include/exclude) with reasons from title/abstract.", judgement: true, oversight: `Reviewer-facing decisions with override capability${ov ? `; ${ov} AI decision(s) were overridden by a reviewer` : ""}.` , model: modelsForStages(["abstract-screening"]) });
     }
     if (has(s.snowballScreened))
-      steps.push({ stage: "Citation snowballing screening", purpose: "Suggested eligibility of references identified via backward/forward citation searching.", judgement: true, oversight: "Reviewer selected which records to carry forward." });
+      steps.push({ stage: "Citation snowballing screening", purpose: "Suggested eligibility of references identified via backward/forward citation searching.", judgement: true, oversight: "Reviewer selected which records to carry forward." , model: modelsForStages(["citation-snowball"]) });
     if (has(s.fullTextResults)) {
       const ov = Object.keys(s.fullTextOverrides || {}).length;
-      steps.push({ stage: "Full-text eligibility assessment", purpose: "Suggested full-text eligibility against inclusion/exclusion criteria, with reasons.", judgement: true, oversight: `Reviewer-facing decisions with override capability${ov ? `; ${ov} AI decision(s) were overridden by a reviewer` : ""}.` });
+      steps.push({ stage: "Full-text eligibility assessment", purpose: "Suggested full-text eligibility against inclusion/exclusion criteria, with reasons.", judgement: true, oversight: `Reviewer-facing decisions with override capability${ov ? `; ${ov} AI decision(s) were overridden by a reviewer` : ""}.` , model: modelsForStages(["full-text-screening"]) });
     }
     if (has(s.qualityReports)) {
       const ov = (s.qualityOverrides || []).length;
-      steps.push({ stage: "Risk-of-bias / quality assessment", purpose: "Suggested domain-level risk-of-bias / methodological appraisal judgements.", judgement: true, oversight: `Each AI judgement was reviewer-editable${ov ? `; ${ov} judgement(s) were overridden by a reviewer` : ""}.` });
+      steps.push({ stage: "Risk-of-bias / quality assessment", purpose: "Suggested domain-level risk-of-bias / methodological appraisal judgements.", judgement: true, oversight: `Each AI judgement was reviewer-editable${ov ? `; ${ov} judgement(s) were overridden by a reviewer` : ""}.` , model: modelsForStages(["quality-assessment"]) });
     }
     if (has(s.extractedPapers) || has(s.textExtractions))
-      steps.push({ stage: "Data extraction", purpose: "Extracted numerical and/or qualitative data items from study reports.", judgement: true, oversight: "Extracted values were displayed against the source for reviewer verification and correction." });
+      steps.push({ stage: "Data extraction", purpose: "Extracted numerical and/or qualitative data items from study reports.", judgement: true, oversight: "Extracted values were displayed against the source for reviewer verification and correction." , model: modelsForStages(["table-extraction", "text-extraction"]) });
     if (has(s.writingSummary))
-      steps.push({ stage: "Manuscript drafting", purpose: "Drafted the methods / search-strategy appendix text.", judgement: true, oversight: "Draft text was reviewer-editable before use." });
+      steps.push({ stage: "Manuscript drafting", purpose: "Drafted the methods / search-strategy appendix text.", judgement: true, oversight: "Draft text was reviewer-editable before use." , model: modelsForStages(["writing"]) });
     return steps;
-  }, [s.unifiedSearchQuery, s.simulationRuns, s.history, s.rerankResults, s.results, s.abstractOverrides, s.snowballScreened, s.fullTextResults, s.fullTextOverrides, s.qualityReports, s.qualityOverrides, s.extractedPapers, s.textExtractions, s.writingSummary]);
+  }, [s.unifiedSearchQuery, s.simulationRuns, s.history, s.rerankResults, s.results, s.abstractOverrides, s.snowballScreened, s.fullTextResults, s.fullTextOverrides, s.qualityReports, s.qualityOverrides, s.extractedPapers, s.textExtractions, s.writingSummary, s.model, s.stageModels]);
 
   // ── Render ───────────────────────────────────────────────────────────────────
 
@@ -752,7 +767,12 @@ export function WritingPage() {
               </div>
             </div>
             <div className="rounded-md border bg-muted/40 p-2.5 text-[11px] text-muted-foreground grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-1">
-              <div><span className="font-medium text-foreground">Model:</span> {s.model}</div>
+              <div>
+                <span className="font-medium text-foreground">Model:</span>{" "}
+                {overriddenStages.length === 0
+                  ? s.model
+                  : `${s.model} + ${overriddenStages.length} stage${overriddenStages.length > 1 ? "s" : ""} set separately`}
+              </div>
               <div><span className="font-medium text-foreground">Seed:</span> {reproManifest?.seed ?? "—"}</div>
               <div><span className="font-medium text-foreground">Temperature:</span> {reproManifest?.temperature ?? 0}</div>
               <div><span className="font-medium text-foreground">Prompt version:</span> {reproManifest?.prompt_version ?? "—"}</div>

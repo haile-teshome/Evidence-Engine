@@ -6,7 +6,7 @@ import { Checkbox } from "./ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
-import { Upload, FileText, X, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, PenLine, KeyRound } from "lucide-react";
+import { Upload, FileText, X, Home, BarChart3, FileSearch, FlaskConical, Network, Table2, GitBranch, ShieldCheck, FileDown, ScanText, Sigma, Loader2, Users, PenLine, KeyRound, ChevronDown, ChevronRight, RotateCcw } from "lucide-react";
 import { Logo } from "./Logo";
 import { ALL_SOURCES } from "../lib/mockServices";
 import { providerForModel } from "../lib/apiClient";
@@ -14,6 +14,7 @@ import { providerReady, needsUnlock as ksNeedsUnlock, subscribe as ksSubscribe }
 import { subscribeDbKeys, hasDbKey, type DbSource } from "../lib/dbKeys";
 import { ApiKeysDialog } from "./ApiKeysDialog";
 import { useStore, PageId } from "../lib/store";
+import { MODEL_STAGES, isScreeningStage } from "../lib/stageModels";
 import { SessionsPanel } from "./SessionsPanel";
 import { UpdateBanner } from "./UpdateBanner";
 
@@ -43,6 +44,57 @@ function formatModelName(m: string): string {
   if (/llama3\.1/i.test(m)) return "Llama 3.1";
   if (/llama/i.test(m)) return m.replace(/:latest$/, "");
   return m.replace(/^hf\.co\//, "").replace(/-GGUF.*$/, "").replace(/:latest$/, "");
+}
+
+// The cloud models on offer. Local models come from whatever Ollama reports.
+const CLOUD_MODELS: [value: string, label: string][] = [
+  ["claude-opus-4-7", "Claude Opus 4.7"],
+  ["claude-sonnet-4-6", "Claude Sonnet 4.6"],
+  ["claude-haiku-4-5", "Claude Haiku 4.5"],
+  ["gpt-4o", "GPT-4o"],
+  ["gpt-4o-mini", "GPT-4o mini"],
+  ["gemini-1.5-pro", "Gemini 1.5 Pro"],
+];
+
+// "Use the default" needs a value a Select can hold, and Radix reserves the
+// empty string for "nothing selected".
+const USE_DEFAULT = "__default__";
+
+/**
+ * The models a picker offers.
+ *
+ * `allowLeads` is false everywhere except screening. LEADS-Mistral is
+ * fine-tuned on screening verdicts and wins the screening benchmark, but asked
+ * to fill an extraction form it returns no usable JSON at all, so offering it
+ * for extraction would be offering a stage that cannot work. `keep` is the
+ * currently selected value, which is always listed even when it is filtered
+ * out, because a Select whose value is missing from its items renders blank.
+ */
+function ModelOptions({ localModels, allowLeads = true, keep = "" }: {
+  localModels: string[]; allowLeads?: boolean; keep?: string;
+}) {
+  const local = [...localModels]
+    .filter(m => allowLeads || !/leads.*mistral/i.test(m) || m === keep)
+    // LEADS first where it is offered: it is the benchmark's screening winner.
+    .sort((a, b) => {
+      const aLeads = /leads.*mistral/i.test(a) ? 0 : 1;
+      const bLeads = /leads.*mistral/i.test(b) ? 0 : 1;
+      return aLeads - bLeads || a.localeCompare(b);
+    });
+  return (
+    <>
+      {local.length > 0 && (
+        <>
+          <div className="px-2 py-1 text-xs text-muted-foreground">Local (Ollama)</div>
+          {local.map(m => <SelectItem key={m} value={m}>{formatModelName(m)}</SelectItem>)}
+        </>
+      )}
+      <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground">Cloud (API key required)</div>
+      {CLOUD_MODELS.map(([value, label]) => (
+        <SelectItem key={value} value={value}>{label}</SelectItem>
+      ))}
+    </>
+  );
 }
 
 // Full literal class strings (so Tailwind's scanner emits them) mapping each
@@ -140,6 +192,11 @@ export function Sidebar() {
   const [localModels, setLocalModels] = useState<string[]>([]);
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
+  const [stagesOpen, setStagesOpen] = useState(false);
+  // What a non-screening stage really runs when a LEADS model is chosen for it.
+  // The backend redirects those calls, so showing the chosen model would name a
+  // model that is not the one doing the work.
+  const [leadsFallback, setLeadsFallback] = useState("");
   const [, forceKeys] = useState(0);
   // Re-render when the keystore or a database key changes (so the 🔑 status updates).
   useEffect(() => {
@@ -150,9 +207,35 @@ export function Sidebar() {
   }, []);
 
   // Cloud model selected: does it need a key, or an unlock of encrypted keys?
-  const modelProvider = providerForModel(s.model);
-  const needUnlock = !!modelProvider && ksNeedsUnlock();
-  const missingKey = !!modelProvider && !needUnlock && !providerReady(modelProvider);
+  //
+  // Every model the review will run is checked, not just the default: a cloud
+  // model chosen for one stage needs its key exactly as much, and checking only
+  // the default left the warning silent until that stage failed mid-run.
+  const chosenModels = [s.model, ...MODEL_STAGES.map(stage => s.stageModels[stage.id])]
+    .filter((m): m is string => !!m);
+  const cloudProviders = [...new Set(
+    chosenModels.map(providerForModel).filter((p): p is NonNullable<typeof p> => !!p))];
+  const needUnlock = cloudProviders.length > 0 && ksNeedsUnlock();
+  const unreadyProvider = needUnlock
+    ? null
+    : cloudProviders.find(provider => !providerReady(provider)) || null;
+  const missingKey = !!unreadyProvider;
+  // The dialog opens on the provider that is actually missing a key.
+  const modelProvider = unreadyProvider || providerForModel(s.model);
+  // Which stages asked for the model that has no key, so the warning can name
+  // them: "this model needs a key" is no help when ten stages may differ.
+  const unreadyStages = unreadyProvider
+    ? MODEL_STAGES
+        .filter(stage => {
+          const chosen = s.stageModels[stage.id];
+          return !!chosen && providerForModel(chosen) === unreadyProvider;
+        })
+        .map(stage => stage.label)
+    : [];
+  const defaultNeedsKey = !!unreadyProvider && providerForModel(s.model) === unreadyProvider;
+  const overrideCount = MODEL_STAGES.filter(stage => s.stageModels[stage.id]).length;
+  const clearStageModels = () =>
+    MODEL_STAGES.forEach(stage => s.setStageModel(stage.id, null));
 
   useEffect(() => {
     fetch("/api/models/local")
@@ -161,6 +244,7 @@ export function Sidebar() {
         const models: string[] = Array.isArray(d.models) ? d.models : [];
         setLocalModels(models);
         setOllamaRunning(!!d.running);
+        setLeadsFallback(typeof d.non_screening_fallback === "string" ? d.non_screening_fallback : "");
         // Pick a sensible installed model. LEADS-mistral wins by benchmark
         // (recall=1.0, spec=0.68); otherwise prefer Qwen, which is the house
         // default for local work. Llama tags are never auto-selected.
@@ -279,30 +363,79 @@ export function Sidebar() {
           <Select value={s.model} onValueChange={s.setModel}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              {localModels.length > 0 && (
-                <>
-                  <div className="px-2 py-1 text-xs text-muted-foreground">Local (Ollama)</div>
-                  {/* Sort so the LEADS tag floats to the top of the local list. */}
-                  {[...localModels]
-                    .sort((a, b) => {
-                      const aLeads = /leads.*mistral/i.test(a) ? 0 : 1;
-                      const bLeads = /leads.*mistral/i.test(b) ? 0 : 1;
-                      return aLeads - bLeads || a.localeCompare(b);
-                    })
-                    .map(m => (
-                      <SelectItem key={m} value={m}>{formatModelName(m)}</SelectItem>
-                    ))}
-                </>
-              )}
-              <div className="px-2 pt-2 pb-1 text-xs text-muted-foreground">Cloud (API key required)</div>
-              <SelectItem value="claude-opus-4-7">Claude Opus 4.7</SelectItem>
-              <SelectItem value="claude-sonnet-4-6">Claude Sonnet 4.6</SelectItem>
-              <SelectItem value="claude-haiku-4-5">Claude Haiku 4.5</SelectItem>
-              <SelectItem value="gpt-4o">GPT-4o</SelectItem>
-              <SelectItem value="gpt-4o-mini">GPT-4o mini</SelectItem>
-              <SelectItem value="gemini-1.5-pro">Gemini 1.5 Pro</SelectItem>
+              <ModelOptions localModels={localModels} keep={s.model} />
             </SelectContent>
           </Select>
+          <p className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
+            Runs every stage unless you choose one below.
+            {/* A LEADS default does not run the other stages, and until now
+                nothing said so: the backend quietly redirects them. */}
+            {/leads.*mistral|^leads$/i.test(s.model) && (
+              <> Screening stages use it; the rest run{" "}
+                {leadsFallback ? formatModelName(leadsFallback) : "a general-purpose model"},
+                because LEADS cannot do that work.</>
+            )}
+          </p>
+
+          {/* ── Per-stage models ──────────────────────────────────────────────
+              The stages do not ask for the same thing: screening wants the
+              model fine-tuned on screening verdicts, extraction wants one that
+              will follow a schema. Collapsed by default, because a reviewer who
+              is happy with one model should not have to dismiss ten pickers. */}
+          <button type="button" onClick={() => setStagesOpen(v => !v)}
+            className="mt-2 flex w-full items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+            {stagesOpen ? <ChevronDown className="size-3.5" /> : <ChevronRight className="size-3.5" />}
+            <span className="flex-1 text-left">Per-stage models</span>
+            {overrideCount > 0 && (
+              <Badge variant="secondary" className="h-4 px-1.5 text-[10px] font-normal">
+                {overrideCount} set
+              </Badge>
+            )}
+          </button>
+
+          {stagesOpen && (
+            <div className="mt-2 space-y-2.5 border-t pt-2.5">
+              {MODEL_STAGES.map(stage => {
+                const chosen = s.stageModels[stage.id];
+                return (
+                  <div key={stage.id}>
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="text-xs font-medium">{stage.label}</span>
+                      {chosen && (
+                        <button type="button"
+                          onClick={() => s.setStageModel(stage.id, null)}
+                          className="text-[10px] text-muted-foreground hover:text-foreground">
+                          reset
+                        </button>
+                      )}
+                    </div>
+                    <div className="text-[10px] leading-snug text-muted-foreground">{stage.what}</div>
+                    <Select value={chosen ?? USE_DEFAULT}
+                      onValueChange={v => s.setStageModel(stage.id, v === USE_DEFAULT ? null : v)}>
+                      <SelectTrigger className="mt-1 h-7 text-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={USE_DEFAULT}>
+                          Default ({formatModelName(s.model)})
+                        </SelectItem>
+                        <ModelOptions localModels={localModels}
+                          allowLeads={isScreeningStage(stage.id)} keep={chosen || ""} />
+                      </SelectContent>
+                    </Select>
+                  </div>
+                );
+              })}
+              <p className="text-[10px] leading-snug text-muted-foreground">
+                LEADS-Mistral is offered for screening only. It is fine-tuned on screening
+                verdicts, and asked to fill a form it returns nothing usable.
+              </p>
+              {overrideCount > 0 && (
+                <button type="button" onClick={clearStageModels}
+                  className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
+                  <RotateCcw className="size-3" />Use the default everywhere
+                </button>
+              )}
+            </div>
+          )}
           {ollamaRunning === false && (
             <p className="text-xs text-amber-600 mt-2">
               Setting up the local AI engine. The launcher installs and starts Ollama
@@ -319,7 +452,11 @@ export function Sidebar() {
             <div className="mt-2 flex items-center gap-2 rounded-md border border-amber-300/70 bg-amber-50 dark:border-amber-800/50 dark:bg-amber-950/30 px-2.5 py-2">
               <KeyRound className="size-4 shrink-0 text-amber-600 dark:text-amber-400" />
               <span className="flex-1 text-xs text-amber-800 dark:text-amber-200 leading-snug">
-                {needUnlock ? "Unlock your keys to use this model." : "This model needs an API key to run."}
+                {needUnlock
+                  ? "Unlock your keys to use this model."
+                  : defaultNeedsKey || !unreadyStages.length
+                    ? "This model needs an API key to run."
+                    : `${unreadyStages.join(", ")} needs an API key to run.`}
               </span>
               <button type="button" onClick={() => setKeysOpen(true)}
                 className="shrink-0 rounded-md bg-amber-600 px-2 py-1 text-xs font-medium leading-none text-white hover:bg-amber-700">

@@ -11,6 +11,9 @@
 
 export type AuditManifest = {
   model?: string;
+  /** The model each stage ran with, when the reviewer chose per stage. One
+   *  `model` no longer identifies what produced a given decision below. */
+  stage_models?: Record<string, string>;
   seed?: number;
   prompt_version?: string;
   temperature?: number;

@@ -18,13 +18,17 @@ import { useEffect, useState } from "react";
 import { StoreProvider, useStore } from "../../lib/store";
 import { Sidebar } from "../Sidebar";
 
-function mockModels(models: string[], running = true) {
+// `fallback` is what the backend reports as the model a non-screening stage
+// really runs when a LEADS model is selected for it. Empty by default, which is
+// also what an older backend returns.
+function mockModels(models: string[], running = true, fallback = "") {
   vi.stubGlobal("fetch", vi.fn(async (url: any) => {
     if (String(url).includes("/api/models/local")) {
+      const body = { models, running, non_screening_fallback: fallback };
       return {
         ok: true, status: 200, headers: new Headers(),
-        json: async () => ({ models, running }),
-        text: async () => JSON.stringify({ models, running }),
+        json: async () => body,
+        text: async () => JSON.stringify(body),
       };
     }
     return {
@@ -275,5 +279,130 @@ describe("credential status", () => {
     mockModels(["qwen2.5:7b"]);
     const { container } = mountSidebar("qwen2.5:7b");
     await waitFor(() => expect(container.textContent?.length).toBeGreaterThan(0));
+  });
+});
+
+// --------------------------------------------------------------------------
+// Per-stage models
+// --------------------------------------------------------------------------
+//
+// The same lesson as above, one level down: a reviewer who sets extraction to
+// one model and leaves screening on another has to be able to see that, or the
+// two runs disagree for a reason nothing on screen explains. Radix's Select
+// cannot be driven in jsdom, so the choice is made through the store and what
+// the sidebar shows for it is asserted.
+describe("per-stage model selection", () => {
+  it("is collapsed until asked for, and lists every stage when opened", async () => {
+    mockModels(["qwen2.5:7b"]);
+    const view = mountSidebar("qwen2.5:7b");
+    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
+
+    // Collapsed: the stage rows are not in the document at all.
+    expect(view.queryByText("filling your extraction form")).toBeNull();
+
+    view.getByText("Per-stage models").click();
+    await waitFor(() => expect(view.getByText("filling your extraction form")).toBeTruthy());
+    for (const label of ["Abstract Screening", "Text Extraction", "Quality Assessment",
+                         "Meta-analysis", "Writing Assistant"]) {
+      expect(view.getAllByText(label).length).toBeGreaterThan(0);
+    }
+  });
+
+  it("says how many stages are set, so an override is never silent", async () => {
+    mockModels(["qwen2.5:7b"]);
+    const view = mountSidebar("qwen2.5:7b");
+    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
+    expect(view.queryByText(/stage?s? set/)).toBeNull();
+
+    view.store().setStageModel("text-extraction", "gpt-4o");
+    await waitFor(() => expect(view.getByText("1 set")).toBeTruthy());
+
+    view.store().setStageModel("writing", "gpt-4o");
+    await waitFor(() => expect(view.getByText("2 set")).toBeTruthy());
+  });
+
+  it("puts every stage back on the default in one click", async () => {
+    mockModels(["qwen2.5:7b"]);
+    const view = mountSidebar("qwen2.5:7b");
+    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
+    view.store().setStageModel("text-extraction", "gpt-4o");
+    view.store().setStageModel("writing", "gpt-4o");
+    await waitFor(() => expect(view.getByText("2 set")).toBeTruthy());
+
+    view.getByText("Per-stage models").click();
+    await waitFor(() => expect(view.getByText("Use the default everywhere")).toBeTruthy());
+    view.getByText("Use the default everywhere").click();
+
+    await waitFor(() => expect(view.store().stageModels).toEqual({}));
+  });
+
+  it("says what a LEADS default does not run", async () => {
+    // Out of the box the default is LEADS, and every stage that is not
+    // screening is redirected by the backend. Until now nothing said so.
+    mockModels([LEADS, "qwen2.5:7b"], true, "qwen2.5:7b");
+    const view = mountSidebar(LEADS);
+    await waitFor(() => expect(view.getByText(/Screening stages use it/)).toBeTruthy());
+    // Named, not described: the reviewer can check which model that is.
+    await waitFor(() => expect(view.container.textContent).toMatch(/Qwen 2\.5 7B/));
+  });
+
+  it("still says so when the backend does not name the fallback", async () => {
+    mockModels([LEADS, "qwen2.5:7b"]);
+    const view = mountSidebar(LEADS);
+    await waitFor(() => expect(view.getByText(/Screening stages use it/)).toBeTruthy());
+    expect(view.container.textContent).toMatch(/a general-purpose model/);
+  });
+
+  it("says nothing of the sort when the default is a general model", async () => {
+    mockModels([LEADS, "qwen2.5:7b"]);
+    const view = mountSidebar("qwen2.5:7b");
+    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
+    expect(view.queryByText(/Screening stages use it/)).toBeNull();
+  });
+});
+
+// --------------------------------------------------------------------------
+// API keys for a model chosen on one stage
+// --------------------------------------------------------------------------
+//
+// The key warning used to read the default model only. A reviewer who sets one
+// stage to a cloud model and has no key got no warning at all, and found out
+// when that stage failed part-way through a run.
+describe("API key warnings across stages", () => {
+  it("warns, and names the stage, when a stage's cloud model has no key", async () => {
+    mockModels(["qwen2.5:7b"]);
+    const view = mountSidebar("qwen2.5:7b");
+    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
+    expect(view.queryByText(/needs an API key/)).toBeNull();
+
+    view.store().setStageModel("text-extraction", "gpt-4o");
+    await waitFor(() =>
+      expect(view.getByText("Text Extraction needs an API key to run.")).toBeTruthy());
+  });
+
+  it("names every stage waiting on the same key", async () => {
+    mockModels(["qwen2.5:7b"]);
+    const view = mountSidebar("qwen2.5:7b");
+    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
+    view.store().setStageModel("text-extraction", "gpt-4o");
+    view.store().setStageModel("writing", "gpt-4o-mini");
+    await waitFor(() => expect(
+      view.getByText("Text Extraction, Writing Assistant needs an API key to run.")).toBeTruthy());
+  });
+
+  it("speaks about the model itself when the default is the one missing a key", async () => {
+    mockModels(["qwen2.5:7b"]);
+    const view = mountSidebar("gpt-4o");
+    await waitFor(() =>
+      expect(view.getByText("This model needs an API key to run.")).toBeTruthy());
+  });
+
+  it("stays quiet when every chosen model is local", async () => {
+    mockModels(["qwen2.5:7b", LEADS]);
+    const view = mountSidebar("qwen2.5:7b");
+    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
+    view.store().setStageModel("abstract-screening", LEADS);
+    await waitFor(() => expect(view.store().stageModels["abstract-screening"]).toBe(LEADS));
+    expect(view.queryByText(/needs an API key/)).toBeNull();
   });
 });

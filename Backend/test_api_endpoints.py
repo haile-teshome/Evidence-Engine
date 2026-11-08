@@ -355,6 +355,18 @@ class TestWritingEndpoints:
         assert post(client, "/api/writing/summary", {
             "papers": PAPERS, "pico": PICO_BODY, "model": "qwen2.5:7b"}).status_code != 500
 
+    def test_writing_summary_actually_reaches_the_model(self, client, stub_model):
+        """Not just a 200: this endpoint catches its own model failures and
+        returns an `error` field, so a broken call still answers 200 and the
+        status assertion above passes. It did pass, for a while, with the
+        endpoint shadowing its own model object and producing nothing."""
+        m = stub_model("A narrative summary of the included studies.")
+        body = post(client, "/api/writing/summary", {
+            "papers": PAPERS, "pico": PICO_BODY, "model": "qwen2.5:7b"}).json()
+        assert m.prompts, "the model was never invoked"
+        assert not body.get("error"), body.get("error")
+        assert "narrative summary" in body["main_text"]
+
     def test_writing_protocol_does_not_500(self, client, stub_model):
         stub_model("A protocol section.")
         assert post(client, "/api/writing/protocol", {
@@ -496,3 +508,100 @@ class TestFullTextCache:
                             lambda req: {"status": "missing", "reason": "paywalled"})
         r = client.post("/api/fulltext/fetch", json={"Title": "T", "URL": "", "Source": "PubMed", "paper_id": "p3"})
         assert "text_key" not in r.json()
+
+
+# ---------------------------------------------------------------------------
+# RAISE AI-use disclosure with a model chosen per stage
+# ---------------------------------------------------------------------------
+
+
+class TestPerStageModelDisclosure:
+    """The methods appendix has to say which AI made which judgement.
+
+    The reviewer now picks a model per stage, so a review can screen with one
+    model and extract with another. Reporting a single model name would state
+    something untrue about every other stage, which is exactly what RAISE asks
+    a review not to do.
+    """
+
+    def _summary(self, client, steps, ai_model="qwen2.5:7b"):
+        return post(client, "/api/writing/summary", {
+            "papers": PAPERS, "pico": PICO_BODY, "model": "qwen2.5:7b",
+            "ai_model": ai_model, "ai_steps": steps,
+        })
+
+    def test_each_step_names_the_model_that_ran_it(self, client, stub_model):
+        m = stub_model("appendix prose")
+        r = self._summary(client, [
+            {"stage": "Title and abstract screening", "purpose": "Suggested eligibility.",
+             "oversight": "Reviewer-editable.", "model": "leads-mistral"},
+            {"stage": "Data extraction", "purpose": "Extracted data items.",
+             "oversight": "Shown against the source.", "model": "qwen2.5:7b"},
+        ])
+        assert r.status_code != 500
+        prompt = "\n".join(m.prompts)
+        assert "[model: leads-mistral]" in prompt
+        assert "[model: qwen2.5:7b]" in prompt
+
+    def test_the_header_lists_every_model_that_judged_anything(self, client, stub_model):
+        m = stub_model("appendix prose")
+        self._summary(client, [
+            {"stage": "Screening", "purpose": "p", "oversight": "o", "model": "leads-mistral"},
+            {"stage": "Extraction", "purpose": "p", "oversight": "o", "model": "qwen2.5:7b"},
+        ])
+        assert "AI systems: leads-mistral, qwen2.5:7b." in "\n".join(m.prompts)
+
+    def test_a_model_used_twice_is_listed_once(self, client, stub_model):
+        m = stub_model("appendix prose")
+        self._summary(client, [
+            {"stage": "Screening", "purpose": "p", "oversight": "o", "model": "qwen2.5:7b"},
+            {"stage": "Extraction", "purpose": "p", "oversight": "o", "model": "qwen2.5:7b"},
+        ])
+        # Singular, because one model did everything.
+        assert "AI system: qwen2.5:7b." in "\n".join(m.prompts)
+
+    def test_a_step_split_across_two_stages_lists_both(self, client, stub_model):
+        m = stub_model("appendix prose")
+        # Data extraction covers the table and text stages, which may differ.
+        self._summary(client, [
+            {"stage": "Data extraction", "purpose": "p", "oversight": "o",
+             "model": "qwen2.5:7b, gpt-4o"},
+        ])
+        prompt = "\n".join(m.prompts)
+        assert "AI systems: qwen2.5:7b, gpt-4o." in prompt
+        assert "[model: qwen2.5:7b, gpt-4o]" in prompt
+
+    def test_steps_without_a_model_fall_back_to_the_review_model(self, client, stub_model):
+        # What an older frontend sends. The stage still has to be disclosed.
+        m = stub_model("appendix prose")
+        self._summary(client, [{"stage": "Screening", "purpose": "p", "oversight": "o"}])
+        prompt = "\n".join(m.prompts)
+        assert "AI system: qwen2.5:7b." in prompt
+        assert "Screening" in prompt
+        assert "[model:" not in prompt
+
+    def test_no_recorded_ai_use_says_so(self, client, stub_model):
+        m = stub_model("appendix prose")
+        self._summary(client, [])
+        assert "No AI-assisted judgement stages were recorded." in "\n".join(m.prompts)
+
+
+class TestLocalModelsEndpoint:
+    def test_it_names_the_model_a_leads_selection_really_runs(self, client, monkeypatch):
+        """The UI shows this instead of claiming LEADS runs every stage.
+
+        A LEADS model is redirected for everything but screening, so without
+        this name the sidebar would show a model that is not the one working.
+        """
+        class _Reply:
+            status_code = 200
+
+            @staticmethod
+            def json():
+                return {"models": [{"name": "qwen2.5:7b"}]}
+
+        monkeypatch.setattr(api.requests, "get", lambda *a, **k: _Reply())
+        body = client.get("/api/models/local").json()
+        assert body["running"] is True
+        assert body["models"] == ["qwen2.5:7b"]
+        assert body["non_screening_fallback"] == api.NON_SCREENING_FALLBACK_MODEL

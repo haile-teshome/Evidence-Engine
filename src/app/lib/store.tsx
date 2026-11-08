@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useRef, useState, ReactNode } fro
 import { Pico, Analysis, ScreenResult, FullTextResult, Paper, QualityReport, QualityOverride, GradeOutcome } from "./mockServices";
 import type { ExtractedTable } from "./apiClient";
 import { apiConfig, RerankResult, StudyEffect, MetaRunResult, EffectMeasure, Tau2Method, SearchLogEntry, ReviewProtocol, ProtocolDeviation, SelectionStrategy, SearchFilters } from "./apiClient";
+import { ModelStage, StageModels, cleanStageModels, modelForStage } from "./stageModels";
 import { FRESH_LAUNCH } from "./launchFlags";
 import { idbGet, idbSet, idbDel } from "./idb";
 import { compactFullTexts, compactArchive, expandArchive, compactRawPapers, expandRawPapers } from "./snapshotCompact";
@@ -240,7 +241,11 @@ type Ctx = {
   // Transient UI: whether the Home page's Strategy Review drawer is open (lives
   // in the store so the header bar can toggle it). Not persisted.
   reviewOpen: boolean; setReviewOpen: (v: boolean) => void;
+  // `model` is the default; `stageModels` overrides it for the stages the
+  // reviewer chose a model for. setStageModel(stage, null) clears an override.
   model: string; setModel: (v: string) => void;
+  stageModels: StageModels;
+  setStageModel: (stage: ModelStage, value: string | null) => void;
   sources: string[]; setSources: (v: string[]) => void;
   numPerSource: number; setNumPerSource: (v: number) => void;
   // Per-database paper cap overrides (source name -> max). Sources without an
@@ -504,6 +509,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // specificity=0.676, MCC=+0.260 on van_Dis_2020). The Backend resolves
   // "leads" to the full GGUF tag and routes to the LEADS-native pipeline.
   const [model, setModel] = useState("leads");
+  // Per-stage overrides. Empty by default: a fresh session is one decision, and
+  // the stages a reviewer never thinks about keep following the default.
+  const [stageModels, setStageModels] = useState<StageModels>({});
+  const setStageModel = (stage: ModelStage, value: string | null) =>
+    setStageModels(prev => {
+      const next = { ...prev };
+      if (value && value.trim()) next[stage] = value;
+      else delete next[stage];
+      return next;
+    });
   const [sources, setSources] = useState<string[]>(["PubMed", "Europe PMC", "Semantic Scholar"]);
   const [numPerSource, setNumPerSource] = useState(15);
   const [perSourceLimits, setPerSourceLimits] = useState<Record<string, number>>({});
@@ -719,10 +734,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     });
 
   useEffect(() => { apiConfig.model = model; }, [model]);
+  useEffect(() => { apiConfig.stageModels = stageModels; }, [stageModels]);
 
   const snapshot = () => ({
     history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery, perDbQueries,
-    sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model,
+    sources, numPerSource, perSourceLimits, searchSelection, searchFilters, relevanceOverrides, model, stageModels,
     // rawPapers repeats uniquePapers almost record for record; shared abstracts go once.
     // seedIds is the reviewer's own choice of which papers the query should be
     // refined against, and a Set does not survive JSON, so it goes as a list.
@@ -797,6 +813,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (d.relevanceOverrides && typeof d.relevanceOverrides === "object") setRelevanceOverrides(d.relevanceOverrides);
     setPerSourceLimits(d.perSourceLimits && typeof d.perSourceLimits === "object" ? d.perSourceLimits : {});
     if (d.model) setModel(d.model);
+    // Cleaned on the way in: a saved session may name a stage this build no
+    // longer has, and a stale key is invisible in the UI and unclearable.
+    setStageModels(cleanStageModels(d.stageModels));
     setRawPapers(prev => pick(expandRawPapers(d.rawPapers, d.uniquePapers) ?? null, prev));
     setUniquePapers(prev => pick(d.uniquePapers, prev));
     setDuplicatesCount(d.duplicatesCount ?? 0);
@@ -917,7 +936,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const persisted: unknown[] = [
     history, docQa, pico, framework, inclusion, exclusion, query, unifiedSearchQuery,
     perDbQueries, sources, numPerSource, perSourceLimits, searchSelection, searchFilters,
-    relevanceOverrides, model, rawPapers, seedIds, uniquePapers, duplicatesCount,
+    relevanceOverrides, model, stageModels, rawPapers, seedIds, uniquePapers, duplicatesCount,
     qualityReports, qualityArchive, excludedByQuality, qualityOverrides, gradeOutcomes,
     searchLog, protocol, protocolDeviations, prismaChecklist, abstractOverrides,
     fullTextOverrides, rerankThreshold, rerankResults, results, screeningArchive,
@@ -1046,7 +1065,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   };
 
   const value: Ctx = {
-    page, setPage, reviewOpen, setReviewOpen, model, setModel, sources, setSources, numPerSource, setNumPerSource, perSourceLimits, setPerSourceLimits, searchSelection, setSearchSelection, searchFilters, setSearchFilters, relevanceOverrides, setRelevanceOverrides, files, setFiles,
+    page, setPage, reviewOpen, setReviewOpen, model, setModel, stageModels, setStageModel, sources, setSources, numPerSource, setNumPerSource, perSourceLimits, setPerSourceLimits, searchSelection, setSearchSelection, searchFilters, setSearchFilters, relevanceOverrides, setRelevanceOverrides, files, setFiles,
     history, setHistory, docQa, setDocQa, pico, setPico, framework, setFramework, inclusion, setInclusion, exclusion, setExclusion, query, setQuery,
     unifiedSearchQuery, setUnifiedSearchQuery, perDbQueries, setPerDbQueries, simulation, setSimulation,
     simulationQuery, setSimulationQuery,
@@ -1091,6 +1110,16 @@ export function useStore() {
   const c = useContext(StoreCtx);
   if (!c) throw new Error("StoreProvider missing");
   return c;
+}
+
+/**
+ * The model this stage should use: its own if the reviewer set one, else the
+ * default. Pages read this rather than `model`, so a page shows and reports the
+ * model that will actually run its work.
+ */
+export function useStageModel(stage: ModelStage): string {
+  const s = useStore();
+  return modelForStage(stage, s.stageModels, s.model);
 }
 
 /** When the working snapshot was last written locally (ms epoch), or null. */

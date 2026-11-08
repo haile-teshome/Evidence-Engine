@@ -48,6 +48,7 @@ from data_services import DataAggregator, OpenAlexService
 from leads_screening import (
     LEADS_MODEL_NAME,
     LEADS_SCORE_THRESHOLD,
+    NON_SCREENING_FALLBACK_MODEL,
     is_leads_model,
     resolve_for_thinking,
     resolve_model_name,
@@ -6491,7 +6492,13 @@ def list_local_models():
             return {"running": False, "models": [], "error": f"Ollama returned {r.status_code}"}
         data = r.json()
         models = [m.get("name") for m in data.get("models", []) if m.get("name")]
-        return {"running": True, "models": models}
+        # The model a non-screening stage actually runs when a LEADS model is
+        # selected for it. LEADS-Mistral is fine-tuned on screening verdicts and
+        # returns nothing usable for other work, so those calls are redirected
+        # here. The UI needs the name to say so instead of showing a model that
+        # is not the one running.
+        return {"running": True, "models": models,
+                "non_screening_fallback": NON_SCREENING_FALLBACK_MODEL}
     except Exception as e:
         return {"running": False, "models": [], "error": str(e)}
 
@@ -7215,8 +7222,11 @@ class WritingSummaryRequest(BaseModel):
     exclusion_criteria: List[str] = []
     goal: str = ""
     model: str = ""
-    # RAISE AI-use disclosure: stages where AI made or suggested judgements
+    # RAISE AI-use disclosure: stages where AI made or suggested judgements.
+    # Each step carries the model that produced it: the reviewer chooses a model
+    # per stage, so one name for the whole review would misreport the rest.
     ai_model: str = ""
+    ai_models_by_stage: Dict[str, str] = {}
     ai_steps: List[Dict[str, str]] = []
 
 
@@ -7275,9 +7285,29 @@ def writing_summary(req: WritingSummaryRequest):
 
     # RAISE AI-use block
     if req.ai_steps:
-        ai_lines = [f"AI system: {req.ai_model or 'a large language model'}.", "Stages where AI made or suggested judgements (all reviewer-facing and overridable):"]
+        # Name the model per stage. A review that screened with one model and
+        # extracted with another has to say so, and the header lists every
+        # model that made a judgement anywhere in the review.
+        used: List[str] = []
         for st in req.ai_steps:
-            ai_lines.append(f"  • {st.get('stage','')}: {st.get('purpose','')} (Oversight: {st.get('oversight','')})")
+            for one in (x.strip() for x in (st.get("model") or "").split(",")):
+                if one and one not in used:
+                    used.append(one)
+        header = ", ".join(used) or req.ai_model or "a large language model"
+        ai_lines = [
+            f"AI system{'s' if len(used) > 1 else ''}: {header}.",
+            "Stages where AI made or suggested judgements (all reviewer-facing and overridable):",
+        ]
+        for st in req.ai_steps:
+            # Not `model`: that name holds the LangChain client this endpoint
+            # runs the prompt through, and shadowing it here cost a whole
+            # endpoint once already.
+            step_model = (st.get("model") or "").strip()
+            ai_lines.append(
+                f"  • {st.get('stage','')}: {st.get('purpose','')}"
+                + (f" [model: {step_model}]" if step_model else "")
+                + f" (Oversight: {st.get('oversight','')})"
+            )
         ai_block = "\n".join(ai_lines)
     else:
         ai_block = "(No AI-assisted judgement stages were recorded.)"

@@ -4,6 +4,7 @@
 import { requestHeaders, type LlmProvider } from "./keystore";
 import { dbKeyHeaders } from "./dbKeys";
 import type { FrameworkId } from "./frameworks";
+import { ModelStage, StageModels, modelForStage } from "./stageModels";
 
 // The frame object is keyed by element id. PICO uses population/intervention/
 // comparator/outcome; PCC uses population/concept/context. All are optional so
@@ -215,11 +216,39 @@ export type QualityOverride = {
 // Shared config
 // ---------------------------------------------------------------------------
 
-// Mutable global so the React store can update `model` without prop-drilling.
-export const apiConfig: { model: string; baseUrl: string } = {
+// Mutable global so the React store can update the model choices without
+// prop-drilling. `model` is the default; `stageModels` holds the stages the
+// reviewer chose a different model for.
+export const apiConfig: { model: string; stageModels: StageModels; baseUrl: string } = {
   model: "qwen2.5:7b",
+  stageModels: {},
   baseUrl: (import.meta as any)?.env?.VITE_API_BASE_URL || "/api",
 };
+
+/**
+ * The model to send for a stage's work.
+ *
+ * Every request that runs a model names its stage, so the reviewer's choice for
+ * that stage is what gets sent. A function called from two stages takes the
+ * stage from its caller rather than assuming one: screening a snowball
+ * candidate is the snowball stage's work even though it posts to the same
+ * endpoint as abstract screening.
+ */
+export function modelFor(stage: ModelStage): string {
+  return modelForStage(stage, apiConfig.stageModels, apiConfig.model);
+}
+
+/**
+ * The default model, for calls that belong to no stage.
+ *
+ * Naming a session and reading a PDF's own title and abstract on import are
+ * housekeeping, not review judgements: a title read by a different model is not
+ * a different review, and nobody would think to set a model for it. These use
+ * the default so the per-stage list stays a list of stages.
+ */
+export function defaultModel(): string {
+  return apiConfig.model;
+}
 
 // ---------------------------------------------------------------------------
 // LLM provider keys are managed by the keystore (./keystore), which stores them
@@ -307,26 +336,26 @@ async function getJSON<T = any>(path: string, signal?: AbortSignal): Promise<T> 
 
 export const AIService = {
   async inferPicoAndQuery(input: string, prior?: Partial<Analysis> | null, framework?: FrameworkId, signal?: AbortSignal): Promise<Analysis> {
-    return postJSON<Analysis>("/pico/infer", { input, prior: prior || undefined, model: apiConfig.model, framework }, signal);
+    return postJSON<Analysis>("/pico/infer", { input, prior: prior || undefined, model: modelFor("home"), framework }, signal);
   },
 
   // Grounded query builder (Phase 1): LLM concept synonyms -> real NCBI MeSH
   // grounding -> deterministic PubMed assembler. Returns the query plus the
   // per-concept breakdown so the reviewer can see/edit what the search does.
   async buildSearch(pico: Pico, goal = "", seeds?: { id: string; title: string; abstract?: string; source?: string }[], signal?: AbortSignal): Promise<{ query: string; concepts: { name: string; tiab: string[]; mesh: string[] }[] }> {
-    return postJSON("/search/build", { pico, goal, model: apiConfig.model, seeds: seeds && seeds.length ? seeds : undefined }, signal);
+    return postJSON("/search/build", { pico, goal, model: modelFor("home"), seeds: seeds && seeds.length ? seeds : undefined }, signal);
   },
 
   // RAG over the captured results: answer a question using only the given records.
   async askResults(question: string, records: { id: string; title: string; abstract?: string }[], signal?: AbortSignal): Promise<{ answer: string; cited: string[] }> {
-    return postJSON("/results/ask", { question, records, model: apiConfig.model }, signal);
+    return postJSON("/results/ask", { question, records, model: modelFor("home") }, signal);
   },
 
   // Heuristic pre-selection of the question frame (PICO vs PCC) from the goal.
   // The UI preselects this and lets the user override.
   async detectFramework(input: string, signal?: AbortSignal): Promise<FrameworkId> {
     try {
-      const r = await postJSON<{ framework: FrameworkId }>("/framework/detect", { input, model: apiConfig.model }, signal);
+      const r = await postJSON<{ framework: FrameworkId }>("/framework/detect", { input, model: modelFor("home") }, signal);
       return r.framework === "pcc" ? "pcc" : "pico";
     } catch {
       return "pico";
@@ -338,7 +367,7 @@ export const AIService = {
   async adaptQueriesPerSource(baseQuery: string, sources: string[], signal?: AbortSignal): Promise<Record<string, string>> {
     const r = await postJSON<{ per_source_queries: Record<string, string> }>(
       "/simulation/adapt",
-      { base_query: baseQuery, sources, model: apiConfig.model },
+      { base_query: baseQuery, sources, model: modelFor("planning") },
       signal,
     );
     return r.per_source_queries || {};
@@ -350,7 +379,7 @@ export const AIService = {
   async getClarifyingQuestions(input: string, signal?: AbortSignal): Promise<ClarifyingQuestion[]> {
     const r = await postJSON<{ questions: ClarifyingQuestion[] }>(
       "/pico/clarify-questions",
-      { input, model: apiConfig.model },
+      { input, model: modelFor("home") },
       signal,
     );
     return r.questions || [];
@@ -368,28 +397,28 @@ export const AIService = {
   ): Promise<{ done: boolean; question?: ClarifyingQuestion }> {
     return postJSON<{ done: boolean; question?: ClarifyingQuestion }>(
       "/pico/clarify-next",
-      { goal, pico_so_far: picoSoFar, round, asked, model: apiConfig.model, framework },
+      { goal, pico_so_far: picoSoFar, round, asked, model: modelFor("home"), framework },
       signal,
     );
   },
 
   async generateFormalQuestion(pico: Pico, goal = "", signal?: AbortSignal): Promise<string> {
     const r = await postJSON<{ question: string }>("/pico/formal-question", {
-      pico, model: apiConfig.model, history: [], goal,
+      pico, model: modelFor("home"), history: [], goal,
     }, signal);
     return r.question || "";
   },
 
   async generateComprehensiveSummary(goal = "", papers: Paper[] = [], signal?: AbortSignal): Promise<string> {
     const r = await postJSON<{ summary: string }>("/pico/summary", {
-      goal, papers, model: apiConfig.model,
+      goal, papers, model: modelFor("home"),
     }, signal);
     return r.summary || "";
   },
 
   async generateComprehensiveSummaryWithRefs(goal = "", papers: Paper[] = [], signal?: AbortSignal): Promise<{ summary: string; references: { title: string; url: string; source: string; id: string }[] }> {
     const r = await postJSON<{ summary: string; references: { title: string; url: string; source: string; id: string }[] }>("/pico/summary", {
-      goal, papers, model: apiConfig.model,
+      goal, papers, model: modelFor("home"),
     }, signal);
     return { summary: r.summary || "", references: r.references || [] };
   },
@@ -397,20 +426,20 @@ export const AIService = {
   // Per-source structured evidence table (design / population / intervention /
   // comparator / outcomes / key_finding) over selected articles + uploaded docs.
   async structuredSummary(sources: { id: string; title: string; abstract?: string; full_text?: string }[], signal?: AbortSignal): Promise<{ id: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string }[]> {
-    const r = await postJSON<{ characteristics: { id: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string }[] }>("/writing/characteristics", { papers: sources, model: apiConfig.model }, signal);
+    const r = await postJSON<{ characteristics: { id: string; design: string; population: string; intervention: string; comparator: string; outcomes: string; key_finding: string }[] }>("/writing/characteristics", { papers: sources, model: modelFor("home") }, signal);
     return r.characteristics || [];
   },
 
   async getRefinementSuggestions(goal = "", papers: Paper[] = [], signal?: AbortSignal): Promise<string[]> {
     const r = await postJSON<{ suggestions: string[] }>("/pico/suggestions", {
-      goal, papers, model: apiConfig.model,
+      goal, papers, model: modelFor("home"),
     }, signal);
     return r.suggestions || [];
   },
 
   async generateAdversarialQuery(pico: Pico, signal?: AbortSignal): Promise<string> {
     const r = await postJSON<{ query: string }>("/pico/adversarial", {
-      pico, model: apiConfig.model,
+      pico, model: modelFor("home"),
     }, signal);
     return r.query || "";
   },
@@ -423,18 +452,18 @@ export const AIService = {
   },
 
   async refinePico(pico: Pico, goal = ""): Promise<{ field: "population" | "intervention" | "comparator" | "outcome" | null; current: string; suggested: string; reason: string; is_clarification?: boolean }> {
-    return postJSON("/pico/refine", { pico, goal, model: apiConfig.model });
+    return postJSON("/pico/refine", { pico, goal, model: modelFor("home") });
   },
 
   async generateSessionTitle(goal: string, signal?: AbortSignal): Promise<string> {
-    const r = await postJSON<{ title: string }>("/sessions/title", { goal, model: apiConfig.model }, signal);
+    const r = await postJSON<{ title: string }>("/sessions/title", { goal, model: defaultModel() }, signal);
     return r.title || "Untitled session";
   },
 
   // Clean bibliographic metadata from an uploaded PDF's extracted text (upgrades
   // the client-side filename heuristic). Missing fields come back empty.
   async extractPdfMetadata(text: string, filename = "", signal?: AbortSignal): Promise<{ title: string; authors: string; year: number | null; abstract: string; doi: string }> {
-    return postJSON("/pdf/metadata", { text, filename, model: apiConfig.model }, signal);
+    return postJSON("/pdf/metadata", { text, filename, model: defaultModel() }, signal);
   },
 
   // Flag included studies that are retracted or carry an expression of concern.
@@ -451,7 +480,7 @@ export const AIService = {
     input: { title?: string; pico?: any; inclusion?: string[]; exclusion?: string[]; sources?: string[] },
     signal?: AbortSignal,
   ): Promise<string> {
-    const r = await postJSON<{ protocol: string }>("/writing/protocol", { ...input, model: apiConfig.model }, signal);
+    const r = await postJSON<{ protocol: string }>("/writing/protocol", { ...input, model: modelFor("writing") }, signal);
     return r.protocol || "";
   },
 
@@ -464,8 +493,9 @@ export const AIService = {
     title = "",
     signal?: AbortSignal,
     tables = "",
+    stage: ModelStage = "text-extraction",
   ): Promise<Record<string, any>> {
-    const r = await this.extractFieldsRich(text, fields, title, signal, tables);
+    const r = await this.extractFieldsRich(text, fields, title, signal, tables, stage);
     return r.values;
   },
 
@@ -477,6 +507,9 @@ export const AIService = {
     title = "",
     signal?: AbortSignal,
     tables = "",
+    /** Table Extraction fills a form from tables it already pulled; Text
+     *  Extraction fills one from the prose. Same endpoint, different stage. */
+    stage: ModelStage = "text-extraction",
   ): Promise<{
     values: Record<string, any>;
     fields: {
@@ -490,21 +523,24 @@ export const AIService = {
   }> {
     const r = await postJSON<{ values: Record<string, any>; fields?: any[]; error?: string }>(
       "/extract/fields",
-      { text, fields, title, tables, model: apiConfig.model },
+      { text, fields, title, tables, model: modelFor(stage) },
       signal,
     );
     return { values: r.values || {}, fields: r.fields || [], error: r.error || "" };
   },
 
-  async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = ""): Promise<ScreenResult> {
+  // `stage` is the reviewer's stage, not the endpoint: Citation Snowball
+  // screens its candidates through /screen/abstract too, and should use the
+  // model chosen for snowballing.
+  async screenPaperMultiAgent(paper: Paper, pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = "", stage: ModelStage = "abstract-screening"): Promise<ScreenResult> {
     return postJSON<ScreenResult>("/screen/abstract", {
-      paper, pico, inclusion, exclusion, protocol, model: apiConfig.model,
+      paper, pico, inclusion, exclusion, protocol, model: modelFor(stage),
     }, signal);
   },
 
   async screenPaperMultiAgentBatch(papers: Paper[], pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = ""): Promise<ScreenResult[]> {
     const r = await postJSON<{ results: ScreenResult[] }>("/screen/abstract-batch", {
-      papers, pico, inclusion, exclusion, protocol, model: apiConfig.model,
+      papers, pico, inclusion, exclusion, protocol, model: modelFor("abstract-screening"),
     }, signal);
     return r.results || [];
   },
@@ -525,7 +561,7 @@ export const AIService = {
       pico: pico || { population: "", intervention: "", comparator: "", outcome: "" },
       inclusion, exclusion,
       fullText,
-      model: apiConfig.model,
+      model: modelFor("full-text-screening"),
     }, signal);
   },
 
@@ -567,7 +603,7 @@ export const AIService = {
     const res = await fetch(`${apiConfig.baseUrl}/simulation/agentic/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ base_query: baseQuery, pico, sources, model: apiConfig.model, task_id: taskId }),
+      body: JSON.stringify({ base_query: baseQuery, pico, sources, model: modelFor("planning"), task_id: taskId }),
       signal,
     });
     if (!res.ok || !res.body) throw new Error(`agentic stream failed (${res.status})`);
@@ -685,7 +721,7 @@ export const AIService = {
     spans: { start: number; end: number; label?: string }[];
     values: { field: string; value: string; quote?: string; section?: string; start?: number; end?: number }[];
   }> {
-    return postJSON("/extract/text", { text, query, model: apiConfig.model }, signal);
+    return postJSON("/extract/text", { text, query, model: modelFor("text-extraction") }, signal);
   },
 
   // Answer a question across MANY documents (retrieved / uploaded / cited in
@@ -699,7 +735,7 @@ export const AIService = {
   ): Promise<{ answer: string; documents: { n: number; id: string; title: string }[] }> {
     const r = await postJSON<{ answer: string; documents: { n: number; id: string; title: string }[] }>(
       "/documents/ask",
-      { question, documents, history: opts.history || [], total_documents: opts.totalDocuments, model: apiConfig.model },
+      { question, documents, history: opts.history || [], total_documents: opts.totalDocuments, model: modelFor("home") },
       signal,
     );
     return { answer: r.answer || "", documents: r.documents || [] };
@@ -711,7 +747,7 @@ export const AIService = {
   async routeIntent(message: string, hasDocuments: boolean, signal?: AbortSignal): Promise<"documents" | "search" | "chat"> {
     try {
       const r = await postJSON<{ intent: string }>(
-        "/route/intent", { message, has_documents: hasDocuments, model: apiConfig.model }, signal,
+        "/route/intent", { message, has_documents: hasDocuments, model: modelFor("home") }, signal,
       );
       if (r.intent === "documents") return "documents";
       if (r.intent === "chat") return "chat";
@@ -726,7 +762,7 @@ export const AIService = {
   async chat(message: string, history: { role: string; content: string }[], signal?: AbortSignal): Promise<string> {
     try {
       const r = await postJSON<{ answer: string }>(
-        "/assistant/chat", { message, history, model: apiConfig.model }, signal,
+        "/assistant/chat", { message, history, model: modelFor("home") }, signal,
       );
       return r.answer || "";
     } catch {
@@ -736,8 +772,8 @@ export const AIService = {
 
   // Home-chat tool-calling agent: the model searches the library and reads full
   // text on demand, then answers grounded with [n] citations. `model` is passed
-  // explicitly (may differ from apiConfig.model when we fall back to a capable
-  // local model). Returns `unsupported` if the model couldn't bind tools.
+  // explicitly (may differ from the Home stage's model when we fall back to a
+  // tool-capable local one). Returns `unsupported` if the model couldn't bind tools.
   async agentChat(
     message: string,
     history: { role: string; content: string }[],
@@ -812,7 +848,7 @@ export const AIService = {
       // fallback only sees the title and never extracts anything.
       abstract: paper.Abstract || "",
       full_text: paper.full_text || "",
-      model: apiConfig.model,
+      model: modelFor("table-extraction"),
     }, signal);
     return { tables: r.tables || [], tried: r.tried || [] };
   },
@@ -857,7 +893,7 @@ export const QualityService = {
         rubric_override: opts.rubricOverride,
         study_design: opts.studyDesign,
         instrument_id: opts.instrumentId,
-        model: apiConfig.model,
+        model: modelFor("quality-assessment"),
       },
       signal,
     );
@@ -1002,6 +1038,8 @@ export const DataAggregator = {
     topK?: number,
     signal?: AbortSignal,
     quantileKeep?: number,
+    /** Home ranks search results; Snowball ranks cited work. */
+    stage: ModelStage = "home",
   ): Promise<RerankResult> {
     return postJSON<RerankResult>(
       "/papers/rerank",
@@ -1010,7 +1048,7 @@ export const DataAggregator = {
         threshold,
         quantile_keep: quantileKeep,
         top_k: topK,
-        model: apiConfig.model,
+        model: modelFor(stage),
       },
       signal,
     );
@@ -1039,7 +1077,7 @@ export const DataAggregator = {
         threshold,
         quantile_keep: quantileKeep,
         top_k: topK,
-        model: apiConfig.model,
+        model: modelFor("home"),
       }),
       signal,
     });
@@ -1296,7 +1334,7 @@ export async function metaAsk(
     question,
     full_text: opts.fullText || null,
     tables: opts.tables || null,
-    model: apiConfig.model,
+    model: modelFor("meta-analysis"),
   }, signal);
 }
 
@@ -1322,7 +1360,7 @@ export const MetaAnalysisService = {
   ): Promise<{ extractions: StudyEffect[]; model_used: string; outcome: string }> {
     return postJSON<{ extractions: StudyEffect[]; model_used: string; outcome: string }>(
       "/meta/extract",
-      { papers, outcome, measure, full_texts: fullTexts, tables, model: apiConfig.model },
+      { papers, outcome, measure, full_texts: fullTexts, tables, model: modelFor("meta-analysis") },
       signal,
     );
   },

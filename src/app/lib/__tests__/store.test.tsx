@@ -551,3 +551,70 @@ describe("simulation run history", () => {
     expect(fresh.result.current.simulationRuns[0].totalYield).toBe(42);
   });
 });
+
+// Per-stage model choices. These are settings rather than work, but a reviewer
+// who sets extraction to one model and screening to another and then reloads
+// must not silently get the default back: the stage would run a model they did
+// not choose, and the review would report one that never ran.
+describe("per-stage models", () => {
+  it("starts with none, so every stage follows the default", () => {
+    const { result } = mount();
+    expect(result.current.stageModels).toEqual({});
+  });
+
+  it("sets one stage without touching the others", () => {
+    const { result } = mount();
+    act(() => result.current.setStageModel("text-extraction", "qwen2.5:7b"));
+    expect(result.current.stageModels).toEqual({ "text-extraction": "qwen2.5:7b" });
+    act(() => result.current.setStageModel("writing", "gpt-4o"));
+    expect(result.current.stageModels)
+      .toEqual({ "text-extraction": "qwen2.5:7b", writing: "gpt-4o" });
+  });
+
+  it("clears a stage back to the default", () => {
+    const { result } = mount();
+    act(() => result.current.setStageModel("writing", "gpt-4o"));
+    act(() => result.current.setStageModel("writing", null));
+    expect(result.current.stageModels).toEqual({});
+  });
+
+  it("treats a blank choice as clearing it", () => {
+    const { result } = mount();
+    act(() => result.current.setStageModel("writing", "gpt-4o"));
+    act(() => result.current.setStageModel("writing", "  "));
+    expect(result.current.stageModels).toEqual({});
+  });
+
+  it("round-trips through a snapshot", () => {
+    const { result } = mount();
+    act(() => {
+      result.current.setModel("leads");
+      result.current.setStageModel("text-extraction", "qwen2.5:7b");
+      result.current.setStageModel("quality-assessment", "gpt-4o");
+    });
+    const snap = result.current.snapshot();
+
+    const fresh = mount();
+    act(() => fresh.result.current.hydrate(snap));
+    expect(fresh.result.current.model).toBe("leads");
+    expect(fresh.result.current.stageModels)
+      .toEqual({ "text-extraction": "qwen2.5:7b", "quality-assessment": "gpt-4o" });
+  });
+
+  it("drops a stage an older build wrote that this one does not have", () => {
+    const { result } = mount();
+    act(() => result.current.hydrate({
+      stageModels: { "text-extraction": "qwen2.5:7b", "full-text-acquisition": "gone" },
+    } as any));
+    expect(result.current.stageModels).toEqual({ "text-extraction": "qwen2.5:7b" });
+  });
+
+  it("hydrating a session that has none clears what was set", () => {
+    // Opening an older session must not leave the previous session's choices
+    // applied to it: its stages would run models that session never chose.
+    const { result } = mount();
+    act(() => result.current.setStageModel("writing", "gpt-4o"));
+    act(() => result.current.hydrate({} as any));
+    expect(result.current.stageModels).toEqual({});
+  });
+});

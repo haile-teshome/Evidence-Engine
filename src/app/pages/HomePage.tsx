@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useStore, HistoryEntry, SummaryRow, FullTextRecord } from "../lib/store";
+import { useStore, useStageModel, HistoryEntry, SummaryRow, FullTextRecord } from "../lib/store";
 import { Checkbox } from "../components/ui/checkbox";
 import { AIService, DataAggregator, supportsTools } from "../lib/mockServices";
 import type { ClarifyingQuestion, Paper } from "../lib/mockServices";
@@ -1001,6 +1001,7 @@ function rankByRelevance<T extends { title?: string; text?: string }>(question: 
 
 export function HomePage() {
   const s = useStore();
+  const homeModel = useStageModel("home");
   const studyImport = useStudyImport();
   // Installed local (Ollama) models, so we can fall back to a tool-capable one
   // (qwen2.5) when the selected model can't drive the chat agent.
@@ -1485,11 +1486,11 @@ export function HomePage() {
           // on demand); the no-capable-model case uses the deterministic path instead.
           const hasLibrary = (s.rawPapers?.length ?? 0) > 0;
           if (hasLibrary) {
-            let agentModel = supportsTools(s.model) ? s.model : "";
+            let agentModel = supportsTools(homeModel) ? homeModel : "";
             let note = "";
             if (!agentModel) {
               const qwen = localModels.find(m => /qwen2\.5/i.test(m)) || localModels.find(m => /qwen2/i.test(m)) || localModels.find(m => supportsTools(m));
-              if (qwen) { agentModel = qwen; note = `${s.model} can't use tools, so I switched to ${qwen} for this answer.`; }
+              if (qwen) { agentModel = qwen; note = `${homeModel} can't use tools, so I switched to ${qwen} for this answer.`; }
             }
             if (agentModel) { await answerWithAgent(t, agentModel, note); return; }
             await answerFromLibrary(t);

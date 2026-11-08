@@ -3,7 +3,7 @@ import { usePagedRows } from "../lib/usePagedRows";
 import { ShowMore } from "../components/ShowMore";
 import { ImportStudies } from "../components/ImportStudies";
 import { excludeImported } from "../lib/importedAt";
-import { useStore, resolveInUseRun, ScreeningPlan } from "../lib/store";
+import { useStore, useStageModel, resolveInUseRun, ScreeningPlan } from "../lib/store";
 import { AIService, DataAggregator, Deduplicator, formatDuration, Paper, ScreenResult, PicoVote, PicoFieldAssessment } from "../lib/mockServices";
 import { frameworkOf, labelFor, type FrameworkId } from "../lib/frameworks";
 import { categoriseAbstractExclusion, effectiveAbstractDecision } from "../lib/exclusionBucketing";
@@ -192,6 +192,7 @@ export function ScreeningPreview({
 
 export function AbstractPage() {
   const s = useStore();
+  const screenModel = useStageModel("abstract-screening");
   // Screening retrieves with the planning run that is IN USE, never with the
   // query editor's current text. Planning measures a count per source and
   // screening retrieves per source, so unless both read the same string a
@@ -390,7 +391,7 @@ export function AbstractPage() {
       // Screen with bounded concurrency, much faster on large sets. Cloud models
       // handle many parallel calls; a local Ollama serves fewer at once, so keep
       // the pool small there to avoid thrashing.
-      const CONCURRENCY = /^(claude|gpt|gemini)/i.test(s.model) ? 8 : 3;
+      const CONCURRENCY = /^(claude|gpt|gemini)/i.test(screenModel) ? 8 : 3;
       const slots: (ScreenResult | undefined)[] = new Array(queue.length);
       let done = 0, next = 0;
       // Ground each screening decision in the in-use planning run's search
@@ -488,7 +489,7 @@ export function AbstractPage() {
           id: Date.now().toString(36),
           ranAt: new Date().toISOString(),
           mode: incremental ? "incremental" : "full",
-          model: s.model,
+          model: screenModel,
           screenedNow: screened.length,
           totalAfter: finalResults.length,
           included: finalResults.length - totalExcluded,

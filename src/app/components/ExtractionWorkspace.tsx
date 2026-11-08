@@ -90,7 +90,7 @@ export function ExtractionWorkspace({ projectId, role }: { projectId: string; ro
         .join("\n\n");
       const { values: vals, fields: prF } = await AIService.extractFieldsRich(
         text, fields.map(f => ({ id: f.id, label: f.label, type: f.type, options: f.options, description: (f as any).description })),
-        p?.title || "", undefined, tables,
+        p?.title || "", undefined, tables, "table-extraction",
       );
       // Fill only empty fields; never overwrite what the reviewer already typed.
       setForm(prev => {

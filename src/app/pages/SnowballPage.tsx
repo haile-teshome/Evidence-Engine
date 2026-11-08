@@ -259,7 +259,7 @@ export function SnowballPage() {
           try {
             const res = await DataAggregator.rerankByRelevance(
               pool.map(p => ({ id: p.id, title: p.title, abstract: p.abstract || "", source: p.source, url: p.url })) as any,
-              s.pico, s.inclusion, s.exclusion, -1, undefined, signal,
+              s.pico, s.inclusion, s.exclusion, -1, undefined, signal, undefined, "citation-snowball",
             );
             scores = new Map(res.ranked.map(r => [(r.paper.title || "").toLowerCase(), r.leads_score]));
           } catch (e: any) {
@@ -330,7 +330,7 @@ export function SnowballPage() {
         try {
           const r = await AIService.screenPaperMultiAgent(
             { id: p.id, source: p.source, title: p.title, abstract: p.abstract, url: p.url },
-            s.pico, s.inclusion, s.exclusion, signal,
+            s.pico, s.inclusion, s.exclusion, signal, "", "citation-snowball",
           );
           out.push(r);
         } catch (e: any) {
