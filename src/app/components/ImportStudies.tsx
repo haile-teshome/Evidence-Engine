@@ -19,7 +19,7 @@ import { Textarea } from "./ui/textarea";
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from "./ui/dialog";
-import { useStudyImport } from "../lib/useStudyImport";
+import { listQueries, useStudyImport } from "../lib/useStudyImport";
 import { ImportStage, STAGE_LABEL } from "../lib/importedAt";
 
 /** Walk a dragged folder. The entry API is the only way to see inside one. */
@@ -73,7 +73,7 @@ export function ImportStudies({
   const [over, setOver] = useState(false);
   const [listText, setListText] = useState("");
 
-  const titles = listText.split("\n").map(t => t.trim()).filter(Boolean);
+  const titles = listQueries(listText);
 
   function take(files: File[]) {
     if (!files.length) return;

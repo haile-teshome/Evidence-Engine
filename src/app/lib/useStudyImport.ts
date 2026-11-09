@@ -3,12 +3,12 @@ import { useStore } from "./store";
 import { importStudies, isAccepted, UPLOAD_SOURCE, ImportedStudy, guessTitle } from "./pdfImport";
 import { registerPdfBlobs, removePdfBlob } from "./pdfBlobs";
 import { sendPdfsToServer, readTextOnServer } from "./pdfHandoff";
-import { AIService } from "./apiClient";
+import { AIService, apiConfig } from "./apiClient";
 import { apiFetch } from "./backendClient";
 import type { Paper, ScreenResult, FullTextResult } from "./apiClient";
 import { toast } from "sonner";
 import {
-  ImportStage, importReason, needsAbstractRow, needsFullTextRow,
+  ImportStage, importReason, needsAbstractRow, needsFullTextRow, readsFullText,
 } from "./importedAt";
 
 // Shared logic for importing a user's own studies as the corpus. Used by the
@@ -27,6 +27,33 @@ type LoadedDoc = {
   titleFromFilename?: boolean;
   parseError?: string;
 };
+
+/**
+ * The queries in a pasted list.
+ *
+ * One per line is what the box asks for, and a line that reads as a title is
+ * taken whole, because a title has commas in it. But people paste a row of
+ * DOIs separated by commas, and that went to the server as a single long
+ * query that matched nothing: five real DOIs came back as one "not found".
+ * So a line carrying identifiers is read as the list of identifiers it is.
+ */
+const DOI_IN_LINE = /10\.\d{4,9}\/[^\s,;"'<>]+/g;
+const IDS_ONLY = /^[\d\s,;]+$/;
+
+export function listQueries(text: string): string[] {
+  const out: string[] = [];
+  for (const raw of (text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const dois = line.match(DOI_IN_LINE);
+    // Trailing punctuation belongs to the sentence, not to the DOI.
+    if (dois) { out.push(...dois.map(d => d.replace(/[.,;]+$/, ""))); continue; }
+    if (IDS_ONLY.test(line)) { out.push(...line.split(/[\s,;]+/).filter(Boolean)); continue; }
+    out.push(line);
+  }
+  // The same identifier twice is one lookup, not two.
+  return [...new Set(out)];
+}
 
 export function useStudyImport(stage: ImportStage = "home") {
   const s = useStore();
@@ -104,6 +131,7 @@ export function useStudyImport(stage: ImportStage = "home") {
         Agent_Trace: {},   // no votes: nothing judged this record here
         Bucket: "Imported",
         Imported: stage,
+        doi: p.doi,
       }));
     if (rows.length) s.setResults([...(s.results || []), ...rows]);
 
@@ -119,8 +147,68 @@ export function useStudyImport(stage: ImportStage = "home") {
         criteriaEval: {}, criteriaEvidence: {},
         inclusion_score: 0, exclusion_violations: 0,
         Imported: stage,
+        doi: p.doi,
       }));
     if (ftRows.length) s.setFullTextResults([...(s.fullTextResults || []), ...ftRows]);
+  }
+
+  /**
+   * Fetch the article itself for records that arrived as records.
+   *
+   * A DOI lookup returns a title and an abstract. The extraction, appraisal and
+   * writing stages read the full text, so a study imported there used to land
+   * in the table with nothing in it and a message pointing at another stage.
+   * Importing at a stage says the reviewer wants to work on it there, so the
+   * same fetch Full-Text Acquisition runs happens here, in the background.
+   *
+   * One at a time, because this reaches publishers and OA indexes that rate
+   * limit, and the paper the reviewer is looking at arrives first either way.
+   */
+  async function acquireFullTexts(papers: Paper[]) {
+    const queue = papers.filter(p => !(s.fullTexts[p.id]?.text || "").trim());
+    if (!queue.length) return;
+    const what = `${queue.length} stud${queue.length === 1 ? "y" : "ies"}`;
+    const tid = toast.loading(`Fetching the full text for ${what}\u2026`);
+    let found = 0;
+    for (let i = 0; i < queue.length; i++) {
+      const paper = queue[i];
+      try {
+        const res = await AIService.fetchFullText({
+          Title: paper.title, URL: paper.url || "", Source: paper.source, paper_id: paper.id,
+          doi: paper.doi,
+        });
+        s.setFullTexts(prev => ({
+          ...prev,
+          [paper.id]: {
+            paper_id: paper.id, title: paper.title, url: paper.url || "", source: paper.source,
+            status: res.status, text: res.text, text_key: res.text_key, reason: res.reason,
+            retrieved_via: res.source,
+            reason_code: res.reason_code, oa_status: res.oa_status,
+            doi: res.doi, pmid: res.pmid, links: res.links,
+            pdf_url: res.pdf_key
+              ? `${apiConfig.baseUrl}/fulltext/pdf/${encodeURIComponent(res.pdf_key)}`
+              : undefined,
+          },
+        }));
+        if (res.status === "found") found++;
+      } catch (e: any) {
+        // One paper behind a publisher wall is not a reason to stop fetching
+        // the rest, and the miss is already recorded against that paper.
+        console.error(`fulltext-fetch ${paper.id} failed:`, e?.message);
+      }
+      toast.loading(`Fetching the full text for ${what}\u2026 ${i + 1} of ${queue.length}`, { id: tid });
+    }
+    // Named honestly: a paywalled article is a miss the reviewer has to resolve
+    // with their library, not a failure of the import.
+    if (found === queue.length) {
+      toast.success(`Got the full text for all ${queue.length}`, { id: tid });
+    } else if (found) {
+      toast.warning(`Got ${found} of ${queue.length} full texts. The rest need your library, `
+                  + `on Full-Text Acquisition.`, { id: tid, duration: 9000 });
+    } else {
+      toast.warning(`No full text was openly available. Try Full-Text Acquisition, `
+                  + `which can use your library's access.`, { id: tid, duration: 9000 });
+    }
   }
 
   /** Put a better title on a study once the document has actually been read.
@@ -254,11 +342,18 @@ export function useStudyImport(stage: ImportStage = "home") {
         url: p.url || "",
         year: p.year ?? undefined,
         authors: p.authors || undefined,
+        // Kept because the full-text fetch needs it. A PMC or publisher URL
+        // has no DOI in it to mine, so dropping it here made every study
+        // looked up BY its DOI come back "no_doi" when its text was fetched.
+        doi: p.doi || undefined,
       }));
       const missing: string[] = out?.missing || [];
 
       if (papers.length) {
         loadIntoCorpus(papers.map(paper => ({ paper })) as any);
+        // Looked-up records carry no article. The stages that read one fetch it
+        // here rather than leaving the reviewer on an empty page.
+        if (readsFullText(stage)) void acquireFullTexts(papers);
         toast.success(
           `Added ${papers.length.toLocaleString()} of ${list.length.toLocaleString()}`
           + (missing.length ? `. ${missing.length} not found.` : ""),

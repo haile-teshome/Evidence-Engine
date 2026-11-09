@@ -68,6 +68,25 @@ export function needsFullTextRow(_stage: ImportStage): boolean {
   return true;
 }
 
+/**
+ * Stages that read the article's words rather than its record.
+ *
+ * A record looked up by DOI carries a title and an abstract, not the paper, so
+ * a study imported at one of these stages arrives with nothing to work on and
+ * the page is empty. Importing there is a statement that the reviewer wants to
+ * work on these studies HERE, so the text is fetched for them rather than
+ * sending them to another stage to press a button.
+ *
+ * Full-Text Acquisition is left out on purpose: that page's whole job is this
+ * fetch, with its own queue and its own cancel, and starting a second one
+ * behind it would fight with it.
+ */
+export function readsFullText(stage: ImportStage): boolean {
+  return stage === "full-text-screening" || stage === "table-extraction"
+      || stage === "text-extraction" || stage === "quality-assessment"
+      || stage === "meta-analysis" || stage === "writing";
+}
+
 export const IMPORT_REASON_PREFIX = "Imported at";
 
 /** The reason string stored on a seeded row. Says plainly what did not happen. */

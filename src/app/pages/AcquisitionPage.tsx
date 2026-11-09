@@ -241,7 +241,7 @@ export function AcquisitionPage() {
         });
         s.setFullTexts(prev => ({ ...prev, [p.paper_id]: { paper_id: p.paper_id, title: p.Title, url: p.URL, source: p.Source, status: "pending" } }));
         try {
-          const res = await AIService.fetchFullText({ Title: p.Title, URL: p.URL, Source: p.Source, paper_id: p.paper_id }, signal);
+          const res = await AIService.fetchFullText({ Title: p.Title, URL: p.URL, Source: p.Source, paper_id: p.paper_id, doi: p.doi }, signal);
           s.setFullTexts(prev => ({
             ...prev,
             [p.paper_id]: {

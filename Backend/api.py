@@ -3075,6 +3075,11 @@ def _openalex_minimal(work: Dict[str, Any], ctype: str) -> Dict[str, Any]:
         "title": (work.get("display_name") or work.get("title") or "Untitled").strip(),
         "abstract": _reconstruct_oa_abstract(work.get("abstract_inverted_index")),
         "url": oa.get("oa_url") or (f"https://doi.org/{doi}" if doi else (work.get("id") or "")),
+        # Carried on the record because the full-text fetch needs it: mining a
+        # DOI back out of the URL fails whenever the URL is a PMC or publisher
+        # link, and the paper then came back "no_doi" though it was looked up
+        # BY its DOI.
+        "doi": doi,
         "source": f"OpenAlex ({'Reference' if ctype == 'backward' else 'Cited by'})",
         "year": work.get("publication_year"),
         "cited_by_count": work.get("cited_by_count"),

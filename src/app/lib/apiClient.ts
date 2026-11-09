@@ -13,7 +13,10 @@ export type Pico = {
   population: string; intervention: string; comparator: string; outcome: string;
   concept?: string; context?: string; framework?: FrameworkId;
 };
-export type Paper = { id: string; source: string; title: string; abstract: string; url: string; year?: number; authors?: string };
+export type Paper = { id: string; source: string; title: string; abstract: string; url: string;
+                      year?: number; authors?: string;
+                      /** Needed to acquire the full text; a URL is not always one to mine. */
+                      doi?: string };
 // How records are selected when a source matches more than its per-database cap.
 export type SelectionStrategy = "relevance" | "recent";
 // Researcher-set filters applied at search time (extensible). Publication-year
@@ -76,6 +79,8 @@ export type ScreenResult = {
   // screening it here. PRISMA counts these under "other sources" and the AI
   // decision log leaves them out. See lib/importedAt.ts.
   Imported?: import("./importedAt").ImportStage;
+  /** Carried from the record so the full-text fetch has it. */
+  doi?: string;
 };
 
 export type CriterionEvidence = { decision: "INCLUDE" | "EXCLUDE"; evidence: string; reasoning: string };
@@ -97,6 +102,8 @@ export type FullTextResult = {
   exclusion_violations: number;
   // As on ScreenResult: imported at this stage, not judged here.
   Imported?: import("./importedAt").ImportStage;
+  /** Carried from the record so the full-text fetch has it. */
+  doi?: string;
 };
 
 // Legacy type kept exported only because mockServices re-exports it.
@@ -703,7 +710,7 @@ export const AIService = {
     }));
   },
 
-  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string }, signal?: AbortSignal): Promise<{
+  async fetchFullText(paper: { Title: string; URL: string; Source: string; paper_id?: string; doi?: string }, signal?: AbortSignal): Promise<{
     status: "found" | "missing"; text?: string; reason?: string; source?: string; pdf_key?: string;
     /** Key of the body in the backend text cache; the saved session keeps this, not the text. */
     text_key?: string;
@@ -713,6 +720,7 @@ export const AIService = {
   }> {
     return postJSON("/fulltext/fetch", {
       Title: paper.Title, URL: paper.URL, Source: paper.Source, paper_id: paper.paper_id || null,
+      doi: paper.doi || null,
     }, signal);
   },
 
