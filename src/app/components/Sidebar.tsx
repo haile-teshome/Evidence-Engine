@@ -193,10 +193,6 @@ export function Sidebar() {
   const [ollamaRunning, setOllamaRunning] = useState<boolean | null>(null);
   const [keysOpen, setKeysOpen] = useState(false);
   const [stagesOpen, setStagesOpen] = useState(false);
-  // What a non-screening stage really runs when a LEADS model is chosen for it.
-  // The backend redirects those calls, so showing the chosen model would name a
-  // model that is not the one doing the work.
-  const [leadsFallback, setLeadsFallback] = useState("");
   const [, forceKeys] = useState(0);
   // Re-render when the keystore or a database key changes (so the 🔑 status updates).
   useEffect(() => {
@@ -244,7 +240,6 @@ export function Sidebar() {
         const models: string[] = Array.isArray(d.models) ? d.models : [];
         setLocalModels(models);
         setOllamaRunning(!!d.running);
-        setLeadsFallback(typeof d.non_screening_fallback === "string" ? d.non_screening_fallback : "");
         // Pick a sensible installed model. LEADS-mistral wins by benchmark
         // (recall=1.0, spec=0.68); otherwise prefer Qwen, which is the house
         // default for local work. Llama tags are never auto-selected.
@@ -366,17 +361,6 @@ export function Sidebar() {
               <ModelOptions localModels={localModels} keep={s.model} />
             </SelectContent>
           </Select>
-          <p className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
-            Runs every stage unless you choose one below.
-            {/* A LEADS default does not run the other stages, and until now
-                nothing said so: the backend quietly redirects them. */}
-            {/leads.*mistral|^leads$/i.test(s.model) && (
-              <> Screening stages use it; the rest run{" "}
-                {leadsFallback ? formatModelName(leadsFallback) : "a general-purpose model"},
-                because LEADS cannot do that work.</>
-            )}
-          </p>
-
           {/* ── Per-stage models ──────────────────────────────────────────────
               The stages do not ask for the same thing: screening wants the
               model fine-tuned on screening verdicts, extraction wants one that
@@ -409,7 +393,6 @@ export function Sidebar() {
                         </button>
                       )}
                     </div>
-                    <div className="text-[10px] leading-snug text-muted-foreground">{stage.what}</div>
                     <Select value={chosen ?? USE_DEFAULT}
                       onValueChange={v => s.setStageModel(stage.id, v === USE_DEFAULT ? null : v)}>
                       <SelectTrigger className="mt-1 h-7 text-xs"><SelectValue /></SelectTrigger>
@@ -424,10 +407,6 @@ export function Sidebar() {
                   </div>
                 );
               })}
-              <p className="text-[10px] leading-snug text-muted-foreground">
-                LEADS-Mistral is offered for screening only. It is fine-tuned on screening
-                verdicts, and asked to fill a form it returns nothing usable.
-              </p>
               {overrideCount > 0 && (
                 <button type="button" onClick={clearStageModels}
                   className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">

@@ -17,6 +17,7 @@ import { useEffect, useState } from "react";
 
 import { StoreProvider, useStore } from "../../lib/store";
 import { Sidebar } from "../Sidebar";
+import { MODEL_STAGES } from "../../lib/stageModels";
 
 // `fallback` is what the backend reports as the model a non-screening stage
 // really runs when a LEADS model is selected for it. Empty by default, which is
@@ -297,11 +298,13 @@ describe("per-stage model selection", () => {
     const view = mountSidebar("qwen2.5:7b");
     await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
 
-    // Collapsed: the stage rows are not in the document at all.
-    expect(view.queryByText("filling your extraction form")).toBeNull();
+    // Collapsed: the stage rows are not in the document at all, so the only
+    // model picker on the page is the default one.
+    const pickers = () => view.container.querySelectorAll('[role="combobox"]').length;
+    expect(pickers()).toBe(1);
 
     view.getByText("Per-stage models").click();
-    await waitFor(() => expect(view.getByText("filling your extraction form")).toBeTruthy());
+    await waitFor(() => expect(pickers()).toBe(1 + MODEL_STAGES.length));
     for (const label of ["Abstract Screening", "Text Extraction", "Quality Assessment",
                          "Meta-analysis", "Writing Assistant"]) {
       expect(view.getAllByText(label).length).toBeGreaterThan(0);
@@ -334,30 +337,6 @@ describe("per-stage model selection", () => {
     view.getByText("Use the default everywhere").click();
 
     await waitFor(() => expect(view.store().stageModels).toEqual({}));
-  });
-
-  it("says what a LEADS default does not run", async () => {
-    // Out of the box the default is LEADS, and every stage that is not
-    // screening is redirected by the backend. Until now nothing said so.
-    mockModels([LEADS, "qwen2.5:7b"], true, "qwen2.5:7b");
-    const view = mountSidebar(LEADS);
-    await waitFor(() => expect(view.getByText(/Screening stages use it/)).toBeTruthy());
-    // Named, not described: the reviewer can check which model that is.
-    await waitFor(() => expect(view.container.textContent).toMatch(/Qwen 2\.5 7B/));
-  });
-
-  it("still says so when the backend does not name the fallback", async () => {
-    mockModels([LEADS, "qwen2.5:7b"]);
-    const view = mountSidebar(LEADS);
-    await waitFor(() => expect(view.getByText(/Screening stages use it/)).toBeTruthy());
-    expect(view.container.textContent).toMatch(/a general-purpose model/);
-  });
-
-  it("says nothing of the sort when the default is a general model", async () => {
-    mockModels([LEADS, "qwen2.5:7b"]);
-    const view = mountSidebar("qwen2.5:7b");
-    await waitFor(() => expect(view.getByText("Per-stage models")).toBeTruthy());
-    expect(view.queryByText(/Screening stages use it/)).toBeNull();
   });
 });
 

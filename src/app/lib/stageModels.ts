@@ -35,23 +35,18 @@ export type ModelStage =
 /** The reviewer's per-stage choices. Absent key means "use the default". */
 export type StageModels = Partial<Record<ModelStage, string>>;
 
-/**
- * The stages, in the order the sidebar lists them, with what each one asks of a
- * model. `what` is shown under the picker: "Text Extraction" does not tell a
- * reviewer why they might want a different model there, and "fills your
- * extraction form field by field" does.
- */
-export const MODEL_STAGES: { id: ModelStage; label: string; what: string }[] = [
-  { id: "home",               label: "Home",                 what: "chat, PICO, search strings, summaries" },
-  { id: "planning",           label: "Planning",             what: "per-database query adaptation" },
-  { id: "abstract-screening", label: "Abstract Screening",   what: "include/exclude verdicts on abstracts" },
-  { id: "full-text-screening", label: "Full-Text Screening", what: "eligibility against the full text" },
-  { id: "citation-snowball",  label: "Citation Snowball",    what: "ranking and screening cited work" },
-  { id: "table-extraction",   label: "Table Extraction",     what: "finding and naming results tables" },
-  { id: "text-extraction",    label: "Text Extraction",      what: "filling your extraction form" },
-  { id: "quality-assessment", label: "Quality Assessment",   what: "risk-of-bias judgements" },
-  { id: "meta-analysis",      label: "Meta-analysis",        what: "pulling effect sizes to pool" },
-  { id: "writing",            label: "Writing Assistant",    what: "protocol and manuscript drafting" },
+/** The stages, in the order the sidebar lists them. */
+export const MODEL_STAGES: { id: ModelStage; label: string }[] = [
+  { id: "home",               label: "Home" },
+  { id: "planning",           label: "Planning" },
+  { id: "abstract-screening", label: "Abstract Screening" },
+  { id: "full-text-screening", label: "Full-Text Screening" },
+  { id: "citation-snowball",  label: "Citation Snowball" },
+  { id: "table-extraction",   label: "Table Extraction" },
+  { id: "text-extraction",    label: "Text Extraction" },
+  { id: "quality-assessment", label: "Quality Assessment" },
+  { id: "meta-analysis",      label: "Meta-analysis" },
+  { id: "writing",            label: "Writing Assistant" },
 ];
 
 const STAGE_IDS = new Set<string>(MODEL_STAGES.map(s => s.id));

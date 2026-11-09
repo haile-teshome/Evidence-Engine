@@ -75,7 +75,6 @@ describe("the stage list", () => {
     expect(new Set(ids).size).toBe(ids.length);
     for (const stage of MODEL_STAGES) {
       expect(stage.label.length).toBeGreaterThan(0);
-      expect(stage.what.length).toBeGreaterThan(0);
     }
   });
 
