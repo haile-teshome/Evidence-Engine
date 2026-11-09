@@ -12,10 +12,34 @@
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -d "$HERE/../Resources/app" ]; then
   PROJECT="$(cd "$HERE/../Resources/app" && pwd)"
+  QROOT="$(cd "$HERE/../.." && pwd)"          # the .app itself, see below
 else
   PROJECT="$(cd "$HERE/../../.." && pwd)"
+  QROOT="$PROJECT"
 fi
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
+# A downloaded bundle arrives with com.apple.quarantine on every file in it, and
+# Gatekeeper kills a quarantined binary that carries no registered developer's
+# signature. That is every binary in runtime/python, so the interpreter this app
+# ships was killed the moment it was run, the launcher concluded the machine had
+# no Python, and it sent people to python.org to install one the app already had.
+# Node survives the same trip because the Node.js Foundation signs its binaries.
+#
+# By the time this runs the user has already approved the app, so clearing the
+# flag inside our own bundle adds no permission they have not given. Guarded on
+# the interpreter, so the recursive walk happens once rather than every launch,
+# and never in a source checkout, where nothing is quarantined.
+# It has to be the whole bundle: clearing the flag on Contents/Resources/app
+# alone leaves it on the .app above, and the interpreter is killed just the same.
+if xattr -p com.apple.quarantine "$PROJECT/runtime/python/bin/python3" >/dev/null 2>&1; then
+  if ! xattr -dr com.apple.quarantine "$QROOT" 2>/dev/null; then
+    # The one case it cannot be cleared: running from the mounted disk image,
+    # which is read-only. Say so, rather than failing deep in the launcher.
+    osascript -e 'display alert "Drag Evidence Engine to Applications first" message "Evidence Engine is running from the disk image, which macOS keeps read-only, so it cannot finish setting itself up. Drag it onto the Applications folder in that window and open it from there."' >/dev/null 2>&1
+    exit 1
+  fi
+fi
 
 # Prefer the bundled Node runtime (self-contained install); fall back to a
 # system Node (developer / from-source mode).

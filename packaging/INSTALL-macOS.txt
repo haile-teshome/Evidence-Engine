@@ -9,22 +9,20 @@ To install
 
 The first time you open it
 --------------------------
-macOS will say the developer cannot be verified. That is because this build is
-not signed by an Apple-registered developer, not because anything is wrong with
-it. You only have to get past this once.
+macOS will say it cannot check Evidence Engine for malicious software. That is
+because this build is not signed by an Apple-registered developer, not because
+anything is wrong with it. You only have to get past this once.
 
-Either:
+  1. Double-click Evidence Engine in Applications and click OK on the message.
+  2. Open System Settings, go to Privacy & Security, and scroll to the bottom.
+  3. Click "Open Anyway" next to Evidence Engine, then confirm. You may be asked
+     for your password or Touch ID.
 
-  - Control-click (or right-click) Evidence Engine in Applications, choose
-    Open, and then click Open in the dialog that appears.
-
-Or, if you are not offered an Open button:
-
-  - Open System Settings, go to Privacy & Security, scroll to the bottom, and
-    click "Open Anyway" next to Evidence Engine. You may be asked for your
-    password.
+On older versions of macOS you may instead be able to Control-click (or
+right-click) Evidence Engine, choose Open, and click Open in the dialog.
 
 After that it opens normally from the Dock or Applications like any other app.
+Everything it needs is inside it, so there is nothing else to install.
 
 
 What happens on first launch
