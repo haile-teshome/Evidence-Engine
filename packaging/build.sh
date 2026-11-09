@@ -68,11 +68,25 @@ echo "==> Evidence Engine $VERSION ($TARGET)"
 echo "==> [1/7] Building the frontend (dist/) with the dev toolchain"
 ( cd "$ROOT" && npm run build >/dev/null )
 
+# GitHub's release CDN answers these two assets with a 504 about half the time,
+# and a single unlucky fetch killed a whole four-platform release: three builds
+# green, one dead on the CPython tarball. Measured minutes apart, the arm64 and
+# x86_64 tarballs failed and succeeded in turn, so the odds of eight attempts
+# all failing are small. Written to a .part first, so a truncated download is
+# never left behind to be taken for a complete one on the next run.
+fetch() {
+  url="$1"; out="$2"
+  [ -f "$out" ] && return 0
+  curl -fL --retry 8 --retry-delay 10 --retry-all-errors --connect-timeout 20 \
+       "$url" -o "$out.part"
+  mv "$out.part" "$out"
+}
+
 echo "==> [2/7] Fetching Node $NODE_VERSION ($NODE_ARCH)"
-[ -f "$NODE_TGZ" ] || curl -fL "$NODE_URL" -o "$NODE_TGZ"
+fetch "$NODE_URL" "$NODE_TGZ"
 
 echo "==> [3/7] Fetching python-build-standalone $PY_VERSION ($PBS_TRIPLE)"
-[ -f "$PY_TGZ" ] || curl -fL "$PY_URL" -o "$PY_TGZ"
+fetch "$PY_URL" "$PY_TGZ"
 
 echo "==> [4/7] Assembling → $PAYLOAD"
 rm -rf "$OUT"; mkdir -p "$PAYLOAD"
