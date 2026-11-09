@@ -910,6 +910,16 @@ async function main() {
       "--enable-gpu-rasterization",
       "--enable-zero-copy",
       "--enable-accelerated-2d-canvas",
+      // Keep the renderer running when the window is not frontmost. Chrome
+      // marks an app window behind another window "occluded", which sets
+      // visibilityState to hidden and backgrounds the renderer: a 50ms timer
+      // measured 768ms, and animation stopped at one frame a minute. The app
+      // then catches up every time it is clicked into, which is what made it
+      // feel slow next to the same page in a browser tab. These are the flags
+      // Electron and Puppeteer set for the same reason.
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
     ], { stdio: "ignore" });
     heldWindow = win;   // keep a live reference so the child isn't garbage-collected
     win.on("error", () => { openDefaultBrowser(appLaunchUrl()); keepAlive(); });
