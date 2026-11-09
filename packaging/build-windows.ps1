@@ -39,11 +39,33 @@ Write-Host "==> Evidence Engine $Version (win-x64)"
 Write-Host "==> [1/7] Building the frontend (dist/)"
 Push-Location $Root; npm run build | Out-Null; Pop-Location
 
+# GitHub's release CDN answers these two assets with a 504 about half the time,
+# and one unlucky fetch fails the whole release: three platforms green and
+# nothing published. Retried, and written to a .part first so a truncated
+# download is never left behind to be taken for a complete one. Kept in step
+# with the same helper in packaging/build.sh.
+function Get-Asset {
+  param([string]$Url, [string]$Out)
+  if (Test-Path $Out) { return }
+  for ($i = 1; $i -le 8; $i++) {
+    try {
+      Invoke-WebRequest -Uri $Url -OutFile "$Out.part" -TimeoutSec 180
+      Move-Item -Force "$Out.part" $Out
+      return
+    } catch {
+      Remove-Item -Force -ErrorAction SilentlyContinue "$Out.part"
+      if ($i -eq 8) { throw "Could not download $Url after 8 attempts: $_" }
+      Write-Host "    attempt $i failed ($($_.Exception.Message)); retrying in 10s"
+      Start-Sleep -Seconds 10
+    }
+  }
+}
+
 Write-Host "==> [2/7] Fetching Node $NodeVersion (win-x64)"
-if (-not (Test-Path $NodeZip)) { Invoke-WebRequest -Uri $NodeUrl -OutFile $NodeZip }
+Get-Asset -Url $NodeUrl -Out $NodeZip
 
 Write-Host "==> [3/7] Fetching python-build-standalone $PyVersion (windows-msvc)"
-if (-not (Test-Path $PyTgz)) { Invoke-WebRequest -Uri $PyUrl -OutFile $PyTgz }
+Get-Asset -Url $PyUrl -Out $PyTgz
 
 Write-Host "==> [4/7] Assembling bundle -> $Stage"
 if (Test-Path $Out) { Remove-Item -Recurse -Force $Out }
