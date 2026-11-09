@@ -115,6 +115,27 @@ export type CellStatus = "reported" | "not_reported" | "unread";
  */
 export const NOT_REPORTED = "\u2014";
 
+/**
+ * A value the model wrote to mean "the paper does not say".
+ *
+ * The backend turns the phrasings it knows into a not_reported status, but a
+ * row extracted before that check existed still holds the words, and a model
+ * finds new ways to write them. A column of "Not explicitly reported" is the
+ * one thing a review table must not show, so the words become the dash here
+ * too. Narrow on purpose: only an adverb may sit between the two halves, so
+ * "No adverse events reported" stays the finding it is.
+ */
+const NOT_REPORTED_RE =
+  /^(?:n\.?r\.?|(?:data\s+)?(?:not|none)\s+(?:\w+ly\s+)?(?:reported|stated|specified|mentioned|described|given|provided|available|applicable|shown|discussed|assessed|listed)(?:\s+(?:in|by|for|within|anywhere)\b.*)?)$/i;
+
+export function looksNotReported(v: any): boolean {
+  const s = String(v ?? "").trim()
+    .replace(/^["'\u201c\u201d]+|["'\u201c\u201d]+$/g, "")
+    .replace(/\.+$/, "")
+    .trim();
+  return s !== "" && NOT_REPORTED_RE.test(s);
+}
+
 export type FormRow = {
   paper_id: string;
   title: string;
@@ -143,7 +164,7 @@ export function tabSheets(
   const cell = (r: FormRow, id: string) => {
     if (r.status?.[id] === "rejected") return "";
     const value = String(r.values?.[id] ?? "").trim();
-    if (value) return value;
+    if (value) return looksNotReported(value) ? NOT_REPORTED : value;
     // A blank column in an exported workbook reads as an extraction nobody
     // finished. "Not reported" is a finding, and the reviewer who checks this
     // against the paper needs to see which of the two it was.
@@ -2695,7 +2716,11 @@ export function TextExtractionPage() {
                         {shownFields.map(f => {
                           const st = r.status?.[f.id] || "accepted";
                           const m = r.meta?.[f.id];
-                          const val = String(r.values[f.id] ?? "").trim();
+                          const written = String(r.values[f.id] ?? "").trim();
+                          // The words the model used for silence read as the
+                          // dash, the same as a cell it left empty.
+                          const silent = looksNotReported(written);
+                          const val = silent ? "" : written;
                           const conf = m?.confidence || "none";
                           const dot = conf === "high" ? "bg-emerald-500" : conf === "low" ? "bg-amber-500" : "bg-muted-foreground/30";
                           return (
@@ -2750,7 +2775,7 @@ export function TextExtractionPage() {
                                         darker of the two, and the hover text
                                         and the source dialog say which it is. */}
                                     {val || (
-                                      <span className={r.cell?.[f.id] === "not_reported"
+                                      <span className={silent || r.cell?.[f.id] === "not_reported"
                                         ? "text-muted-foreground"
                                         : "text-muted-foreground/40"}>{NOT_REPORTED}</span>
                                     )}

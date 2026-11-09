@@ -8,7 +8,7 @@
 // compare sample sizes you had to open fourteen sheets.
 import { describe, it, expect } from "vitest";
 
-import { tabSheets, fieldsForStudy, NOT_REPORTED } from "../TextExtractionPage";
+import { tabSheets, fieldsForStudy, looksNotReported, NOT_REPORTED } from "../TextExtractionPage";
 
 const fields = [
   { id: "author", label: "First author", type: "text", options: [] },
@@ -161,5 +161,36 @@ describe("fieldsForStudy", () => {
     const stale = [{ name: "Gone", fieldIds: ["removed"], studies: ["p1"] },
                    { name: "Clinical", fieldIds: ["n"], studies: ["p1"] }];
     expect(fieldsForStudy(stale, fields as any, "p1").map(f => f.id)).toEqual(["n"]);
+  });
+});
+
+// A model does not always answer with an empty value when the paper is silent.
+// It writes "Not explicitly reported" into the cell, and that sat in the table
+// as text beside a hundred real values.
+describe("a value the model wrote to mean silence", () => {
+  it("reads the phrasings a model actually uses", () => {
+    for (const v of ["Not reported", "not reported", "Not explicitly reported",
+                     "Not reported in the article", "NR", "Not stated.",
+                     '"Not reported"', "Not applicable", "none reported",
+                     "not clearly described", "Data not shown"]) {
+      expect(looksNotReported(v)).toBe(true);
+    }
+  });
+
+  it("leaves a finding alone", () => {
+    // "No adverse events reported" is a result, not a silence, and so is a
+    // bare "None" in a conflicts-of-interest field.
+    for (const v of ["No adverse events reported", "None", "15.64", "272",
+                     "Reported", "No deaths occurred", "", null, undefined]) {
+      expect(looksNotReported(v)).toBe(false);
+    }
+  });
+
+  it("exports it as the dash, not as the words", () => {
+    const rows = [{ paper_id: "p1", title: "Bianconi 2024",
+                    values: { os: "Not explicitly reported" }, status: {} }] as any;
+    const [sheet] = tabSheets(
+      [{ name: "Survival", fieldIds: ["os"], studies: null }], fields as any, rows);
+    expect(sheet.body).toEqual([["Bianconi 2024", NOT_REPORTED]]);
   });
 });

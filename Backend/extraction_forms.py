@@ -37,6 +37,21 @@ NOT_REPORTED = {"null", "nan", "n/a", "na", "none reported", "not reported",
                 "not stated", "not applicable", "not specified", "undefined",
                 "-", "--", "---"}
 
+# The same thing in the words a model actually writes: "Not explicitly
+# reported", "Not reported in the article", "NR". Listing every spelling is
+# hopeless, so the shape is matched instead, and anything that gets past both
+# lands in the table as text, which is the one thing a review table must not
+# show. Narrow on purpose: only an adverb may sit between the two halves, so
+# "no adverse events reported" stays the finding it is.
+_NOT_REPORTED_RE = re.compile(
+    r"^(?:n\.?r\.?"
+    r"|(?:data\s+)?(?:not|none)\s+(?:\w+ly\s+)?"
+    r"(?:reported|stated|specified|mentioned|described|given|provided"
+    r"|available|applicable|shown|discussed|assessed|listed)"
+    r"(?:\s+(?:in|by|for|within|anywhere)\b.*)?)$",
+    re.IGNORECASE,
+)
+
 SYSTEM = (
     "You are a meticulous systematic-review data extractor. You fill a data "
     "extraction form from a study report. For EACH field you must (1) quote the "
@@ -52,7 +67,11 @@ def _blank(v: Any) -> bool:
     if v is None:
         return True
     if isinstance(v, str):
-        return v.strip() == "" or v.strip().lower() in NOT_REPORTED
+        # Stripped of the quotes and the full stop a model puts round it, so
+        # '"Not reported."' is read as the silence it is.
+        s = v.strip().strip('"\u201c\u201d\'').strip().rstrip(".").strip()
+        return (s == "" or s.lower() in NOT_REPORTED
+                or bool(_NOT_REPORTED_RE.match(s)))
     return False
 
 
