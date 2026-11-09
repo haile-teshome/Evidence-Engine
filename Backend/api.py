@@ -70,6 +70,7 @@ from urllib.parse import quote, urljoin
 
 # The version is read from the build stamp (packaged) or package.json (source),
 # so there is one place it is ever edited.
+import self_update
 import updates as _updates  # noqa: E402
 
 app = FastAPI(title="Evidence Engine API", version=_updates.current_version())
@@ -7050,6 +7051,31 @@ def update(force: bool = False):
     to ask on every load. `force` skips the cache for a manual re-check.
     """
     return _updates.check(force=force)
+
+
+class UpdateInstallRequest(BaseModel):
+    version: str
+
+
+@app.post("/api/update/install")
+def update_install(req: UpdateInstallRequest):
+    """Download the named release and unpack it beside the reviewer's data.
+
+    Nothing is replaced here. The launcher moves the staged copy into place
+    once the app has quit, because a bundle cannot be swapped underneath the
+    process running out of it.
+    """
+    if not _updates.is_newer(req.version, _updates.current_version()):
+        raise HTTPException(400, "That version is not newer than the one running.")
+    return self_update.start(req.version.strip().lstrip("vV"))
+
+
+@app.get("/api/update/status")
+def update_status():
+    """How the download is getting on, for the banner to poll."""
+    out = self_update.status()
+    out["staged"] = self_update.staged()
+    return out
 
 
 @app.get("/api/health")

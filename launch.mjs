@@ -554,6 +554,18 @@ function serveFrontend(distDir, port) {
       req.pipe(up);
       return;
     }
+    // The one thing the backend cannot do: quit the app and put the staged
+    // update in its place. The swap runs from a script OUTSIDE the bundle,
+    // after this process is gone, because a bundle cannot be replaced
+    // underneath the node that is executing from it.
+    if (req.url.startsWith("/__ee/apply-update")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      const ok = applyUpdateOnExit();
+      res.end(JSON.stringify(ok ? { ok: true } : { ok: false, detail: "No update is staged." }));
+      if (ok) setTimeout(() => cleanup(0), 400);   // let the answer reach the page
+      return;
+    }
+
     let rel = decodeURIComponent((req.url.split("?")[0] || "/"));
     if (rel.endsWith("/")) rel += "index.html";
     let file = path.join(distDir, rel);
@@ -980,6 +992,130 @@ async function warmUp() {
     log("Note: couldn't set up Ollama automatically (offline?). Local models need it —");
     log("      install from https://ollama.com, or pick a cloud model in the sidebar.");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Applying a staged update
+// ---------------------------------------------------------------------------
+//
+// The reviewer's work lives in ~/.evidence-engine and the app lives somewhere
+// else entirely, which is what makes this safe: only the bundle is replaced,
+// and the data directory is never touched. The old copy is kept until the new
+// one has been shown to start, so a bad update is recoverable rather than a
+// reinstall.
+const UPDATE_DIR = path.join(EE_CACHE, "updates");
+
+function stagedUpdate() {
+  try {
+    const d = JSON.parse(fs.readFileSync(path.join(UPDATE_DIR, "staged.json"), "utf8"));
+    return d && d.path && fs.existsSync(d.path) ? d : null;
+  } catch { return null; }
+}
+
+/**
+ * The .app or install folder to replace, or "" when there is nothing to.
+ *
+ * A source checkout returns "" on purpose. PROJECT is the repository there,
+ * and an updater that treated it as an install would move a developer's work
+ * aside and drop a packaged app on top of it. A packaged install is the only
+ * thing this is allowed to touch, and it is recognised by the bundle layout or
+ * by the VERSION stamp that packaging/build.sh writes and a clone never has.
+ */
+function installedRoot() {
+  const app = path.resolve(PROJECT, "..", "..", "..");   // Resources/app -> .app
+  if (!IS_WIN && app.endsWith(".app") && fs.existsSync(app)) return app;
+  const stamped = fs.existsSync(path.join(PROJECT, "VERSION"));
+  const checkout = fs.existsSync(path.join(PROJECT, ".git"));
+  return stamped && !checkout ? PROJECT : "";
+}
+
+/**
+ * Hand the swap to a detached script and report whether one was armed.
+ *
+ * Nothing is replaced in this process: the script waits for this pid to go,
+ * moves the old copy aside, puts the new one in place, and starts it again.
+ * If the new copy will not start it puts the old one back.
+ */
+function applyUpdateOnExit() {
+  const staged = stagedUpdate();
+  if (!staged) return false;
+  const target = installedRoot();
+  if (!target) {
+    log("Running from a source checkout, so there is no install to replace.");
+    return false;
+  }
+  // Like for like. A staged .app belongs over a .app and nothing else, which
+  // is the check that stops a wrong path turning a swap into a loss.
+  if (staged.path.endsWith(".app") !== target.endsWith(".app")) {
+    log("The staged update does not match this install, so it was not applied.");
+    return false;
+  }
+  try {
+    if (IS_WIN) {
+      // The Windows asset is the silent installer, which knows how to replace
+      // an install that is already there.
+      const cmd = path.join(UPDATE_DIR, "apply.cmd");
+      fs.writeFileSync(cmd, [
+        "@echo off",
+        `:wait`,
+        `tasklist /FI "PID eq ${process.pid}" | find "${process.pid}" >nul && (timeout /t 1 >nul & goto wait)`,
+        `"${staged.path}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`,
+        `del "%~f0"`,
+      ].join("\r\n"));
+      spawn("cmd", ["/c", cmd], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+      return true;
+    }
+    const sh = path.join(UPDATE_DIR, "apply.sh");
+    fs.writeFileSync(sh, applyScript(process.pid, staged.path, target), { mode: 0o755 });
+    spawn("/bin/bash", [sh], { detached: true, stdio: "ignore" }).unref();
+    return true;
+  } catch (e) {
+    log("Could not start the updater: " + e.message);
+    return false;
+  }
+}
+
+/**
+ * The swap, as a shell script so it outlives the process being replaced.
+ *
+ * Deliberately blunt about what it will not do: it refuses to run unless the
+ * staged copy is there and the target is the app, so a wrong path can never
+ * turn this into a delete of something else.
+ */
+function applyScript(pid, stagedPath, target) {
+  const open = process.platform === "darwin"
+    ? `open -a "$TARGET"`
+    : `nohup "$TARGET/launch.sh" >/dev/null 2>&1 &`;
+  return `#!/bin/bash
+# Replaces Evidence Engine with the staged copy, once the running one is gone.
+# The reviewer's reviews are in ~/.evidence-engine and are not touched here.
+set -u
+STAGED=${JSON.stringify(stagedPath)}
+TARGET=${JSON.stringify(target)}
+BACKUP="$TARGET.old-$$"
+
+[ -e "$STAGED" ] || exit 1
+[ -e "$TARGET" ] || exit 1
+
+# Wait for the app to quit, but never forever.
+for _ in $(seq 1 60); do
+  kill -0 ${pid} 2>/dev/null || break
+  sleep 1
+done
+
+mv "$TARGET" "$BACKUP" || exit 1
+if mv "$STAGED" "$TARGET"; then
+  rm -rf "$BACKUP"
+else
+  # Could not put the new one in place: restore what was working.
+  mv "$BACKUP" "$TARGET"
+  exit 1
+fi
+
+rm -f ${JSON.stringify(path.join(path.dirname(stagedPath), "staged.json"))}
+sleep 1
+${open}
+`;
 }
 
 function keepAlive() {
