@@ -4,12 +4,14 @@
 //
 // `apiFetch` is mocked. The cases that matter are the ones that decide whether
 // a banner appears: a failed check must be silent rather than throwing into a
-// page load, and a dismissal must be remembered per version so the next release
-// still notifies.
+// page load, and a dismissal must wear off, because a notice that can only be
+// answered once is the same as no notice for anyone who was busy that day.
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 import * as backendClient from "../backendClient";
-import { getUpdate, dismiss, isDismissed, shouldNotify, type UpdateInfo } from "../updates";
+import {
+  getUpdate, dismiss, isDismissed, shouldNotify, SNOOZE_MS, type UpdateInfo,
+} from "../updates";
 
 function info(over: Partial<UpdateInfo> = {}): UpdateInfo {
   return {
@@ -67,6 +69,30 @@ describe("dismissal", () => {
     expect(isDismissed("v2.0.0")).toBe(true);
   });
 
+  it("wears off, so the release is offered again", () => {
+    const now = Date.UTC(2026, 10, 9);
+    dismiss("v2.0.0", now);
+    expect(isDismissed("v2.0.0", now + SNOOZE_MS - 1000)).toBe(true);
+    expect(isDismissed("v2.0.0", now + SNOOZE_MS + 1000)).toBe(false);
+  });
+
+  it("treats a dismissal written by an older build as spent", () => {
+    // Those were "never again for this version". Someone upgrading into this
+    // build should start hearing about releases, not stay silenced forever.
+    localStorage.setItem("ee.update.dismissed", "v2.0.0");
+    expect(isDismissed("v2.0.0")).toBe(false);
+  });
+
+  it("survives storage it cannot read or write", () => {
+    // A private window, or site data blocked. The suite installs its own
+    // Storage object, so the spies go on that rather than on the prototype.
+    const blocked = () => { throw new Error("blocked"); };
+    vi.spyOn(globalThis.localStorage, "getItem").mockImplementation(blocked);
+    vi.spyOn(globalThis.localStorage, "setItem").mockImplementation(blocked);
+    expect(() => dismiss("v2.0.0")).not.toThrow();
+    expect(isDismissed("v2.0.0")).toBe(false);   // shown, rather than lost
+  });
+
   it("does not suppress a later release", () => {
     dismiss("v2.0.0");
     expect(isDismissed("v3.0.0")).toBe(false);
@@ -101,6 +127,12 @@ describe("shouldNotify", () => {
   it("stays silent once that version is dismissed", () => {
     dismiss("v2.0.0");
     expect(shouldNotify(info())).toBe(false);
+  });
+
+  it("speaks up again after the dismissal wears off", () => {
+    const now = Date.now();
+    dismiss("v2.0.0", now - SNOOZE_MS - 1000);
+    expect(shouldNotify(info())).toBe(true);
   });
 
   it("notifies again when a newer release follows the dismissed one", () => {
