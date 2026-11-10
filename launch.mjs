@@ -467,10 +467,14 @@ const MIME = {
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
   ".webp": "image/webp", ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
   ".map": "application/json", ".csv": "text/csv", ".wasm": "application/wasm", ".txt": "text/plain",
+  // Chrome will not treat the page as installable unless the manifest arrives
+  // as a manifest; served as a generic blob it is ignored.
+  ".webmanifest": "application/manifest+json",
 };
 
 // Text-ish assets worth gzipping (images/fonts/wasm are already compressed).
-const COMPRESSIBLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".svg", ".map", ".csv", ".txt"]);
+const COMPRESSIBLE = new Set([".html", ".js", ".mjs", ".css", ".json", ".svg", ".map", ".csv", ".txt",
+                              ".webmanifest"]);
 
 // Send one static file with the same performance headers a real static server
 // gives you: gzip when the client accepts it, long-lived immutable caching for
@@ -510,6 +514,10 @@ function sendFile(file, stat, req, res) {
 // means the packaged bundle needs no node_modules at runtime — only the built
 // dist/. Streaming-safe so backend SSE endpoints work.
 function serveFrontend(distDir, port) {
+  // Other launchers read the file, not our variable, so it has to stay fresh
+  // for as long as a window is holding a stream open.
+  const refresh = setInterval(() => { if (liveWindows > 0) recordBeat(true); }, 5000);
+  if (typeof refresh.unref === "function") refresh.unref();
   const server = http.createServer((req, res) => {
     if (req.url.startsWith("/api")) {
       const up = http.request(
@@ -554,6 +562,52 @@ function serveFrontend(distDir, port) {
       req.pipe(up);
       return;
     }
+    // The open window, holding the line (see index.html). This connection is
+    // the only signal the launcher has that the app is still on screen, and
+    // losing it is how it learns the window is gone — at once, not on a timer.
+    if (req.url.startsWith("/__ee/stream")) {
+      res.writeHead(200, {
+        "content-type": "text/event-stream",
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+      });
+      res.write(": open\n\n");
+      liveWindows += 1;
+      recordBeat(true);
+      // Ours, on the server side, where nothing throttles it: proxies and
+      // browsers drop a stream that says nothing for long enough.
+      const ping = setInterval(() => { try { res.write(": ping\n\n"); } catch { /* gone */ } }, 20000);
+      let ended = false;
+      const ended_ = () => {
+        if (ended) return;
+        ended = true;
+        clearInterval(ping);
+        liveWindows = Math.max(0, liveWindows - 1);
+        if (liveWindows === 0) recordBeat(false);
+      };
+      req.on("close", ended_);
+      res.on("close", ended_);
+      return;
+    }
+
+    // The Dock icon was clicked again. Bring the window back, opening a fresh
+    // one when the reviewer had closed it, so returning to a review costs a
+    // keystroke rather than a cold start.
+    if (req.url.startsWith("/__ee/open-window")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      void showWindow();
+      return;
+    }
+
+    // Quit chosen from the Dock. The whole thing goes: window, engine, models.
+    if (req.url.startsWith("/__ee/quit")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+      setTimeout(() => cleanup(0), 300);
+      return;
+    }
+
     // The one thing the backend cannot do: quit the app and put the staged
     // update in its place. The swap runs from a script OUTSIDE the bundle,
     // after this process is gone, because a bundle cannot be replaced
@@ -598,64 +652,96 @@ function killChild(child) {
   } catch { /* already gone */ }
 }
 
-const APP_PROFILE = path.join(os.homedir(), ".evidence-engine-appwin");
-const DEBUG_PORT = 9765;   // Chrome DevTools port for the app window (see monitorWindow)
+// The app window opens in the browser the reviewer already has running, not in
+// a second Chrome of our own. A dedicated instance meant a second Chrome in the
+// Dock beside the app's own icon, and it had to cold-start its own 300 MB
+// profile on every first launch; handing the URL to the running Chrome costs
+// nothing and shows one icon.
+//
+// That leaves no DevTools port to watch, and no process to count: the window is
+// one window inside a browser full of other windows. So the window holds a
+// connection open instead, and the launcher watches the connection.
+//
+// A connection, not a ping. The first attempt had the page send a heartbeat on
+// a timer, and Chrome throttles timers in a window that is not in front to one
+// tick a MINUTE: the app was declared closed, twice, while it sat there open.
+// A socket is not a timer. It stays open while the window does and closes the
+// instant it doesn't, however buried the window is.
+//
+// The state is mirrored to a file because a SECOND launcher (a Dock click while
+// one is running) has to be able to read it too.
+const BEAT_FILE = path.join(EE_CACHE, "window.beat");
+const BEAT_GRACE_MS = 12000;   // the file is refreshed every 5s while a window is up
+let liveWindows = 0;
 
-// Is any Chrome process still using our dedicated app profile? Chrome's command
-// line carries `--user-data-dir=...evidence-engine-appwin`, and so do all its
-// helper/renderer processes, so this is true exactly while the window is open.
-function appWindowAlive() {
-  const marker = path.basename(APP_PROFILE);
+function recordBeat(alive = true) {
   try {
-    if (IS_WIN) {
-      const r = spawnSync("wmic", ["process", "get", "CommandLine"], { encoding: "utf8" });
-      return (r.stdout || "").includes(marker);
-    }
-    const r = spawnSync("pgrep", ["-f", marker], { encoding: "utf8" });
-    return r.status === 0 && (r.stdout || "").trim() !== "";
+    fs.mkdirSync(EE_CACHE, { recursive: true });
+    fs.writeFileSync(BEAT_FILE, String(alive ? Date.now() : 0));
+  } catch { /* ignore */ }
+}
+
+/** Is an Evidence Engine window open anywhere? */
+function windowAlive() {
+  try {
+    const t = Number(fs.readFileSync(BEAT_FILE, "utf8")) || 0;
+    return t > 0 && Date.now() - t < BEAT_GRACE_MS;
   } catch { return false; }
 }
 
-// A previous unclean exit can leave Chrome's Singleton* lock files behind, which
-// makes the next launch fail to open a window (it silently hands off instead).
-// Clear them only when no Chrome process is actually using the profile.
-function clearStaleProfileLock() {
-  if (appWindowAlive()) return;
-  for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) {
-    try { fs.rmSync(path.join(APP_PROFILE, f), { force: true }); } catch { /* ignore */ }
-  }
+const IS_MAC = process.platform === "darwin";
+
+/** Run an AppleScript, returning its output (empty on any failure). */
+function osa(script) {
+  if (!IS_MAC) return "";
+  try {
+    const r = spawnSync("osascript", ["-e", script], { encoding: "utf8" });
+    return (r.stdout || "").trim();
+  } catch { return ""; }
 }
 
-// Mark the profile as having exited cleanly so Chrome never shows a
-// "restore pages?" bubble or reopens an extra empty window on the next launch —
-// that stray second window is what kept the instance (and the launcher) alive
-// after the app window was closed.
-function markProfileCleanExit() {
-  const prefs = path.join(APP_PROFILE, "Default", "Preferences");
-  try {
-    if (!fs.existsSync(prefs)) return;
-    const d = JSON.parse(fs.readFileSync(prefs, "utf8"));
-    d.profile = d.profile || {};
-    d.profile.exit_type = "Normal";
-    d.profile.exited_cleanly = true;
-    fs.writeFileSync(prefs, JSON.stringify(d));
-  } catch { /* worst case: a restore bubble appears once — harmless */ }
+// `running of application` asks without launching it, which matters: the plain
+// `tell application "Google Chrome"` form would START Chrome just to look.
+const CHROME_TELL = (body) => `
+if not (running of application "Google Chrome") then return "no"
+tell application "Google Chrome"
+${body}
+end tell`;
+
+/** Raise the existing app window. True if there was one. */
+function raiseAppWindow() {
+  const out = osa(CHROME_TELL(`
+  set found to false
+  repeat with w in windows
+    repeat with t in tabs of w
+      if (URL of t as string) starts with ${JSON.stringify(appUrl())} then
+        set found to true
+        set index of w to 1
+        exit repeat
+      end if
+    end repeat
+    if found then exit repeat
+  end repeat
+  if found then activate
+  return (found as string)`));
+  return out === "true";
 }
 
-// How many app WINDOWS/tabs are open, via Chrome's DevTools endpoint. We can't
-// use process presence: on macOS, closing the app window leaves the Chrome
-// instance running windowless (background processes persist), so a
-// process-based check would think the window is still open forever. The
-// DevTools "page" targets disappear the instant the window is closed.
-async function appPageCount() {
-  try {
-    const res = await fetch(`http://localhost:${DEBUG_PORT}/json`);
-    if (!res.ok) return 0;
-    const list = await res.json();
-    return (list || []).filter((t) => t.type === "page").length;
-  } catch {
-    return 0;   // DevTools unreachable → instance gone → treat as closed
-  }
+/** Close the app's window, and only it: the reviewer's browser stays open. */
+function closeAppWindow() {
+  osa(CHROME_TELL(`
+  set doomed to {}
+  repeat with w in windows
+    repeat with t in tabs of w
+      if (URL of t as string) starts with ${JSON.stringify(appUrl())} then set end of doomed to t
+    end repeat
+  end repeat
+  repeat with t in doomed
+    try
+      close t
+    end try
+  end repeat
+  return "ok"`));
 }
 
 // Single-instance lock: the running launcher records its pid; a launch that
@@ -664,8 +750,8 @@ async function appPageCount() {
 // flaky — that flakiness is what let a second click fall through and open a
 // stray blank window.
 // Line 1 is the pid. Line 2, once the port is settled, is the URL the app is
-// served at: a later launch reads it to re-open the window on a machine with no
-// Chromium browser, where there is no DevTools port to activate.
+// served at: the Dock applet reads it to reach a running launcher, since the
+// port is not fixed and it has no other way to find out which one we settled on.
 function lockLines() {
   try { return fs.readFileSync(LOCK_FILE, "utf8").split("\n"); } catch { return []; }
 }
@@ -675,10 +761,6 @@ function launcherLockAlive() {
     if (pid && pid !== process.pid) { process.kill(pid, 0); return true; }   // throws if dead
   } catch { /* missing, stale, or dead pid */ }
   return false;
-}
-function lockAppUrl() {
-  const url = (lockLines()[1] || "").trim();
-  return /^http:\/\/(localhost|127\.0\.0\.1):\d+\/?$/.test(url) ? url : "";
 }
 function writeLock(url) {
   try {
@@ -696,23 +778,13 @@ function clearLock() {
 // Bring an already-running app window to the front, via the DevTools activate
 // endpoint (used when the app is launched again while it's already open).
 async function focusExistingWindow() {
-  try {
-    const res = await fetch(`http://localhost:${DEBUG_PORT}/json`);
-    if (res.ok) {
-      const list = await res.json();
-      const page = (list || []).find((t) => t.type === "page");
-      if (page && page.id) {
-        await fetch(`http://localhost:${DEBUG_PORT}/json/activate/${page.id}`).catch(() => {});
-        return;
-      }
-    }
-  } catch { /* no app-window Chrome listening on the debug port */ }
-  // With no Chromium browser the window is an ordinary browser tab, which the
-  // user may simply have closed, and there is no DevTools port to activate.
-  // Re-open the recorded URL instead. Without this, clicking the icon again did
-  // nothing at all and the app looked dead until the launcher was killed by hand.
-  const url = lockAppUrl();
-  if (url) openDefaultBrowser(url);
+  if (raiseAppWindow()) return;
+  // No window to raise. Opening the app SOMEWHERE ELSE here is what used to put
+  // two of it on screen at once — the old fallback reached for the default
+  // browser whenever this check was merely slow, so a reviewer who already had
+  // the app open got a second copy of it in another window. If there is no
+  // window, open one the single way the app is ever opened.
+  if (!windowAlive()) await showWindow();
 }
 
 // True if an Evidence Engine window is already open. Primary signal is a live
@@ -721,26 +793,35 @@ async function focusExistingWindow() {
 // server up AND an app-profile Chrome window process alive" as open too.
 async function alreadyOpen() {
   if (launcherLockAlive()) return true;   // instant, filesystem — most reliable
-  for (let i = 0; i < 3; i++) {
-    if ((await appPageCount()) >= 1) return true;
-    await sleep(200);
-  }
-  if ((await httpOk(appUrl())) && appWindowAlive()) return true;
+  if (windowAlive()) return true;
   return false;
 }
 
 // Reliable shutdown for macOS/Linux: wait for the app window to appear, then for
 // it to close (no DevTools "page" targets left), then tear everything down.
+// Set by the Dock applet, which owns the app's lifetime when it is there: the
+// tile stays, closing the window is not quitting, and Quit from the Dock is.
+// Without it (a source checkout, Linux, a plain `node launch.mjs`) closing the
+// window still has to stop everything, or the engine would run on with nothing
+// on screen to stop it with.
+const DOCK_OWNED = process.env["EE_DOCK_OWNER"] === "1";
+let watchingWindow = false;
+
 async function monitorWindow() {
+  if (watchingWindow) return;      // showWindow may be called many times
+  watchingWindow = true;
   let appeared = false;
-  for (let i = 0; i < 60 && !appeared; i++) { appeared = (await appPageCount()) >= 1; if (!appeared) await sleep(500); }
-  if (!appeared) return;   // never confirmed a window — leave Ctrl-C in charge
-  // Require several consecutive empty reads before declaring the window closed,
-  // so a transient DevTools hiccup doesn't shut a live app down by mistake.
-  let gone = 0;
-  while (gone < 4) {
-    await sleep(1000);
-    if ((await appPageCount()) >= 1) gone = 0; else gone++;
+  for (let i = 0; i < 120 && !appeared; i++) { appeared = windowAlive(); if (!appeared) await sleep(500); }
+  if (!appeared) { watchingWindow = false; return; }   // never reported in — leave Ctrl-C in charge
+  // windowAlive() already allows three missed beats, which is what rides out a
+  // page too busy to beat (a long import) without shutting a live app down.
+  while (windowAlive()) await sleep(1000);
+  if (DOCK_OWNED) {
+    // The reviewer closed the window, not the app. Everything stays warm so
+    // clicking the Dock icon puts them back in their review immediately.
+    log("App window closed. Still running: click the Dock icon to come back.");
+    watchingWindow = false;
+    return;
   }
   log("App window closed.");
   cleanup(0);
@@ -775,12 +856,8 @@ async function reclaimFromPriorInstances() {
     for (const pid of pids) { try { process.kill(pid, "SIGTERM"); } catch { /* gone */ } }
     for (let i = 0; i < 40 && priorLauncherPids().length; i++) await sleep(250);
   }
-  // A launcher-less Chrome can still hold our profile (it survives its launcher).
-  if (appWindowAlive()) {
-    try { spawnSync("pkill", ["-f", path.basename(APP_PROFILE)], { stdio: "ignore" }); } catch { /* ignore */ }
-    for (let i = 0; i < 20 && appWindowAlive(); i++) await sleep(200);
-  }
-  clearStaleProfileLock();
+  // Nothing else to reclaim: the window belongs to the reviewer's own browser,
+  // which we never start, never kill, and never hold a lock on.
 }
 
 function cleanup(code = 0) {
@@ -789,10 +866,11 @@ function cleanup(code = 0) {
   shuttingDown = true;   // a child exiting now is us quitting, not a crash
   log("\nShutting down Evidence Engine...");
   for (const c of started) killChild(c);
-  // Also kill the app-window Chrome instance itself — on macOS it lingers
-  // windowless after the window is closed, which would keep the Dock icon lit
-  // and hold the profile. (On Windows it exits on its own.)
-  if (!IS_WIN) { try { spawnSync("pkill", ["-f", path.basename(APP_PROFILE)], { stdio: "ignore" }); } catch { /* ignore */ } }
+  // Close the app's own window, and nothing else. The browser around it is the
+  // reviewer's, with their other work in it: quitting Evidence Engine closes
+  // one window, never their Chrome.
+  closeAppWindow();
+  recordBeat(false);
   clearLock();
   log("Stopped.");
   process.exit(code);
@@ -902,69 +980,53 @@ async function main() {
   if (!ok) { log("Frontend did not come up in time."); cleanup(1); return; }
   writeLock(appUrl());   // the port is settled, so a later launch can find this window
 
-  // 5) open in its own window and wait; closing it shuts everything down
-  clearStaleProfileLock();   // recover from any previous unclean exit
-  markProfileCleanExit();    // never restore a stray empty window on launch
-  const browser = findChrome();
-  if (browser) {
-    log("Opening Evidence Engine — CLOSE THE APP WINDOW to shut everything down.");
-    const win = spawn(browser, [
-      `--app=${appLaunchUrl()}`,
-      `--user-data-dir=${APP_PROFILE}`,
-      `--remote-debugging-port=${DEBUG_PORT}`,
-      "--no-first-run", "--no-default-browser-check",
-      "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
-      // Force hardware acceleration. A second Chrome instance with its own
-      // profile can fall back to software rendering, which makes clicking and
-      // scrolling feel sluggish next to a normal tab. These make the app window
-      // render on the GPU like a normal tab does.
-      "--ignore-gpu-blocklist",
-      "--enable-gpu-rasterization",
-      "--enable-zero-copy",
-      "--enable-accelerated-2d-canvas",
-      // Keep the renderer running when the window is not frontmost. Chrome
-      // marks an app window behind another window "occluded", which sets
-      // visibilityState to hidden and backgrounds the renderer: a 50ms timer
-      // measured 768ms, and animation stopped at one frame a minute. The app
-      // then catches up every time it is clicked into, which is what made it
-      // feel slow next to the same page in a browser tab. These are the flags
-      // Electron and Puppeteer set for the same reason.
-      "--disable-background-timer-throttling",
-      "--disable-backgrounding-occluded-windows",
-      "--disable-renderer-backgrounding",
-    ], { stdio: "ignore" });
-    heldWindow = win;   // keep a live reference so the child isn't garbage-collected
-    win.on("error", () => { openDefaultBrowser(appLaunchUrl()); keepAlive(); });
-    if (IS_WIN) {
-      // Windows: rely on the child's exit (handoff-aware), as before.
-      const openedAt = Date.now();
-      win.on("exit", () => {
-        if (Date.now() - openedAt < 4000) {
-          log("An Evidence Engine window is already open.");
-          if (started.length === 0) process.exit(0);
-          keepAlive();
-        } else {
-          cleanup(0);
-        }
-      });
-    } else {
-      // macOS/Linux: Chrome can let our spawned child exit immediately after
-      // handing the URL to another process, so we cannot trust its exit event.
-      // Stay alive and drive shutdown off whether the profile's window is still
-      // open. This is what makes closing the window reliably free everything so
-      // a reopen works without killing processes by hand.
-      keepAlive();
-      monitorWindow();
-    }
-  } else {
-    openDefaultBrowser(appLaunchUrl());
-    keepAlive();
-  }
+  // 5) open in its own window
+  showWindow();
 
   // 6) Warm up the backend + Ollama in the BACKGROUND. The window is already
   //    open, so none of this delays first paint; the UI reflects progress via
   //    its own /api/health poll.
   warmUp();
+}
+
+/**
+ * Open the app window, or bring the open one forward.
+ *
+ * Called at startup and again whenever the Dock icon is clicked, because a
+ * reviewer who closed the window and came back wants it open, not a cold
+ * start. The engine keeps running in between, which is what makes coming back
+ * instant; the Dock icon's Quit is what stops it.
+ */
+async function showWindow() {
+  if (windowAlive() && raiseAppWindow()) return;
+  const browser = findChrome();
+  if (browser) {
+    log("Opening Evidence Engine.");
+    // No --user-data-dir and no debugging port, which is the whole point:
+    // Chrome's process singleton hands --app to the browser the reviewer
+    // already has running, and that browser opens the window. One Chrome in
+    // the Dock, and no second 300 MB profile to cold-start before anything
+    // appears. The flags that used to be here (GPU, occlusion) existed to make
+    // a second instance behave like a normal window; a normal window needs no
+    // persuading, and a handed-off command line would ignore them anyway.
+    // Detached: a launcher that is only here to re-open the window exits the
+    // moment it has asked, and the asking must outlive it.
+    const win = spawn(browser, [
+      `--app=${appLaunchUrl()}`,
+      "--no-first-run", "--no-default-browser-check",
+    ], { stdio: "ignore", detached: true });
+    win.unref();
+    heldWindow = win;   // keep a live reference so the child isn't garbage-collected
+    win.on("error", () => { openDefaultBrowser(appLaunchUrl()); keepAlive(); });
+    // The child exits the moment it has handed the URL over, so its exit says
+    // nothing about the window. The page reports in instead, on every platform.
+    keepAlive();
+    monitorWindow();
+  } else {
+    openDefaultBrowser(appLaunchUrl());
+    keepAlive();
+    monitorWindow();
+  }
 }
 
 // Background warm-up (runs after the window is already open). The backend is

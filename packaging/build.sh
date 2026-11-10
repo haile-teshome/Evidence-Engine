@@ -158,14 +158,46 @@ echo "==> [7/7] Packaging"
 mkdir -p "$ROOT/dist-bundle"
 
 if [ "$KIND" = "mac" ]; then
-  # The .app wrapper: the launcher script, the icon, and a version-stamped plist.
+  # The .app wrapper is an AppleScript applet, not a shell script, and that is
+  # the whole point: an applet is a real app, so it owns a Dock tile with the
+  # Evidence Engine icon and it is told when that tile is clicked. A shell
+  # script is neither, which is why the icon used to vanish a second after
+  # launch and leave a Chrome tile in its place. osacompile ships with macOS,
+  # so this needs nothing installed.
+  #
+  # Built into a staging path first, because osacompile writes a whole bundle
+  # and the payload has already been assembled inside $APP.
+  echo "    building the Dock applet"
+  APPLET="$OUT/applet.app"
+  rm -rf "$APPLET"
+  osacompile -s -o "$APPLET" "$ROOT/packaging/EvidenceEngine.applescript"
   mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-  cp "$ROOT/Evidence Engine.app/Contents/MacOS/EvidenceEngine" "$APP/Contents/MacOS/"
-  cp "$ROOT/Evidence Engine.app/Contents/Resources/AppIcon.icns" "$APP/Contents/Resources/"
-  chmod +x "$APP/Contents/MacOS/EvidenceEngine"
-  sed -e "s|<key>CFBundleVersion</key><string>[^<]*</string>|<key>CFBundleVersion</key><string>$VERSION</string>|" \
-      -e "s|<key>CFBundleShortVersionString</key><string>[^<]*</string>|<key>CFBundleShortVersionString</key><string>$VERSION</string>|" \
-      "$ROOT/Evidence Engine.app/Contents/Info.plist" > "$APP/Contents/Info.plist"
+  cp -R "$APPLET/Contents/MacOS/." "$APP/Contents/MacOS/"
+  cp -R "$APPLET/Contents/Resources/." "$APP/Contents/Resources/"
+  cp "$APPLET/Contents/Info.plist" "$APP/Contents/Info.plist"
+  cp "$APPLET/Contents/PkgInfo" "$APP/Contents/PkgInfo" 2>/dev/null || true
+  # The applet's own ad-hoc signature covers only the applet's files, and the
+  # payload lands beside them; the bundle is re-signed as a whole below.
+  rm -rf "$APP/Contents/_CodeSignature"
+  rm -rf "$APPLET"
+  # The applet's own generic icon is replaced by ours, under the name its
+  # plist already points at.
+  cp "$ROOT/Evidence Engine.app/Contents/Resources/AppIcon.icns" "$APP/Contents/Resources/applet.icns"
+  cp "$ROOT/Evidence Engine.app/Contents/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
+  # Identity: the name in the menu bar and the Dock, and the version macOS and
+  # the update check report.
+  /usr/libexec/PlistBuddy -c "Set :CFBundleName Evidence Engine" \
+    -c "Set :CFBundleIconFile applet" \
+    "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
+  for k in CFBundleDisplayName CFBundleIdentifier CFBundleShortVersionString CFBundleVersion; do
+    case "$k" in
+      CFBundleDisplayName) v="Evidence Engine" ;;
+      CFBundleIdentifier)  v="com.evidenceengine.launcher" ;;
+      *)                   v="$VERSION" ;;
+    esac
+    /usr/libexec/PlistBuddy -c "Set :$k $v" "$APP/Contents/Info.plist" >/dev/null 2>&1 \
+      || /usr/libexec/PlistBuddy -c "Add :$k string $v" "$APP/Contents/Info.plist" >/dev/null 2>&1 || true
+  done
 
   # Ad-hoc signature. It does not avoid Gatekeeper's "unidentified developer"
   # prompt (only a Developer ID and notarization do, see packaging/README.md),
