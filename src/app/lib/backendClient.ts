@@ -45,6 +45,9 @@ export function clearAuthSession(): void {
   } catch { /* ignore */ }
 }
 
+/** An error from the backend, carrying the HTTP status it came back with. */
+export type ApiError = Error & { status?: number };
+
 export async function apiFetch(path: string, opts: RequestInit = {}) {
   const token = getAuthToken();
   const res = await fetch(`/api${path}`, {
@@ -67,7 +70,13 @@ export async function apiFetch(path: string, opts: RequestInit = {}) {
   if (!res.ok) {
     const msg = json?.detail || json?.error || text || `Request failed (${res.status})`;
     console.error(`API ${path} failed: ${typeof msg === "string" ? msg : JSON.stringify(msg)}`);
-    throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    // The status rides along on the error. "The engine has not started yet"
+    // and "the engine says this token is no good" are both a failed call, and
+    // callers that treat them the same get it wrong in one direction or the
+    // other: see the session restore in auth.tsx.
+    const err = new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    (err as ApiError).status = res.status;
+    throw err;
   }
   return json;
 }
