@@ -1,6 +1,7 @@
 import { startTransition, useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Skeleton } from "./ui/skeleton";
+import { bootStep } from "../lib/boot";
 
 /** The grey placeholder a page shows while its content is on the way. Shaped like
  *  the pages it stands in for (title row, toolbar, table rows) so the hand-off to
@@ -37,6 +38,18 @@ export function DeferredPage({ children }: { children: ReactNode }) {
     const id = setTimeout(() => startTransition(() => setReady(true)), SETTLE_MS);
     return () => clearTimeout(id);
   }, []);
+  // A page with content on it is the first moment the app looks like the app,
+  // which is what the startup screen has been waiting for. Two frames: one to
+  // commit this content, one to paint it. After the first page it is a no-op.
+  useEffect(() => {
+    if (!ready) return;
+    const hasRaf = typeof requestAnimationFrame === "function";
+    const after = (fn: () => void) => hasRaf ? requestAnimationFrame(fn) : window.setTimeout(fn, 16);
+    const stop = (id: number) => hasRaf ? cancelAnimationFrame(id) : window.clearTimeout(id);
+    let inner = 0;
+    const outer = after(() => { inner = after(() => bootStep("workspace", "done")); });
+    return () => { stop(outer); if (inner) stop(inner); };
+  }, [ready]);
   return (
     // The min-height holds the page's footprint while nothing is ready, so the
     // scrollbar does not vanish and reappear across the switch.

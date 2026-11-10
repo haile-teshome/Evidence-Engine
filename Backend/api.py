@@ -71,6 +71,12 @@ from urllib.parse import quote, urljoin
 # The version is read from the build stamp (packaged) or package.json (source),
 # so there is one place it is ever edited.
 import self_update
+import mimetypes
+
+# Python does not know this one, and a manifest served as a generic blob is
+# ignored by the browser, which is what decides whether the app can be
+# installed with its own icon rather than Chrome's.
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 import updates as _updates  # noqa: E402
 
 app = FastAPI(title="Evidence Engine API", version=_updates.current_version())

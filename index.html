@@ -4,13 +4,198 @@
     <head>
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>Systematic Review Platform</title>
-      <style>html, body { height: 100%; margin: 0; } #root { height: 100%; }</style>
+      <title>Evidence Engine</title>
+      <link rel="icon" href="/icon-192.png" />
+      <link rel="apple-touch-icon" href="/icon-192.png" />
+      <!-- The app window is a Chrome window, so the Dock shows Chrome's own
+           icon and name. A manifest is what lets Chrome install this as an app
+           with its own icon and Dock tile instead. -->
+      <link rel="manifest" href="/manifest.webmanifest" />
+      <style>
+        html, body { height: 100%; margin: 0; }
+        #root { height: 100%; }
+
+        /* The startup screen, painted by the parser before a line of JavaScript
+           runs, and the only thing on screen until the app is genuinely ready.
+           boot.ts ticks the steps off and takes it away.
+
+           It sits OUTSIDE #root on purpose. React empties #root when it mounts,
+           and a splash in there was replaced by whatever React drew next: a
+           spinner born in the middle of a busy main thread, which never gets to
+           start animating and so sits frozen. This one is built by the parser,
+           its animation is already running on the compositor before the bundle
+           executes, and it keeps moving through any block.
+
+           Only transform and opacity are animated here, for that reason. The
+           step rows change colour, which needs the main thread, but they are
+           the part that is allowed to wait: the bar carries "still working".
+
+           The colours are the app's own tokens (styles/theme.css), so the
+           hand-off is to the same palette rather than to a different one. The
+           app does not follow the system theme, so neither does this. */
+        :root {
+          --ee-bg: #fafaf7; --ee-fg: #1c1c1a; --ee-dim: #6b6a64;
+          --ee-line: rgba(28, 28, 26, 0.12); --ee-accent: #0d6b66; --ee-on-accent: #ffffff;
+        }
+        html.dark {
+          --ee-bg: #212121; --ee-fg: #fafafa; --ee-dim: #a3a3a3;
+          --ee-line: rgba(255, 255, 255, 0.14); --ee-accent: #6fa894; --ee-on-accent: #14241f;
+        }
+        body { background: var(--ee-bg); }
+
+        .ee-boot {
+          position: fixed; inset: 0; z-index: 2147483000;
+          display: flex; align-items: center; justify-content: center;
+          background: var(--ee-bg); color: var(--ee-fg);
+          font: 400 13.5px/1.45 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+          opacity: 1; transition: opacity .34s cubic-bezier(.4, 0, .2, 1);
+        }
+        .ee-boot--gone { opacity: 0; pointer-events: none; }
+        .ee-boot__panel {
+          display: flex; flex-direction: column; align-items: center; width: 300px;
+        }
+
+        /* Each piece arrives a beat after the one above it, so the screen
+           assembles rather than appearing all at once. Pure transform and
+           opacity, and it is over before anything could block the thread. */
+        .ee-boot__mark, .ee-boot__word, .ee-boot__rule, .ee-boot__bar, .ee-step {
+          animation: ee-rise .55s cubic-bezier(.22, 1, .36, 1) both;
+        }
+        .ee-boot__word { animation-delay: .06s; }
+        .ee-boot__rule { animation-delay: .1s; }
+        .ee-boot__bar  { animation-delay: .16s; }
+        .ee-step:nth-child(1) { animation-delay: .22s; }
+        .ee-step:nth-child(2) { animation-delay: .28s; }
+        .ee-step:nth-child(3) { animation-delay: .34s; }
+
+        .ee-boot__mark {
+          width: 56px; height: 56px; border-radius: 16px;
+          filter: drop-shadow(0 6px 18px rgba(13, 107, 102, .22));
+        }
+        .ee-boot__mark > svg { width: 100%; height: 100%; display: block; animation: ee-float 4.5s ease-in-out infinite; }
+        .ee-boot__word {
+          margin-top: 20px; font-family: Georgia, "Times New Roman", serif;
+          font-size: 26px; letter-spacing: -0.01em; color: var(--ee-fg);
+        }
+        .ee-boot__word b { font-weight: 700; }
+        .ee-boot__word i { font-style: italic; font-weight: 400; color: var(--ee-accent); }
+        .ee-boot__rule { margin-top: 12px; display: flex; align-items: center; gap: 10px; width: 100%; }
+        .ee-boot__rule span {
+          font-size: 9.5px; font-weight: 600; text-transform: uppercase;
+          letter-spacing: 0.22em; color: var(--ee-accent); opacity: .72; white-space: nowrap;
+        }
+        .ee-boot__rule i { flex: 1; height: 1px; background: linear-gradient(to right, var(--ee-accent), transparent); opacity: .4; }
+
+        /* Real progress, a third at a time, plus a shimmer that never stops.
+           The fill is scaled rather than widened: scaling is compositor work,
+           so it keeps moving even while the main thread is building the app. */
+        .ee-boot__bar {
+          margin-top: 28px; width: 100%; height: 3px; border-radius: 999px;
+          background: var(--ee-line); overflow: hidden;
+        }
+        .ee-boot__fill {
+          height: 100%; width: 100%; border-radius: 999px; background: var(--ee-accent);
+          transform-origin: left center; transform: scaleX(.1);
+          transition: transform .7s cubic-bezier(.22, 1, .36, 1);
+          position: relative; overflow: hidden;
+        }
+        .ee-boot[data-done="1"] .ee-boot__fill { transform: scaleX(.37); }
+        .ee-boot[data-done="2"] .ee-boot__fill { transform: scaleX(.69); }
+        /* The last third runs short so the bar is full before the screen
+           lifts, rather than being whisked away two thirds of the way along. */
+        .ee-boot[data-done="3"] .ee-boot__fill { transform: scaleX(1); transition-duration: .3s; }
+        .ee-boot__fill::after {
+          content: ""; position: absolute; inset: 0;
+          background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .6), transparent);
+          animation: ee-shimmer 1.5s linear infinite;
+        }
+
+        .ee-boot__steps { margin: 22px 0 0; padding: 0; list-style: none; width: 100%; display: flex; flex-direction: column; gap: 12px; }
+        .ee-step { display: flex; align-items: center; gap: 11px; color: var(--ee-dim); transition: color .3s ease, opacity .3s ease; }
+        .ee-step--running { color: var(--ee-fg); }
+        .ee-step--done { color: var(--ee-fg); opacity: .55; }
+        .ee-step__dot {
+          flex: none; box-sizing: border-box; position: relative;
+          width: 16px; height: 16px; border-radius: 50%; border: 1.5px solid var(--ee-line);
+          transition: opacity .3s ease;
+        }
+        /* Still to come, and reading that way: the one step actually underway
+           is the only one at full strength. */
+        .ee-step:not(.ee-step--running):not(.ee-step--done) .ee-step__dot { opacity: .5; }
+        .ee-step--running .ee-step__dot { border-top-color: var(--ee-accent); animation: ee-spin .8s linear infinite; }
+        .ee-step--done .ee-step__dot { border-color: var(--ee-accent); background: var(--ee-accent); animation: ee-pop .34s cubic-bezier(.22, 1, .36, 1); }
+        /* A ring that opens outwards as the step lands: the moment of done. */
+        .ee-step--done .ee-step__dot::before {
+          content: ""; position: absolute; inset: -4px; border-radius: 50%;
+          border: 1.5px solid var(--ee-accent); animation: ee-ping .55s ease-out forwards;
+        }
+        .ee-step--done .ee-step__dot::after {
+          content: ""; position: absolute; left: 4.8px; top: 1.9px; width: 3.4px; height: 7.4px;
+          border: solid var(--ee-on-accent); border-width: 0 1.7px 1.7px 0; transform: rotate(45deg);
+        }
+
+        @keyframes ee-shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+        @keyframes ee-float { 0%, 100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-4px) scale(1.02); } }
+        @keyframes ee-spin { to { transform: rotate(360deg); } }
+        @keyframes ee-pop { from { transform: scale(.5); } to { transform: scale(1); } }
+        @keyframes ee-ping { from { transform: scale(.6); opacity: .75; } to { transform: scale(1.5); opacity: 0; } }
+        @keyframes ee-rise { from { opacity: 0; transform: translateY(9px); } to { opacity: 1; transform: translateY(0); } }
+        @media (prefers-reduced-motion: reduce) {
+          .ee-boot__mark > svg, .ee-boot__fill::after, .ee-step__dot,
+          .ee-step--done .ee-step__dot::before { animation: none; }
+          .ee-boot__mark, .ee-boot__word, .ee-boot__rule, .ee-boot__bar, .ee-step { animation-duration: .01s; }
+        }
+      </style>
     </head>
 
     <body>
       <div id="root"></div>
+      <div id="ee-boot" class="ee-boot">
+        <div class="ee-boot__panel">
+          <!-- The same mark as the Dock icon and the sidebar lockup. -->
+          <div class="ee-boot__mark">
+          <svg viewBox="0 0 64 64" role="img" aria-label="Evidence Engine">
+            <defs>
+              <linearGradient id="ee-boot-tile" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#1a4b42" /><stop offset="1" stop-color="#0c302a" />
+              </linearGradient>
+            </defs>
+            <rect x="1" y="1" width="62" height="62" rx="17" fill="url(#ee-boot-tile)" />
+            <rect x="1" y="1" width="62" height="62" rx="17" fill="none" stroke="#ffffff" stroke-opacity="0.06" />
+            <text x="26" y="47" font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-weight="700" font-size="46" text-anchor="middle" fill="#6fa894" fill-opacity="0.92">E</text>
+            <text x="34" y="52" font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-weight="700" font-size="46" text-anchor="middle" fill="none" stroke="#0c302a" stroke-width="3">E</text>
+            <text x="34" y="52" font-family="Georgia, 'Times New Roman', serif" font-style="italic" font-weight="700" font-size="46" text-anchor="middle" fill="#f4efe3">E</text>
+          </svg>
+          </div>
+          <div class="ee-boot__word"><b>Evidence</b> <i>Engine</i></div>
+          <div class="ee-boot__rule"><span>Systematic Reviews</span><i></i></div>
+          <div class="ee-boot__bar"><div class="ee-boot__fill"></div></div>
+          <ul class="ee-boot__steps">
+            <li class="ee-step ee-step--running" data-boot-step="engine"><span class="ee-step__dot"></span>Starting the local engine</li>
+            <li class="ee-step" data-boot-step="session"><span class="ee-step__dot"></span>Restoring your session</li>
+            <li class="ee-step" data-boot-step="workspace"><span class="ee-step__dot"></span>Loading your workspace</li>
+          </ul>
+        </div>
+      </div>
+      <script>
+        // The app opens in the browser the reviewer already uses, so the
+        // launcher has no window of its own to watch. This connection is how it
+        // knows the app is on screen: it stays open as long as the window does
+        // and drops the moment the window goes, which is what tells the
+        // launcher to stop the engine. Outside the launcher (a dev server) it
+        // 404s and nothing cares.
+        (function () {
+          try {
+            var hold = function () { try { new EventSource("/__ee/stream"); } catch (e) {} };
+            hold();
+            // A window Chrome has put to sleep still holds its socket, which is
+            // the point: a timer-based ping gets throttled to one a minute in a
+            // window that is not in front, and the launcher would shut the app
+            // down underneath someone who simply had another window on top.
+            addEventListener("pageshow", function (e) { if (e.persisted) hold(); });
+          } catch (e) {}
+        })();
+      </script>
       <script type="module" src="/src/main.tsx"></script>
     </body>
   </html>
-  

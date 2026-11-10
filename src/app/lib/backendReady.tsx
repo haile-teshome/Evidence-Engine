@@ -1,5 +1,7 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 
+import { appReady, bootStep } from "./boot";
+
 // Tracks the local engine's startup so the UI can show what's happening. The
 // launcher opens the app window as soon as the cached frontend build is ready
 // and warms the backend (heavy imports + AI model) in the background, so on a
@@ -33,8 +35,14 @@ export function BackendReadyProvider({ children }: { children: ReactNode }) {
       let next: EngineStatus;
       try {
         const r = await fetch("/api/health", { cache: "no-store" });
-        if (!r.ok) throw new Error("not ok");
         const j: any = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          // The launcher answers for a backend that is not up yet, and says
+          // which it is. One that died is never going to answer, so show the
+          // app rather than hold it behind a step that will never tick.
+          if (j?.state === "failed") appReady();
+          throw new Error("not ok");
+        }
         const cloud = j?.providers && Object.values(j.providers).some(Boolean);
         const models: string[] = j?.ollama?.loaded_models || [];
         const ollamaUp = !!j?.ollama?.reachable;
@@ -50,11 +58,13 @@ export function BackendReadyProvider({ children }: { children: ReactNode }) {
         next = { ready: false, message: "Starting engine…", done: false };
       }
       if (!active) return;
+      bootStep("engine", next.ready ? "done" : "running");
       setStatus(next);
       if (next.done) return;                 // fully up, stop polling
       timer = setTimeout(poll, 1500);
     };
 
+    bootStep("engine", "running");
     poll();
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, []);

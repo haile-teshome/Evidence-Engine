@@ -9,6 +9,7 @@ import { countImported } from "./lib/importedAt";
 import { Toaster } from "./components/ui/sonner";
 import { StoreProvider, useStore, useSaveStatus } from "./lib/store";
 import { DeferredPage, PageSkeleton } from "./components/DeferredPage";
+import { appReady, bootStep } from "./lib/boot";
 import { AnimatePresence, motion } from "motion/react";
 import { AuthProvider, useAuth } from "./lib/auth";
 import { AuthScreen } from "./components/AuthScreen";
@@ -60,12 +61,40 @@ const PAGE_META: Record<string, { title: string; subtitle: string; icon: any }> 
 function Shell() {
   const s = useStore();
   const lastSavedAt = useSaveStatus();
+  // The shell is mounting; the startup screen shows that as the last step and
+  // waits for the first page to paint (see DeferredPage) before standing down.
+  useEffect(() => { bootStep("workspace", "running"); }, []);
+  // Warm the page modules one at a time, never all at once.
+  //
+  // import() does not only fetch a module, it runs it, and running eleven
+  // pages in a single callback put a two-second block on the main thread a
+  // moment after the window appeared: precisely when someone who had just
+  // reopened the app was trying to click something. Loading them one per idle
+  // slot keeps every piece of work short enough for the browser to interrupt,
+  // so the first visit to a tab is still instant and nothing ever freezes.
   useEffect(() => {
-    const warm = () => PAGE_CHUNKS.forEach(load => { load().catch(() => { /* prefetch only */ }); });
     const w = window as any;
-    const idle = typeof w.requestIdleCallback === "function";
-    const id: number = idle ? w.requestIdleCallback(warm, { timeout: 4000 }) : window.setTimeout(warm, 2000);
-    return () => { if (idle) w.cancelIdleCallback(id); else window.clearTimeout(id); };
+    const hasIdle = typeof w.requestIdleCallback === "function";
+    const soon = (fn: () => void): number =>
+      hasIdle ? w.requestIdleCallback(fn, { timeout: 2000 }) : window.setTimeout(fn, 150);
+    const cancel = (id: number) =>
+      hasIdle ? w.cancelIdleCallback(id) : window.clearTimeout(id);
+
+    let next = 0;
+    let pending = 0;
+    let stopped = false;
+    // And not for the first couple of seconds either. Idle time right after
+    // the app appears is not spare: it is the reviewer reading the screen and
+    // reaching for the first thing they came to click.
+    const step = () => {
+      if (stopped || next >= PAGE_CHUNKS.length) return;
+      const load = PAGE_CHUNKS[next++];
+      load()
+        .catch(() => { /* prefetch only */ })
+        .then(() => { if (!stopped) pending = soon(step); });
+    };
+    const kickoff = window.setTimeout(() => { pending = soon(step); }, 2000);
+    return () => { stopped = true; window.clearTimeout(kickoff); cancel(pending); };
   }, []);
   const engine = useEngineStatus();
   const meta = PAGE_META[s.page];
@@ -304,7 +333,10 @@ function Shell() {
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
   static getDerivedStateFromError(error: Error) { return { error }; }
-  componentDidCatch(error: Error, info: any) { console.error("App error:", error, info); }
+  componentDidCatch(error: Error, info: any) {
+    appReady();   // the error screen is a real screen; don't hide it behind the splash
+    console.error("App error:", error, info);
+  }
   render() {
     if (this.state.error) {
       return (
@@ -331,13 +363,15 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | 
 // a user is signed in, so all data loads under their account id.
 function AuthGate({ children }: { children: ReactNode }) {
   const { status } = useAuth();
-  if (status === "loading") {
-    return (
-      <div className="min-h-screen grid place-items-center text-muted-foreground">
-        <Loader2 className="size-6 animate-spin" />
-      </div>
-    );
-  }
+  // Nothing is drawn while the session is being restored. The startup screen
+  // is still up and still moving, and a spinner of our own only replaced it
+  // with a still one: React creates that spinner while the main thread is busy
+  // mounting the app, so its animation never gets to start.
+  // The sign-in screen IS the app for someone signed out, so it counts as the
+  // workspace being ready. The engine step still has to tick: there is no
+  // signing in until the engine is there to check the password.
+  useEffect(() => { if (status === "anon") bootStep("workspace", "done"); }, [status]);
+  if (status === "loading") return null;
   if (status === "anon") return <AuthScreen />;
   return <>{children}</>;
 }
