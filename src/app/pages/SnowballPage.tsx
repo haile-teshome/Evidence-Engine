@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { usePagedRows } from "../lib/usePagedRows";
 import { ShowMore } from "../components/ShowMore";
 import { motion } from "motion/react";
-import { useStore, type SnowballSort, type SnowballPlan } from "../lib/store";
+import { useStore, type SnowballSort } from "../lib/store";
 import { AIService, ScreenResult, Paper, DataAggregator } from "../lib/mockServices";
 import { effectiveFullTextDecision } from "../lib/exclusionBucketing";
 import { Card } from "../components/ui/card";
@@ -31,52 +31,13 @@ const DIRECTIONS: { value: SnowballType; label: string }[] = [
 // (as a fallback when none passed) the whole uploaded/searched corpus.
 type SnowballSeed = { paper_id: string; Title: string; Abstract: string; URL: string };
 
-/** What the last snowball run found, and the rule that decided what survived. */
-export function SnowballProvenance({ plan }: { plan: SnowballPlan | null }) {
-  if (!plan || !plan.seeds.length) return null;
-  const available = plan.seeds.reduce((a, x) => a + x.available, 0);
-  const kept = plan.seeds.reduce((a, x) => a + x.kept, 0);
-  const capped = plan.seeds.filter(x => x.kept < x.available);
-  const atCeiling = plan.seeds.filter(x => plan.ceiling > 0 && x.fetched >= plan.ceiling);
-  const rule = SORT_LABEL[plan.sort] ?? plan.sort;
+/** Short forms for the trigger button, where space is tight. */
+const DIRECTION_SHORT: Record<SnowballType, string> = {
+  "Both": "Both",
+  "Backward (References)": "Backward",
+  "Forward (Cited by)": "Forward",
+};
 
-  return (
-    <Card className="p-0 overflow-hidden">
-      <div className="flex items-center justify-between gap-2 px-4 py-2 border-b bg-muted/10">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Citations kept
-        </span>
-        <span className="text-[11px] text-muted-foreground">
-          run of {new Date(plan.ranAt).toLocaleString()}
-        </span>
-      </div>
-      <div className="px-4 py-3 text-xs space-y-1.5">
-        <div>
-          <span className="font-medium tabular-nums">{kept.toLocaleString()}</span> kept from{" "}
-          <span className="font-medium tabular-nums">{available.toLocaleString()}</span> found across{" "}
-          {plan.seeds.length.toLocaleString()} seed{plan.seeds.length === 1 ? "" : "s"}, keeping the{" "}
-          <span className="font-medium">{rule.toLowerCase()}</span> up to {plan.maxPerSeed} per seed.
-        </div>
-        {capped.length > 0 && (
-          <div className="text-amber-600">
-            {capped.length.toLocaleString()} seed{capped.length === 1 ? "" : "s"} had more than the cap, so{" "}
-            {(available - kept).toLocaleString()} citation{available - kept === 1 ? " was" : "s were"} not taken.
-            Raise Max to include them.
-          </div>
-        )}
-        {atCeiling.length > 0 && (
-          <div className="text-amber-600">
-            {atCeiling.length.toLocaleString()} seed{atCeiling.length === 1 ? "" : "s"} hit the{" "}
-            {plan.ceiling.toLocaleString()}-per-source fetch ceiling, so even the pool they were
-            chosen from is incomplete.
-          </div>
-        )}
-      </div>
-    </Card>
-  );
-}
-
-/** The short form for the trigger button, where space is tight. */
 const SORT_SHORT: Record<SnowballSort, string> = {
   relevance: "closest first",
   cited: "most cited",
@@ -90,13 +51,6 @@ const SORT_OPTIONS: { value: SnowballSort; label: string; help: string }[] = [
   { value: "recent", label: "Most recent", help: "Newest publication year first" },
   { value: "source", label: "Source order", help: "Whatever order the database returned" },
 ];
-
-const SORT_LABEL: Record<SnowballSort, string> = {
-  relevance: "Closest to your question",
-  cited: "Most cited",
-  recent: "Most recent",
-  source: "Source order",
-};
 
 /** One row per title. Snowballing reaches the same paper from many seeds. */
 function dedupeByTitle(rows: any[]): any[] {
@@ -142,9 +96,7 @@ export function SnowballPage() {
   // persists across tab switches instead of resetting on remount.
   const chosen = new Set(s.snowballChosen ?? []);
   const fetchTask = s.tasks["snowball"];
-  const screenTask = s.tasks["snowball-screen"];
   const running = fetchTask?.status === "running";
-  const screening = screenTask?.status === "running";
 
   // Seed the selection from the AI's INCLUDE verdicts ONCE, when a fresh
   // screening run lands and nothing has been selected yet (snowballChosen is
@@ -252,20 +204,55 @@ export function SnowballPage() {
       if (sort === "relevance" && !signal.aborted) {
         const pool = dedupeByTitle(perSeed.flatMap(x => x.rows));
         if (pool.length) {
+          // Ranking is its own phase and a long one, so it gets its own bar
+          // rather than leaving the fetch bar sitting full. The fetch counted
+          // seeds; this counts citations, which the estimate treats as a new
+          // run because the count drops back to zero.
           s.updateTask("snowball", {
             detail: `Ranking ${pool.length.toLocaleString()} citations against your question…`,
             stages: [{ id: "snow", label: "Ranking by relevance", status: "running" }],
+            progress: { done: 0, total: pool.length },
           });
+          const rows = pool.map(p => ({
+            id: p.id, title: p.title, abstract: p.abstract || "", source: p.source, url: p.url,
+          })) as any;
+          // The stream reports every article; a pool of thousands would re-render
+          // the page as fast as the scores land. Five updates a second is more
+          // than the eye needs, and the estimate reads the same either way: each
+          // report carries the time it covers, however many articles that is.
+          let reportedAt = 0;
+          const report = (done: number, total: number) => {
+            const at = Date.now();
+            if (done < total && at - reportedAt < 200) return;
+            reportedAt = at;
+            s.updateTask("snowball", { progress: { done, total } });
+          };
           try {
-            const res = await DataAggregator.rerankByRelevance(
-              pool.map(p => ({ id: p.id, title: p.title, abstract: p.abstract || "", source: p.source, url: p.url })) as any,
-              s.pico, s.inclusion, s.exclusion, -1, undefined, signal, undefined, "citation-snowball",
-            );
+            let res;
+            try {
+              // Streamed, so the reviewer sees how far the ranking has got and
+              // how long is left instead of a bar that stopped moving.
+              res = await DataAggregator.rerankByRelevanceStream(
+                rows, s.pico, s.inclusion, s.exclusion, -1, undefined, signal, undefined,
+                report, "citation-snowball",
+              );
+            } catch (e: any) {
+              if (signal.aborted || e?.name === "AbortError") throw e;   // a genuine cancel
+              // No stream (older backend, or a proxy that buffers) → the
+              // blocking call. Nothing to count, so the bar goes away rather
+              // than freezing at zero.
+              s.updateTask("snowball", { progress: { done: 0, total: 0 } });
+              res = await DataAggregator.rerankByRelevance(
+                rows, s.pico, s.inclusion, s.exclusion, -1, undefined, signal, undefined, "citation-snowball",
+              );
+            }
             scores = new Map(res.ranked.map(r => [(r.paper.title || "").toLowerCase(), r.leads_score]));
           } catch (e: any) {
             // A ranking failure must not lose the citations themselves.
-            console.error("snowball ranking failed:", e?.message);
-            toast.warning("Could not rank by relevance; kept the source order instead.");
+            if (!signal.aborted) {
+              console.error("snowball ranking failed:", e?.message);
+              toast.warning("Could not rank by relevance; kept the source order instead.");
+            }
           }
         }
       }
@@ -299,7 +286,7 @@ export function SnowballPage() {
         return;
       }
       s.setSnowballResults(unique);
-      s.setSnowballChosen(null);   // fresh citations → re-seed selection from the next screening pass
+      s.setSnowballChosen(null);   // fresh citations → start the selection over
       s.updateTask("snowball", { status: "done" });
       const totalAvailable = perSeed.reduce((a, x) => a + x.available, 0);
       const dropped = totalAvailable - all.length;
@@ -310,52 +297,6 @@ export function SnowballPage() {
       );
     } catch (e: any) {
       s.updateTask("snowball", { status: "error", detail: e?.message });
-    }
-  }
-
-  async function screen() {
-    if (!s.snowballResults) return;
-    const { abort } = s.startTask("snowball-screen", [{ id: "scr", label: "Screening snowballed", status: "running" }]);
-    s.updateTask("snowball-screen", { progress: { done: 0, total: s.snowballResults.length } });
-    const signal = abort.signal;
-    try {
-      const out: ScreenResult[] = [];
-      for (let i = 0; i < s.snowballResults.length; i++) {
-        if (signal.aborted) break;
-        const p = s.snowballResults[i];
-        s.updateTask("snowball-screen", {
-          progress: { done: i, total: s.snowballResults.length, label: (p.title || "").slice(0, 80) },
-          detail: (p.title || "").slice(0, 80),
-        });
-        try {
-          const r = await AIService.screenPaperMultiAgent(
-            { id: p.id, source: p.source, title: p.title, abstract: p.abstract, url: p.url },
-            s.pico, s.inclusion, s.exclusion, signal, "", "citation-snowball",
-          );
-          out.push(r);
-        } catch (e: any) {
-          if (signal.aborted) break;
-          console.error(`snowball-screen ${i + 1} failed:`, e?.message);
-        }
-        s.updateTask("snowball-screen", { progress: { done: i + 1, total: s.snowballResults.length } });
-      }
-      if (signal.aborted) {
-        // Save partial progress: merge whatever finished this run into the
-        // existing screening (by paper) so a cancel keeps both.
-        const keyOf = (r: ScreenResult) => r.paper_id || (r.Title || "").toLowerCase().trim();
-        const byId = new Map((s.snowballScreened ?? []).map(r => [keyOf(r), r]));
-        out.forEach(r => byId.set(keyOf(r), r));
-        const merged = [...byId.values()];
-        s.setSnowballScreened(merged);
-        s.updateTask("snowball-screen", { status: "canceled" });
-        toast.info(`Canceled: ${out.length} screened this run, ${merged.length} kept in total.`);
-        return;
-      }
-      s.setSnowballScreened(out);
-      s.updateTask("snowball-screen", { status: "done" });
-      toast.success(`Screened ${out.length} snowballed articles`);
-    } catch (e: any) {
-      s.updateTask("snowball-screen", { status: "error", detail: e?.message });
     }
   }
 
@@ -400,7 +341,12 @@ export function SnowballPage() {
           : "No new similar papers found for that study.");
       }
     } catch (e: any) {
-      if (!signal.aborted) { s.updateTask("snowball", { status: "error", detail: e?.message }); toast.error("Find similar failed."); }
+      if (!signal.aborted) {
+        s.updateTask("snowball", { status: "error", detail: e?.message });
+        // The backend says which of the two it is: a refused request names the
+        // fix, and anything else is ours to look at.
+        toast.error(e?.message || "Find similar failed.");
+      }
     }
   }
 
@@ -433,6 +379,9 @@ export function SnowballPage() {
     s.setSnowballResults(null); s.setSnowballScreened(null); s.setSnowballChosen(null);
   }
 
+  // Screening lives on Abstract Screening now, where the whole corpus is
+  // screened in one pass. Verdicts recorded by an earlier session are still
+  // shown, and still seed the selection, but this page no longer makes them.
   const screened = s.snowballScreened;
 
   // Decision lookup keyed by both id and normalised title, so a citation row
@@ -445,6 +394,7 @@ export function SnowballPage() {
   const verdict = (p: any): ScreenResult | undefined =>
     decisionByKey.get(p.id) || decisionByKey.get((p.title || "").toLowerCase().trim());
 
+  const hasResults = Boolean(results && results.length > 0);
   const backCount = results?.filter(p => p.citation_type === "backward").length ?? 0;
   const fwdCount = results?.filter(p => p.citation_type === "forward").length ?? 0;
   const includedCount = screened?.filter(r => r.Decision === "INCLUDE").length ?? 0;
@@ -473,66 +423,70 @@ export function SnowballPage() {
   return (
     <div className="space-y-3">
       {/* ── Compact header: stats + controls + run ─────────────────────────── */}
-      {/* What the pull found against what it kept. A seed with 85 references
-          capped at 20 loses 65, and that was invisible: the search could not be
-          reproduced from anything the app recorded. */}
-      <SnowballProvenance plan={s.snowballPlan} />
-
       <ControlPane
-        singleLine
         stats={<>
           <InlineStat icon={FileText} value={seeds.length} label="Seeds" />
-          {results && results.length > 0 && <>
+          {hasResults && <>
             <PaneDivider />
-            <InlineStat icon={Network} value={results.length} label="Found" />
-            <InlineStat icon={ArrowDownLeft} value={backCount} label="Backward" />
-            <InlineStat icon={ArrowUpRight} value={fwdCount} label="Forward" />
+            {/* The split between the two directions is a breakdown of what was
+                found, so it reads under that number rather than as two tiles of
+                its own. "Selected" went for the same reason: the button on the
+                right already says how many are selected. */}
+            <InlineStat
+              icon={Network}
+              value={results.length}
+              label="Found"
+              hint={`${backCount.toLocaleString()} back · ${fwdCount.toLocaleString()} fwd`}
+            />
           </>}
           {screened && <>
             <PaneDivider />
             <InlineStat icon={CheckCircle2} tone="success" value={includedCount} label="AI included" />
             <InlineStat icon={XCircle} tone="amber" value={excludedCount} label="AI excluded" />
           </>}
-          {results && results.length > 0 && chosen.size > 0 && <InlineStat icon={CheckCircle2} tone="success" value={chosen.size} label="Selected" />}
         </>}
         actions={<>
-          <ImportStudies stage="citation-snowball" label="Add seed studies" />
-          <div className="flex items-center gap-2.5 h-9 rounded-lg border bg-muted/30 px-2.5">
-            <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">Direction</span>
-            <div className="inline-flex h-7 rounded-md border bg-background p-0.5">
-              {DIRECTIONS.map(d => (
-                <button
-                  key={d.value}
-                  onClick={() => setType(d.value)}
-                  className={`relative px-2.5 text-xs rounded-[5px] transition-colors ${type === d.value ? "text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}
-                >
-                  {type === d.value && <motion.span layoutId="snowball-direction" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded-[5px] bg-primary shadow-sm" />}
-                  <span className="relative z-10">{d.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
+          <ImportStudies stage="citation-snowball" label="Add seeds" />
+          <PaneSeparator />
 
-          {/* Keep and Max both answer one question, "what survives the cap", so
-              they live together behind one control. Inline they made a toolbar
-              of three labelled groups that left no room for the run button. */}
+          {/* Direction, rule and cap are one question asked three ways: what to
+              fetch. They live behind one control so the row stays a single line
+              at the width this app runs at. Direction was the last of them
+              still sitting out here, in a labelled box no other pane uses. */}
           <Popover>
             <PopoverTrigger asChild>
-              <Button variant="outline" size="sm" className="h-9 shadow-sm font-normal"
-                      title="Choose how many citations to keep per seed, and which ones">
+              <Button variant="outline" size="sm" className="h-8 shadow-sm font-normal"
+                      title="Which citations to follow, how many to keep per seed, and which ones">
                 <SlidersHorizontal className="size-3.5 mr-1.5" />
-                {maxCit} per seed
+                {DIRECTION_SHORT[type]} · {maxCit} per seed
                 <span className="text-muted-foreground ml-1.5">· {SORT_SHORT[sort]}</span>
                 <ChevronDown className="size-3.5 ml-1 opacity-60" />
               </Button>
             </PopoverTrigger>
             <PopoverContent align="end" className="w-80 p-0">
               <div className="px-3.5 py-3 border-b">
-                <div className="text-xs font-semibold">Keep per seed</div>
+                <div className="text-xs font-semibold">What to fetch</div>
                 <p className="mt-0.5 text-[11px] text-muted-foreground">
                   Every reference and citation is fetched. This decides which are kept
                   when a seed has more than the cap, and the run records which rule was used.
                 </p>
+              </div>
+              <div className="flex items-center justify-between gap-2 border-b px-3.5 py-2.5">
+                <span className="text-xs font-medium">Direction</span>
+                <div className="inline-flex rounded-md border p-0.5"
+                     title="Backward follows the references a seed cites; forward finds papers that cite it">
+                  {DIRECTIONS.map(d => (
+                    <button
+                      key={d.value}
+                      onClick={() => setType(d.value)}
+                      className={`relative h-6 rounded px-2 text-[11px] font-medium transition-colors ${
+                        type === d.value ? "text-primary-foreground" : "text-muted-foreground hover:bg-muted"}`}
+                    >
+                      {type === d.value && <motion.span layoutId="snowball-direction" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded bg-primary" />}
+                      <span className="relative z-10">{d.label}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="p-1.5">
                 {SORT_OPTIONS.map(o => (
@@ -578,25 +532,43 @@ export function SnowballPage() {
             </PopoverContent>
           </Popover>
           {running ? (
-            <Button size="sm" variant="destructive" className="h-9 shadow-sm" onClick={() => s.cancelTask("snowball")}>
+            <Button size="sm" variant="destructive" className="h-8 shadow-sm" onClick={() => s.cancelTask("snowball")}>
               <XCircle className="size-3.5 mr-1.5" />Cancel
             </Button>
           ) : (
-            <Button size="sm" className="h-9 shadow-sm" onClick={start}>
-              <Network className="size-3.5 mr-1.5" />{results && results.length > 0 ? "Re-run" : "Start snowballing"}
+            // Filled until there are citations, because fetching them is the
+            // only thing to do here. Once they exist the primary act is sending
+            // them on, so the run button steps back and lets that one lead.
+            <Button size="sm" variant={hasResults ? "outline" : "default"} className="h-8 shadow-sm" onClick={start}>
+              <Network className="size-3.5 mr-1.5" />{hasResults ? "Re-run" : "Start snowballing"}
             </Button>
           )}
+
+          {/* What to do with the citations, beside the controls that fetched
+              them. These used to sit under the list, which on a run of a few
+              thousand meant scrolling past every citation to reach them. */}
+          {hasResults && <>
+            <PaneSeparator />
+            <Button size="sm" className="h-8 shadow-sm" onClick={addToMain} disabled={chosen.size === 0}
+                    title="Add the selected citations to the corpus as unscreened. They join the Abstract Screening “Screen new” queue rather than being auto-included.">
+              <Plus className="size-3.5 mr-1.5" />Add {chosen.size.toLocaleString()} to queue
+            </Button>
+          </>}
         </>}
       />
 
       {fetchTask && fetchTask.status === "running" && (
-        <TaskProgressCard task={fetchTask} title="Fetching citations" onCancel={() => s.cancelTask("snowball")} />
-      )}
-      {screenTask && screenTask.status === "running" && (
-        <TaskProgressCard task={screenTask} title="Screening snowballed articles" onCancel={() => s.cancelTask("snowball-screen")} />
+        // The run has two phases and the card titles itself after whichever is
+        // in flight, so it cannot say "Fetching citations" over a line that
+        // says the citations are being ranked.
+        <TaskProgressCard
+          task={fetchTask}
+          title={fetchTask.stages[0]?.label || "Fetching citations"}
+          onCancel={() => s.cancelTask("snowball")}
+        />
       )}
 
-      {!running && !(results && results.length > 0) && (
+      {!running && !hasResults && (
         <Card className="p-10 text-center">
           <Network className="size-8 mx-auto mb-3 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground max-w-md mx-auto">
@@ -604,7 +576,7 @@ export function SnowballPage() {
           </p>
         </Card>
       )}
-      {results && results.length > 0 && (
+      {hasResults && (
         <>
           {seedsChanged && (
             <Alert>
@@ -711,6 +683,18 @@ export function SnowballPage() {
                 >
                   <Sparkles className="size-3.5" />Find similar
                 </Button>
+                {/* Clearing acts on this list, so it sits over this list rather
+                    than in the control pane, where it was the one control that
+                    had nothing to do with fetching. */}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-8 px-2 shrink-0 text-muted-foreground"
+                  onClick={clearAll}
+                  title="Clear results: discard every citation fetched in this run"
+                >
+                  <Trash2 className="size-4" />
+                </Button>
               </div>
               <div className="overflow-auto flex-1 divide-y">
                 {pagedShown.visible.map((p, i) => {
@@ -784,22 +768,15 @@ export function SnowballPage() {
               </div>
             </Card>
           </div>
-
-          {/* ── Footer actions ────────────────────────────────────────────── */}
-          <div className="grid grid-cols-3 gap-2">
-            <Button variant="outline" onClick={screen} disabled={screening}>
-              <Network className="size-4 mr-2" />{screening ? "Screening..." : screened ? "Re-screen with AI" : "AI-screen for me"}
-            </Button>
-            <Button onClick={addToMain} disabled={chosen.size === 0}
-              title="Add the selected citations to the corpus as unscreened. They join the Abstract Screening “Screen new” queue rather than being auto-included.">
-              <Plus className="size-4 mr-2" />Add {chosen.size} to screening queue
-            </Button>
-            <Button variant="outline" onClick={clearAll}><Trash2 className="size-4 mr-2" />Clear Results</Button>
-          </div>
         </>
       )}
     </div>
   );
+}
+
+/** The rule between groups of actions, as the other stages draw it. */
+function PaneSeparator() {
+  return <span className="mx-0.5 h-6 w-px bg-border" aria-hidden="true" />;
 }
 
 // Compact count pill used in the header summary line.

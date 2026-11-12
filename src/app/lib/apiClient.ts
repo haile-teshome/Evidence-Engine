@@ -696,9 +696,13 @@ export const AIService = {
   // related_works, ranked by local embedding cosine) shaped exactly like the
   // citation rows so the Snowball UI can treat them the same way.
   async fetchSimilar(seeds: { title: string; doi?: string; abstract?: string }[], maxPer: number, signal?: AbortSignal): Promise<any[]> {
-    const r = await postJSON<{ papers: any[] }>("/papers/similar", {
+    const r = await postJSON<{ papers: any[]; error?: string }>("/papers/similar", {
       seeds, top_k: Math.max(maxPer, 20), max_per_seed: maxPer,
     }, signal);
+    // Every candidate here comes from OpenAlex, so when OpenAlex refuses there
+    // is nothing to show and a reason worth repeating. An empty list would
+    // read as "nothing similar exists", which is a different thing entirely.
+    if (r.error) throw new Error(r.error);
     return (r.papers || []).map((c: any) => ({
       id: c.id || `${(c.title || "").slice(0, 12)}-${Math.random().toString(36).slice(2, 6)}`,
       title: c.title,
@@ -1082,6 +1086,8 @@ export const DataAggregator = {
     signal?: AbortSignal,
     quantileKeep?: number,
     onProgress?: (done: number, total: number) => void,
+    /** Home ranks search results; Snowball ranks cited work. */
+    stage: ModelStage = "home",
   ): Promise<RerankResult> {
     const res = await fetch(`${apiConfig.baseUrl}/papers/rerank/stream`, {
       method: "POST",
@@ -1091,7 +1097,7 @@ export const DataAggregator = {
         threshold,
         quantile_keep: quantileKeep,
         top_k: topK,
-        model: modelFor("home"),
+        model: modelFor(stage),
       }),
       signal,
     });
