@@ -1,7 +1,7 @@
 {
   "name": "systematic-review-platform",
   "private": true,
-  "version": "1.0.13",
+  "version": "1.0.14",
   "packageManager": "pnpm@11.0.9",
   "type": "module",
   "scripts": {
