@@ -10,7 +10,7 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  WINDOW, etaLabel, formatEta, initialEta, roundTo, step, stepEta,
+  MIN_SAMPLES, WINDOW, etaLabel, formatEta, initialEta, roundTo, step, stepEta,
 } from "../eta";
 
 /** The formula this replaced: elapsed / done, projected over the rest. */
@@ -58,11 +58,14 @@ describe("the estimate does not climb between items", () => {
     // The sawtooth: `done` is fixed while the clock moves, so the old formula
     // grew for the whole of every item and dropped when it landed.
     let state = initialEta(0);
-    state = stepEta(state, { done: 1, total: 10, now: 10_000 });
+    let now = 0;
+    for (let i = 1; i <= MIN_SAMPLES; i++) {
+      now += 10_000;
+      state = stepEta(state, { done: i, total: 20, now });
+    }
     const first = state.shownMs!;
-    state = stepEta(state, { done: 1, total: 10, now: 14_000 });
-    const later = state.shownMs!;
-    expect(later).toBeLessThanOrEqual(first);
+    state = stepEta(state, { done: MIN_SAMPLES, total: 20, now: now + 4_000 });
+    expect(state.shownMs!).toBeLessThanOrEqual(first);
   });
 
   it("never shows a bigger number on a steady run", () => {
@@ -73,18 +76,21 @@ describe("the estimate does not climb between items", () => {
 });
 
 describe("one slow item does not poison the rest", () => {
-  it("keeps the estimate near the typical item, not the mean", () => {
-    // Eight items at 5s and one at 60s. A mean says ~11s an item; the median
-    // says 5s, which is what the remaining items will actually cost.
+  it("leaves one stalled article out of the pace", () => {
+    // Thirty-nine articles at 5s and one at 60s. The stall sits inside eight of
+    // the window's blocks and outside the other seventeen, so the median across
+    // them does not see it. It takes a full window to do that: until then the
+    // stall is in most of what there is to look at, and the estimate says so.
     let state = initialEta(0);
     let now = 0;
-    const durations = [5_000, 5_000, 5_000, 60_000, 5_000, 5_000];
+    const durations = [...Array(25).fill(5_000), 60_000, ...Array(14).fill(5_000)];
     durations.forEach((d, i) => {
       now += d;
-      state = stepEta(state, { done: i + 1, total: 12, now });
+      state = stepEta(state, { done: i + 1, total: 60, now });
     });
-    const perItem = state.shownMs! / (12 - durations.length);
-    expect(perItem).toBeLessThan(12_000);
+    const perItem = state.shownMs! / (60 - durations.length);
+    expect(perItem).toBeGreaterThan(4_000);
+    expect(perItem).toBeLessThan(7_000);
   });
 
   it("keeps only the recent window of timings", () => {
@@ -109,23 +115,77 @@ describe("one slow item does not poison the rest", () => {
 });
 
 describe("startup cost is not charged to every item", () => {
-  it("recovers after a slow first item", () => {
+  it("recovers from a slow first item", () => {
     // Loading the model and the first long prompt made the old estimate wild.
     let state = initialEta(0);
-    let now = 40_000;
-    state = stepEta(state, { done: 1, total: 11, now });
+    let now = 60_000;
+    state = stepEta(state, { done: 1, total: 60, now });
+    for (let i = 2; i <= MIN_SAMPLES; i++) { now += 4_000; state = stepEta(state, { done: i, total: 60, now }); }
     const afterStartup = state.shownMs!;
-    for (let i = 2; i <= 6; i++) { now += 4_000; state = stepEta(state, { done: i, total: 11, now }); }
+    for (let i = MIN_SAMPLES + 1; i <= 20; i++) { now += 4_000; state = stepEta(state, { done: i, total: 60, now }); }
     expect(state.shownMs!).toBeLessThan(afterStartup / 2);
+  });
+});
+
+describe("a pool of workers is one pace, not one per worker", () => {
+  // The run that made the number swing hardest: eight articles in flight at
+  // once, each taking 8s, so one lands every second. Seven of every eight gaps
+  // are a millisecond, which is what a median of the gaps reported as the pace.
+  const CONCURRENCY = 8;
+  const ITEM = 8_000;
+  const TOTAL = 400;
+
+  /** `clumped` reports each completion separately, a millisecond apart. */
+  function poolRun(clumped: boolean) {
+    let state = initialEta(0);
+    let now = 0;
+    let done = 0;
+    for (let clump = 0; clump < 6; clump++) {
+      now += ITEM;
+      if (clumped) {
+        for (let k = 0; k < CONCURRENCY; k++) {
+          done += 1;
+          state = stepEta(state, { done, total: TOTAL, now: now + k });
+        }
+      } else {
+        done += CONCURRENCY;
+        state = stepEta(state, { done, total: TOTAL, now });
+      }
+    }
+    return { state, left: TOTAL - done };
+  }
+
+  it("reads the pace as one article a second, not one every eight", () => {
+    const { state, left } = poolRun(true);
+    const perItem = state.shownMs! / left;
+    expect(perItem).toBeGreaterThan(800);
+    expect(perItem).toBeLessThan(1_300);
+
+    // What the median of those same timings says, and why it is not used: four
+    // of every five samples sit inside a clump, so the middle one is a
+    // millisecond and the estimate collapses to nothing.
+    const sorted = [...state.samples].sort((a, b) => a - b);
+    expect(sorted[sorted.length >> 1]).toBeLessThan(10);
+  });
+
+  it("does not care whether a clump reports together or one at a time", () => {
+    // Each completion carries the share of wall-clock time it is responsible
+    // for, so grouping cannot change the total. A median has no such property.
+    const one = poolRun(true);
+    const batched = poolRun(false);
+    expect(batched.state.shownMs).toBe(one.state.shownMs);
   });
 });
 
 describe("buckets and labels", () => {
   it("widens the step as the estimate grows", () => {
+    // Roughly a twelfth of the estimate, snapped to a readable unit. A fixed
+    // minute used to be the step for everything past ten minutes, so an
+    // hour-long run redrew itself over 2% noise.
     expect(step(4_000)).toBe(5_000);
     expect(step(45_000)).toBe(5_000);
     expect(step(300_000)).toBe(30_000);
-    expect(step(3_600_000)).toBe(60_000);
+    expect(step(3_600_000)).toBe(300_000);
   });
 
   it("rounds to its own step and never to nothing", () => {
