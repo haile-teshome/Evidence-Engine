@@ -14,6 +14,20 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
+// The source pane now renders the app's own viewer rather than an iframe, and
+// what these tests are about is which document and page it is pointed at, not
+// how pdf.js draws it. So the viewer is stood in for by its props.
+vi.mock("../PdfViewer", () => ({
+  PdfViewer: (props: Record<string, any>) => (
+    <div
+      data-testid="pdf-viewer"
+      data-url={props.url ?? ""}
+      data-page={props.initialPage ?? ""}
+      data-external={props.externalUrl ?? ""}
+    />
+  ),
+}));
+
 import { SourcePane, TablePane, TierBadge, AskPane } from "../EvidenceWorkspace";
 import type { ExtractedTable } from "../../lib/apiClient";
 
@@ -86,32 +100,32 @@ describe("TierBadge", () => {
 // --------------------------------------------------------------------------
 
 describe("SourcePane", () => {
-  const frame = () => document.querySelector("iframe") as HTMLIFrameElement | null;
+  const frame = () => document.querySelector("[data-testid='pdf-viewer']") as HTMLElement | null;
 
   it("opens the PDF at the cited page", () => {
-    /* The #page fragment is what makes "jump to p. 7" work without rendering
-       the document ourselves. */
     render(<SourcePane pdfKey="abc123" page={7} title="A study" />);
-    expect(frame()?.getAttribute("src")).toContain("#page=7");
+    expect(frame()?.getAttribute("data-page")).toBe("7");
   });
 
-  it("omits the fragment when no page is cited", () => {
+  it("asks for no particular page when none is cited", () => {
     render(<SourcePane pdfKey="abc123" title="A study" />);
-    expect(frame()?.getAttribute("src") ?? "").not.toContain("#page=");
+    expect(frame()?.getAttribute("data-page")).toBe("");
   });
 
   it("points at the cached-PDF route", () => {
     render(<SourcePane pdfKey="abc123" page={2} />);
-    expect(frame()?.getAttribute("src")).toContain("/fulltext/pdf/abc123");
+    expect(frame()?.getAttribute("data-url")).toContain("/fulltext/pdf/abc123");
   });
 
-  it("re-mounts when the page changes, so the viewer actually moves", () => {
-    /* Mutating only the hash of a live iframe does not re-navigate it. */
+  it("keeps one document loaded while the cited page moves", () => {
+    /* The page is a prop, not a url fragment, so changing it scrolls the open
+       document rather than fetching and parsing it again. */
     const { rerender } = render(<SourcePane pdfKey="abc" page={2} />);
-    const first = frame();
+    const url = frame()?.getAttribute("data-url");
     rerender(<SourcePane pdfKey="abc" page={9} />);
-    expect(frame()?.getAttribute("src")).toContain("#page=9");
-    expect(frame()).not.toBe(first);
+    expect(frame()?.getAttribute("data-page")).toBe("9");
+    expect(frame()?.getAttribute("data-url")).toBe(url);
+    expect(url ?? "").not.toContain("#page=");
   });
 
   it("shows the page number in the header", () => {
@@ -132,7 +146,7 @@ describe("SourcePane", () => {
 
   it("renders a direct PDF url even without a cached key", () => {
     render(<SourcePane url="https://example.org/a.pdf" page={3} />);
-    expect(frame()?.getAttribute("src")).toContain("a.pdf");
+    expect(frame()?.getAttribute("data-url")).toContain("a.pdf");
   });
 
   it("does not treat a non-PDF url as a PDF", () => {

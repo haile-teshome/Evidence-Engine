@@ -20,6 +20,8 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "../components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "../components/ui/tabs";
+import { PdfViewer } from "../components/PdfViewer";
+import { TextReader } from "../components/TextReader";
 import {
   FileDown, CheckCircle2, AlertTriangle, ExternalLink, RefreshCcw, Upload, FileUp, FileText, X, Search,
   BookOpen, Code2, FileType2, FileSearch, Clock, Copy, ChevronDown, Library,
@@ -58,66 +60,8 @@ async function extractFileText(file: File): Promise<string> {
   return text;
 }
 
-// ── Pretty full-text reflow ──────────────────────────────────────────────────
-// Full text acquired from a PDF/XML source keeps the source's hard line breaks,
-// which strands citation markers ("[\n1\n]") and mid-sentence wraps on their own
-// lines. This reflows the text into readable prose: join wrapped lines, collapse
-// whitespace inside bracketed citations, and surface section headings.
-type TextBlock = { type: "heading" | "p"; text: string };
-
-const HEADING_RE = /^\s*(?:\d+\.?\s+)?(abstract|background|introduction|objectives?|aims?|methods?|materials and methods|study design|search strategy|data (?:collection|extraction|analysis|synthesis)|statistical analysis|results|findings|discussion|conclusions?|limitations|references|acknowled?ge?ments?|funding|conflicts? of interest|author contributions|keywords|highlights)\s*:?\s*$/i;
-
-function cleanCitations(t: string): string {
-  return t
-    // Collapse whitespace inside numeric citation groups: "[\n1\n,\n3 ]" → "[1,3]".
-    .replace(/\[[\s\d,;.–-]*\d[\s\d,;.–-]*\]/g, m => m.replace(/\s+/g, ""))
-    .replace(/\s+([.,;:)])/g, "$1")   // no space before closing punctuation
-    .replace(/\(\s+/g, "(")            // no space after opening paren
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-// Break an over-long reflowed paragraph into ~3-sentence chunks for readability.
-// Splits only between a sentence-ending mark and a capital/opening start, so it
-// never breaks on abbreviations like "U.S.", and is lossless (no text dropped).
-function splitLong(text: string): string[] {
-  if (text.length <= 480) return [text];
-  const sentences = text.split(/(?<=[.!?])\s+(?=[A-Z("'\[])/).map(x => x.trim()).filter(Boolean);
-  if (sentences.length < 4) return [text];
-  const out: string[] = [];
-  for (let i = 0; i < sentences.length; i += 3) {
-    out.push(sentences.slice(i, i + 3).join(" "));
-  }
-  return out;
-}
-
-function prettifyFullText(raw: string): TextBlock[] {
-  const lines = raw.replace(/\r\n?/g, "\n").split("\n");
-  const blocks: TextBlock[] = [];
-  let buf: string[] = [];
-  const flush = () => {
-    if (!buf.length) return;
-    const joined = cleanCitations(buf.join(" "));
-    for (const part of splitLong(joined)) if (part) blocks.push({ type: "p", text: part });
-    buf = [];
-  };
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) { flush(); continue; }
-    if (HEADING_RE.test(trimmed)) {
-      flush();
-      blocks.push({ type: "heading", text: trimmed.replace(/\s*:?\s*$/, "") });
-      continue;
-    }
-    buf.push(trimmed);
-  }
-  flush();
-  return blocks;
-}
-
 // ── Full-text viewer with Reader / Raw / PDF tabs ────────────────────────────
 function FullTextViewer({ text, url, pdfUrl }: { text: string; url?: string; pdfUrl?: string }) {
-  const blocks = prettifyFullText(text);
   const pdfSrc = pdfUrl || (url && /\.pdf($|\?)/i.test(url) ? url : "");
   return (
     <Tabs defaultValue="reader" className="flex-1 flex flex-col min-h-0">
@@ -129,33 +73,20 @@ function FullTextViewer({ text, url, pdfUrl }: { text: string; url?: string; pdf
         </TabsList>
       </div>
 
-      <TabsContent value="reader" className="flex-1 overflow-auto mt-0">
-        <div className="mx-auto max-w-3xl px-6 py-6 leading-7 text-[15px] text-foreground/90">
-          {blocks.map((b, i) =>
-            b.type === "heading" ? (
-              <h3 key={i} className="font-semibold text-base mt-6 mb-2 first:mt-0 tracking-tight">{b.text}</h3>
-            ) : (
-              <p key={i} className="mb-4 [text-wrap:pretty]">{b.text}</p>
-            ),
-          )}
-        </div>
+      <TabsContent value="reader" className="flex-1 min-h-0 mt-0">
+        <TextReader text={text} className="h-full" />
       </TabsContent>
 
-      <TabsContent value="raw" className="flex-1 overflow-auto mt-0">
-        <pre className="text-xs whitespace-pre-wrap font-mono p-4 leading-relaxed">{text}</pre>
+      <TabsContent value="raw" className="flex-1 min-h-0 mt-0">
+        <TextReader text={text} view="raw" className="h-full" />
       </TabsContent>
 
       <TabsContent value="pdf" className="flex-1 overflow-hidden mt-0">
         {pdfSrc ? (
-          <div className="flex flex-col h-full">
-            <iframe src={pdfSrc} title="PDF" className="flex-1 w-full border-0" />
-            {url && (
-              <div className="border-t px-4 py-2 text-xs text-muted-foreground">
-                Not rendering?{" "}
-                <a href={url} target="_blank" rel="noreferrer" className="text-primary hover:underline">Open the PDF in a new tab</a>.
-              </div>
-            )}
-          </div>
+          // The viewer carries its own link out, so the old "not rendering?"
+          // footer below the frame has nothing left to say.
+          <PdfViewer url={pdfSrc} externalUrl={url} hideTitle
+                     className="h-full rounded-none border-0" />
         ) : (
           <div className="h-full flex flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground p-6">
             <FileType2 className="size-8 opacity-50" />

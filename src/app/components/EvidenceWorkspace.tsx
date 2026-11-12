@@ -20,6 +20,7 @@ import { FileType2, ExternalLink, Search, Loader2, AlertTriangle, Check } from "
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { metaAsk, cachedPdfUrl, type ExtractedTable, type GroundedAnswer } from "../lib/apiClient";
+import { PdfViewer } from "./PdfViewer";
 
 // ---------------------------------------------------------------------------
 // Provenance badge
@@ -61,7 +62,9 @@ export function SourcePane({
 }: {
   pdfKey?: string; page?: number | null; url?: string; text?: string; title?: string;
 }) {
-  const src = pdfKey ? cachedPdfUrl(pdfKey, page) : (url && /\.pdf($|\?)/i.test(url) ? url : "");
+  // Without the page: the cited page moves this viewer by scrolling, and a
+  // url that changed with it would reload the whole document instead.
+  const src = pdfKey ? cachedPdfUrl(pdfKey) : (url && /\.pdf($|\?)/i.test(url) ? url : "");
 
   return (
     <div className="flex flex-col h-full min-h-0 rounded-lg border bg-card overflow-hidden">
@@ -74,9 +77,10 @@ export function SourcePane({
       </div>
 
       {src ? (
-        // Keyed on the page so changing it re-navigates: setting only the hash
-        // on a live iframe does not move the embedded viewer.
-        <iframe key={src} src={src} title="Source PDF" className="flex-1 w-full border-0" />
+        // The cited page is a prop rather than a url fragment, so moving to
+        // another one scrolls this viewer instead of reloading the document.
+        <PdfViewer url={src} initialPage={page ?? undefined} externalUrl={url} hideTitle
+                   className="min-h-0 flex-1 rounded-none border-0 border-t" />
       ) : text ? (
         <div className="flex-1 overflow-auto p-4 text-[13px] leading-6 whitespace-pre-wrap">
           {text}

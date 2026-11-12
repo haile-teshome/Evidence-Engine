@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "motion/react";
 import { useStore, useStageModel, TextExtractionResult, TextEvidenceItem } from "../lib/store";
 import { useEta } from "../lib/eta";
@@ -7,8 +7,10 @@ import { Card } from "../components/ui/card";
 import { ImportStudies } from "../components/ImportStudies";
 import { readTextOnServer } from "../lib/pdfHandoff";
 import { quoteInContext, quotePosition } from "../lib/quoteLocate";
-import { PdfQuotePage } from "../components/PdfQuotePage";
-import { hasPdfBlob } from "../lib/pdfBlobs";
+import { EvidenceQuoteCard } from "../components/EvidenceQuoteCard";
+import { PdfViewer } from "../components/PdfViewer";
+import { TextReader } from "../components/TextReader";
+import { getPdfBlobMime, hasPdfBlob } from "../lib/pdfBlobs";
 import { guessTitle } from "../lib/pdfImport";
 import { apiFetch } from "../lib/backendClient";
 import { Alert, AlertDescription } from "../components/ui/alert";
@@ -2039,7 +2041,7 @@ export function TextExtractionPage() {
                   key={selected.paper_id}
                   result={selected}
                   fullText={s.fullTexts[selected.paper_id]?.text || ""}
-                  pdfUrl={getPdfBlob(selected.paper_id) || s.fullTexts[selected.paper_id]?.pdf_url || ""}
+                  pdfUrl={s.fullTexts[selected.paper_id]?.pdf_url || ""}
                 />
               )}
             </Card>
@@ -2650,7 +2652,13 @@ export function TextExtractionPage() {
                             passage stays underneath: it is always available,
                             and it is what the exported audit trail quotes. */}
                         {hasPdfBlob(row.paper_id) && (
-                          <PdfQuotePage paperId={row.paper_id} quote={quote} />
+                          <PdfViewer
+                            paperId={row.paper_id}
+                            quotes={[quote]}
+                            title={row.title}
+                            hideTitle
+                            className="h-[46vh]"
+                          />
                         )}
 
                         <div className="rounded-lg border p-3 text-sm leading-relaxed whitespace-pre-wrap break-words">
@@ -2846,8 +2854,23 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
   const maxTextRef = useRef<HTMLDivElement | null>(null);
   const [activeSpan, setActiveSpan] = useState<[number, number] | null>(null);
   const [maxOpen, setMaxOpen] = useState(false);
-  // Default to the PDF when a paper is opened; "Locate" flips to the text view.
-  const [viewMode, setViewMode] = useState<"pdf" | "text">(pdfUrl ? "pdf" : "text");
+
+  // Is there a document to show, and is it one this viewer can render? An
+  // uploaded Word file is in the same registry as a PDF, and offering to render
+  // it only to fail is worse than not offering.
+  const ownMime = getPdfBlobMime(result.paper_id);
+  const hasOwnFile = Boolean(getPdfBlob(result.paper_id)) && (!ownMime || /pdf/i.test(ownMime));
+  const hasDoc = hasOwnFile || Boolean(pdfUrl);
+
+  // Three views of one source: the document, the text to read, and the text as
+  // extracted. Opens on the document; "Show in text" flips to the reading view.
+  const [viewMode, setViewMode] = useState<"pdf" | "read" | "raw">(hasDoc ? "pdf" : "read");
+  // Which page of the PDF each evidence quote was found on, reported by the
+  // viewer. A reviewer about to cite a sentence wants a page, not an offset.
+  const [quotePages, setQuotePages] = useState<Record<number, number>>({});
+  const onQuotesLocated = useCallback((found: { quoteIndex: number; page: number }[]) => {
+    setQuotePages(Object.fromEntries(found.map(h => [h.quoteIndex, h.page])));
+  }, []);
 
   // Scroll to a span inside whichever viewer is currently visible (inline, or
   // the maximized dialog).
@@ -2860,8 +2883,8 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
     });
   }
   function locate(start: number, end: number) {
-    // Char-offset jumping only works in the extracted-text view, so switch to it.
-    if (viewMode !== "text") setViewMode("text");
+    // Char-offset jumping only works in a text view, so leave the document.
+    if (viewMode === "pdf") setViewMode("read");
     scrollToSpan(maxOpen ? maxTextRef : fullTextRef, start, end);
   }
 
@@ -2900,36 +2923,24 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
                     Evidence quotes ({evidence.length})
                   </div>
                   <div className="space-y-2">
+                    {/* The whole card is the target: the reviewer's next move
+                        after reading a quote is almost always to go and see it
+                        in context, and a 24px button was the only way there.
+                        The character offsets move into the tooltip; the page of
+                        the PDF, which is what someone about to cite this needs,
+                        takes their place when the viewer has found it. */}
                     {evidence.map((e, i) => (
-                      <div key={i} className="border rounded-md p-3 bg-card hover:border-primary/40 transition-colors">
-                        <div className="flex items-start justify-between gap-3 mb-2">
-                          <div className="flex items-center gap-2 text-xs">
-                            <span className="text-muted-foreground tabular-nums">[{i + 1}]</span>
-                            {e.section && (
-                              <Badge variant="outline" className={`text-[10px] font-medium border ${sectionBadgeClass(e.section)}`}>
-                                {e.section}
-                              </Badge>
-                            )}
-                            <span className="text-muted-foreground tabular-nums">char {e.start}-{e.end}</span>
-                          </div>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => locate(e.start, e.end)}
-                            className="h-6 px-2 text-xs"
-                            title="Scroll to this passage in the full text below"
-                          >
-                            <MapPin className="size-3 mr-1" /> Locate
-                          </Button>
-                        </div>
-                        <blockquote className="text-sm border-l-2 border-primary/40 pl-3 italic text-foreground/90 break-words">
-                          <QuoteIcon className="size-3 inline mr-1 text-muted-foreground" />
-                          {e.quote}
-                        </blockquote>
-                        {e.why && (
-                          <div className="text-xs text-muted-foreground mt-2">{e.why}</div>
-                        )}
-                      </div>
+                      <EvidenceQuoteCard
+                        key={i}
+                        index={i}
+                        quote={e.quote}
+                        section={e.section}
+                        why={e.why}
+                        start={e.start}
+                        end={e.end}
+                        page={quotePages[i]}
+                        onLocate={() => locate(e.start, e.end)}
+                      />
                     ))}
                   </div>
                 </div>
@@ -2964,7 +2975,9 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
                             <span className="font-mono text-sm">{v.value}</span>
                           </div>
                           {v.quote && (
-                            <div className="text-xs italic text-muted-foreground mt-1">"…{v.quote}…"</div>
+                            <div className="mt-1 text-xs leading-5 text-muted-foreground">
+                              &ldquo;&#8230;{v.quote}&#8230;&rdquo;
+                            </div>
                           )}
                         </div>
                       ))}
@@ -2973,27 +2986,32 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
                 )}
                 </div>
 
-                {/* SOURCE VIEWER: PDF (default) or extracted text ----------- */}
+                {/* SOURCE VIEWER: the document, the text, or the text verbatim */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <div className="inline-flex rounded-md border bg-muted/40 p-0.5 text-xs">
-                      <button
-                        onClick={() => pdfUrl && setViewMode("pdf")}
-                        disabled={!pdfUrl}
-                        className={`px-2.5 py-1 rounded transition-colors ${viewMode === "pdf" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"} ${!pdfUrl ? "opacity-40 cursor-not-allowed" : ""}`}
-                        title={pdfUrl ? "View the source PDF" : "No PDF available for this article"}
-                      >
-                        PDF
-                      </button>
-                      <button
-                        onClick={() => setViewMode("text")}
-                        className={`px-2.5 py-1 rounded transition-colors ${viewMode === "text" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"}`}
-                        title="View the extracted text with jump-to-passage"
-                      >
-                        Extracted text
-                      </button>
+                      {([
+                        ["pdf",  "Document", "The document itself, with the quotes marked on the page"],
+                        ["read", "Text",     "The extracted text, reflowed to read"],
+                        ["raw",  "Verbatim", "The text exactly as extracted, with its line numbers and character offsets"],
+                      ] as const).map(([mode, label, hint]) => {
+                        const off = mode === "pdf" && !hasDoc;
+                        return (
+                          <button
+                            key={mode}
+                            onClick={() => !off && setViewMode(mode)}
+                            disabled={off}
+                            className={`rounded px-2.5 py-1 transition-colors
+                                        ${viewMode === mode ? "bg-background font-medium shadow-sm" : "text-muted-foreground"}
+                                        ${off ? "cursor-not-allowed opacity-40" : ""}`}
+                            title={off ? "No document file for this article" : hint}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
                     </div>
-                    {viewMode === "text" && (
+                    {viewMode !== "pdf" && (
                       <Button
                         size="icon"
                         variant="ghost"
@@ -3005,15 +3023,25 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
                       </Button>
                     )}
                   </div>
-                  {viewMode === "pdf" && pdfUrl ? (
-                    <iframe src={pdfUrl} title="Source PDF" className="w-full h-96 rounded-md border bg-muted/20" />
+                  {viewMode === "pdf" && hasDoc ? (
+                    <PdfViewer
+                      paperId={hasOwnFile ? result.paper_id : undefined}
+                      url={hasOwnFile ? undefined : pdfUrl}
+                      quotes={evidence.map(e => e.quote)}
+                      onQuotesLocated={onQuotesLocated}
+                      title={result.title}
+                      hideTitle
+                      className="h-[32rem]"
+                    />
                   ) : (
-                    <div
+                    <TextReader
                       ref={fullTextRef}
-                      className="rounded-md border bg-muted/20 text-xs font-mono leading-relaxed max-h-96 overflow-auto"
-                    >
-                      <FullTextViewer text={fullText} evidence={evidence} activeSpan={activeSpan} />
-                    </div>
+                      text={fullText}
+                      spans={evidence}
+                      activeSpan={activeSpan}
+                      view={viewMode === "raw" ? "raw" : "read"}
+                      className="max-h-[32rem] rounded-md border"
+                    />
                   )}
                 </div>
               </>
@@ -3045,119 +3073,19 @@ function PaperExtractionDetail({ result, fullText, pdfUrl = "" }: { result: Text
               ))}
             </div>
           )}
-          <div
+          <TextReader
             ref={maxTextRef}
-            className="flex-1 min-h-0 overflow-auto rounded-md border bg-muted/20 text-sm font-mono leading-relaxed"
-          >
-            <FullTextViewer text={fullText} evidence={evidence} activeSpan={activeSpan} />
-          </div>
+            text={fullText}
+            spans={evidence}
+            activeSpan={activeSpan}
+            view={viewMode === "raw" ? "raw" : "read"}
+            className="min-h-0 flex-1 rounded-md border"
+          />
         </DialogContent>
       </Dialog>
     </>
   );
 }
-
-/** Renders the full text with line numbers, highlighting every evidence span.
- *  Each span carries `data-span-start={start}` so the parent can scrollIntoView.
- *  Lines that contain at least one highlighted span are nudged a bit so the
- *  reader can see the line number in the gutter. */
-function FullTextViewer({
-  text, evidence, activeSpan,
-}: {
-  text: string;
-  evidence: TextEvidenceItem[];
-  activeSpan: [number, number] | null;
-}) {
-  if (!text) return <div className="p-3 text-muted-foreground">No full text available.</div>;
-
-  // Sort spans by start offset for the cursor-based renderer.
-  const spans = [...evidence].sort((a, b) => a.start - b.start);
-
-  // Split into lines and remember each line's character range so we can
-  // overlay highlights line-by-line.
-  const lines: { text: string; start: number; end: number; idx: number }[] = [];
-  let lineStart = 0;
-  text.split(/(\n)/).forEach((part) => {
-    if (part === "\n") {
-      // Treat the newline as part of the preceding line for offset purposes.
-      const last = lines[lines.length - 1];
-      if (last) last.end += 1;
-      lineStart += 1;
-      return;
-    }
-    if (!part && lines.length > 0) return;
-    lines.push({ text: part, start: lineStart, end: lineStart + part.length, idx: lines.length + 1 });
-    lineStart += part.length;
-  });
-
-  return (
-    <table className="w-full border-collapse">
-      <tbody>
-        {lines.map((ln) => {
-          // Restrict spans that overlap this line.
-          const lineSpans = spans.filter(s => s.start < ln.end && s.end > ln.start);
-          return (
-            <tr key={ln.idx} className="align-top">
-              <td className="select-none text-right pr-2 pl-2 py-0.5 text-muted-foreground/60 bg-muted/30 border-r tabular-nums w-10">
-                {ln.idx}
-              </td>
-              <td className="py-0.5 px-3 whitespace-pre-wrap break-words">
-                {lineSpans.length === 0
-                  ? ln.text
-                  : renderLineWithHighlights(ln.text, ln.start, lineSpans, activeSpan)}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
-  );
-}
-
-function renderLineWithHighlights(
-  lineText: string,
-  lineStart: number,
-  spans: TextEvidenceItem[],
-  activeSpan: [number, number] | null,
-): React.ReactNode[] {
-  const parts: React.ReactNode[] = [];
-  let cursor = 0;
-  // Local offsets within this line, clipped to the line bounds.
-  const sorted = spans
-    .map(s => ({
-      ...s,
-      localStart: Math.max(0, s.start - lineStart),
-      localEnd:   Math.max(0, s.end   - lineStart),
-    }))
-    .sort((a, b) => a.localStart - b.localStart);
-
-  sorted.forEach((s, i) => {
-    if (s.localStart > cursor) {
-      parts.push(<span key={`pre${i}`}>{lineText.slice(cursor, s.localStart)}</span>);
-    }
-    const isActive = activeSpan && s.start === activeSpan[0] && s.end === activeSpan[1];
-    parts.push(
-      <mark
-        key={`mark${i}`}
-        data-span-start={s.start}
-        className={
-          isActive
-            ? "bg-amber-300 ring-2 ring-amber-500 rounded px-0.5 dark:bg-amber-700/60"
-            : "bg-yellow-200 dark:bg-yellow-900/50 rounded px-0.5"
-        }
-        title={s.section ? `${s.section}, chars ${s.start}-${s.end}` : `chars ${s.start}-${s.end}`}
-      >
-        {lineText.slice(s.localStart, Math.min(lineText.length, s.localEnd))}
-      </mark>
-    );
-    cursor = Math.min(lineText.length, s.localEnd);
-  });
-  if (cursor < lineText.length) {
-    parts.push(<span key="tail">{lineText.slice(cursor)}</span>);
-  }
-  return parts;
-}
-
 
 // ---- XLSX export ----------------------------------------------------------
 //

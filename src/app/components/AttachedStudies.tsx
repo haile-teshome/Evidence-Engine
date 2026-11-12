@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useStore } from "../lib/store";
 import { useStudyImport } from "../lib/useStudyImport";
 import { getPdfBlob } from "../lib/pdfBlobs";
+import { PdfViewer } from "./PdfViewer";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog";
 import { Button } from "./ui/button";
 import { ImportStudies } from "./ImportStudies";
@@ -109,7 +110,8 @@ export function AttachedStudies({
 
                   <div className="flex-1 min-h-0 overflow-hidden">
                     {blob ? (
-                      <iframe title="PDF preview" src={blob} className="w-full h-full border-0" />
+                      <PdfViewer paperId={selected.id} title={selected.title} hideTitle
+                                 className="h-full rounded-none border-0" />
                     ) : (
                       <div className="h-full overflow-y-auto px-5 py-4 space-y-3">
                         {selected.abstract && (

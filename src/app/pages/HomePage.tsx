@@ -5,6 +5,7 @@ import { AIService, DataAggregator, supportsTools } from "../lib/mockServices";
 import type { ClarifyingQuestion, Paper } from "../lib/mockServices";
 import { useStudyImport } from "../lib/useStudyImport";
 import { AttachedStudies } from "../components/AttachedStudies";
+import { PdfViewer } from "../components/PdfViewer";
 import { Card } from "../components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../components/ui/dialog";
 import { getPdfBlob, getPdfBlobMime, getDocHtml, docFilesReady, registerPdfBlobs } from "../lib/pdfBlobs";
@@ -2618,7 +2619,12 @@ export function HomePage() {
                 <div className="doc-preview mx-auto max-w-3xl px-10 py-8 text-[15px] leading-relaxed text-neutral-800"
                   dangerouslySetInnerHTML={{ __html: previewDoc.html }} />
               </div>
+            ) : previewDoc.fileMime === "application/pdf" ? (
+              <PdfViewer paperId={previewDoc.id} url={previewDoc.fileUrl} hideTitle
+                         externalUrl={previewDoc.fileUrl} className="min-h-0 flex-1" />
             ) : (
+              // Plain text, and anything else the browser can show inline: its
+              // own frame is the right renderer, and the only one for these.
               <iframe title="Document preview" src={previewDoc.fileUrl} className="flex-1 w-full rounded-md border bg-white" />
             )
           ) : (
