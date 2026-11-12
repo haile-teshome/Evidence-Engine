@@ -120,7 +120,31 @@ Remove-Item -Recurse -Force (Join-Path $Stage "runtime\node-tmp")
 tar -xzf $PyTgz -C (Join-Path $Stage "runtime")
 
 $Bpy = Join-Path $Stage "runtime\python\python.exe"
-& $Bpy -m pip download -r (Join-Path $Stage "Backend\requirements.txt") -d (Join-Path $Stage "Backend\wheels") | Out-Null
+Set-Content -Path (Join-Path $Stage "runtime\TARGET") -Value "win-x64" -NoNewline
+# INSTALLED into the interpreter that ships with the app, not downloaded as
+# wheels for the user's machine to install on first run. That first run needed
+# pip to succeed on a stranger's machine, took minutes, and left a half-built
+# environment behind if anything interrupted it. A bundle now arrives with its
+# dependencies in it and has nothing to set up.
+& $Bpy -m pip install --no-warn-script-location -r (Join-Path $Stage "Backend\requirements.txt") | Out-Null
+# pip is not needed at runtime; `python -m venv` still works from ensurepip.
+Remove-Item -Recurse -Force (Join-Path $Stage "runtime\python\Lib\site-packages\pip") -ErrorAction SilentlyContinue
+Get-ChildItem (Join-Path $Stage "runtime\python\Lib\site-packages") -Filter "pip-*.dist-info" -ErrorAction SilentlyContinue |
+  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+# Prove the bundle can start before it is wrapped up. A missing or half-built
+# dependency is a build failure, not something for a reviewer to discover.
+Write-Host "    checking the bundle has everything the backend imports"
+$env:PYTHONDONTWRITEBYTECODE = "1"   # an import writes a .pyc beside every module
+& $Bpy -c "import fastapi, uvicorn, pydantic, dotenv, requests, bs4, Bio, pypdf, pdfplumber, docling, torch, transformers, numpy, pandas, sqlalchemy, langchain, langchain_core, langchain_ollama, openai, anthropic, ollama"
+if ($LASTEXITCODE -ne 0) { throw "REFUSING TO PACKAGE: the bundled interpreter cannot import what the backend needs" }
+Remove-Item Env:\PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue
+
+# No byte-compiled files ship, and this runs after the import check because an
+# import writes one beside every module it touches. The launcher points
+# PYTHONPYCACHEPREFIX at the user's own cache instead.
+Get-ChildItem (Join-Path $Stage "runtime\python") -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+  Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "==> [7/7] Packaging"
 $Zip = Join-Path $Root "dist-bundle\EvidenceEngine-$Version-win-x64.zip"

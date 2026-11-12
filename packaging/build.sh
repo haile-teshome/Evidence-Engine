@@ -130,11 +130,15 @@ BIG=$(find "$PAYLOAD" -type d -name '.rank_cache' -o -type d -name 'video' 2>/de
 [ -n "$BIG" ] && { echo "REFUSING TO BUILD: developer caches staged:"; echo "$BIG"; exit 1; }
 echo "    no credentials or caches staged"
 
-echo "==> [6/7] Adding the runtimes and vendoring backend wheels"
+echo "==> [6/7] Adding the runtimes and installing the backend dependencies"
 mkdir -p "$PAYLOAD/runtime/node"
 tar -xzf "$NODE_TGZ" -C "$PAYLOAD/runtime/node" --strip-components=1
 tar -xzf "$PY_TGZ" -C "$PAYLOAD/runtime"          # yields runtime/python/
 BPY="$PAYLOAD/runtime/python/bin/python3"
+# What this build stamps the bundle with, so the launcher can tell a user who
+# downloaded the wrong one exactly that, instead of failing at the first thing
+# that happens to need the right architecture.
+echo "$TARGET" > "$PAYLOAD/runtime/TARGET"
 # On Linux the default torch wheel drags in five CUDA packages (cudnn, nccl,
 # cusparselt, nvshmem, triton) gated on platform_system == "Linux", which do not
 # apply on macOS. That is gigabytes of GPU runtime for a desktop app whose
@@ -144,15 +148,44 @@ BPY="$PAYLOAD/runtime/python/bin/python3"
 # Spelled out rather than built as an array: expanding an EMPTY array under
 # `set -u` is an error on bash 3.2, which is what macOS ships and what the Mac
 # runners use, so an array here built fine on Linux and failed on both Macs.
+# INSTALLED here, into the interpreter that ships with the app, rather than
+# downloaded as wheels for the user's machine to install on first run. That
+# first run was the whole problem: it needed pip to succeed on a stranger's
+# machine, it took minutes, and anything that interrupted it left an
+# environment that every later launch retried and failed on. A bundle now
+# arrives with its dependencies already in it and has nothing to set up.
 if [ "$TARGET" = "linux-x64" ]; then
-  "$BPY" -m pip download -r "$PAYLOAD/Backend/requirements.txt" \
+  "$BPY" -m pip install --no-warn-script-location -r "$PAYLOAD/Backend/requirements.txt" \
     --index-url https://download.pytorch.org/whl/cpu \
-    --extra-index-url https://pypi.org/simple \
-    -d "$PAYLOAD/Backend/wheels" >/dev/null
+    --extra-index-url https://pypi.org/simple >/dev/null
 else
-  "$BPY" -m pip download -r "$PAYLOAD/Backend/requirements.txt" \
-    -d "$PAYLOAD/Backend/wheels" >/dev/null
+  "$BPY" -m pip install --no-warn-script-location \
+    -r "$PAYLOAD/Backend/requirements.txt" >/dev/null
 fi
+# pip is not needed at runtime: nothing installs anything after this point.
+# (`python -m venv` still works, from ensurepip in the standard library, which
+# is the path a source checkout uses.)
+rm -rf "$PAYLOAD"/runtime/python/lib/python3.*/site-packages/pip \
+       "$PAYLOAD"/runtime/python/lib/python3.*/site-packages/pip-*.dist-info
+
+# Prove the bundle can actually start before it is wrapped up. A missing or
+# half-installed dependency is a build failure, not something to discover on a
+# reviewer's laptop: these are the imports the backend does on the way up.
+# PYTHONDONTWRITEBYTECODE, because an import writes a .pyc beside every module
+# it touches, and those are exactly what the next step is here to remove.
+echo "    checking the bundle has everything the backend imports"
+PYTHONDONTWRITEBYTECODE=1 "$BPY" -c "import fastapi, uvicorn, pydantic, dotenv, requests, bs4, Bio, pypdf, \
+           pdfplumber, docling, torch, transformers, numpy, pandas, sqlalchemy, \
+           langchain, langchain_core, langchain_ollama, openai, anthropic, ollama" \
+  || { echo "REFUSING TO PACKAGE: the bundled interpreter cannot import what the backend needs"; exit 1; }
+
+# No byte-compiled files ship, and this runs LAST because anything that imports
+# a module writes one beside it. Compiling the lot added 373 MB to the download
+# to save a one-off parse; the launcher points PYTHONPYCACHEPREFIX at the user's
+# own cache instead, so they are written there on first run and an app folder
+# nobody can write to stops mattering.
+find "$PAYLOAD/runtime/python" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+echo "    backend dependencies installed into the bundled interpreter"
 
 echo "==> [7/7] Packaging"
 mkdir -p "$ROOT/dist-bundle"

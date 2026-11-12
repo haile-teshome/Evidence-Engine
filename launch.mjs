@@ -69,6 +69,38 @@ function log(m) {
   try { fs.appendFileSync(LOG_FILE, "[" + new Date().toISOString() + "] " + m + "\n"); } catch { /* best effort */ }
 }
 
+// Say it where the person can see it. Started from the Dock or the Start menu,
+// this launcher's stdout goes nowhere, so a missing prerequisite used to look
+// like an app that bounced once and quit. Every refusal to start now puts a
+// real dialog on screen, with the reason in it and the log path under it.
+function showError(title, lines) {
+  const body = lines.filter(Boolean).join("\n");
+  lines.filter(Boolean).forEach(log);
+  try {
+    if (process.platform === "darwin") {
+      const esc = (t) => t.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      spawnSync("osascript", ["-e",
+        `display dialog "${esc(body)}" with title "${esc(title)}" buttons {"Show log", "OK"} default button "OK" with icon stop`],
+        { encoding: "utf8" });
+      // Either button is fine; the log is what they need either way, and
+      // revealing it costs nothing when they picked OK.
+      spawnSync("open", ["-R", LOG_FILE], { stdio: "ignore" });
+    } else if (IS_WIN) {
+      // wscript is always present, and is already how the Start menu runs us.
+      const vbs = path.join(EE_CACHE, "error.vbs");
+      const q = (t) => t.replace(/"/g, '""').replace(/\r?\n/g, '" & vbCrLf & "');
+      fs.writeFileSync(vbs, `MsgBox "${q(body)}", vbCritical, "${q(title)}"\n`);
+      spawnSync("wscript.exe", [vbs], { stdio: "ignore" });
+    } else {
+      const dialog = ["zenity", "kdialog", "xmessage"].find(
+        (c) => spawnSync("which", [c], { stdio: "ignore" }).status === 0);
+      if (dialog === "zenity") spawnSync("zenity", ["--error", "--title", title, "--text", body], { stdio: "ignore" });
+      else if (dialog === "kdialog") spawnSync("kdialog", ["--error", body, "--title", title], { stdio: "ignore" });
+      else if (dialog === "xmessage") spawnSync("xmessage", ["-center", `${title}\n\n${body}`], { stdio: "ignore" });
+    }
+  } catch { /* a dialog we cannot draw must not replace the error with its own */ }
+}
+
 // Fresh backend.log per run, handed to the child as its stdout/stderr.
 function openBackendLog() {
   try {
@@ -195,15 +227,55 @@ const RUNTIME_DIR = path.join(PROJECT, "runtime");
 const BUNDLED_PY = IS_WIN
   ? path.join(RUNTIME_DIR, "python", "python.exe")
   : path.join(RUNTIME_DIR, "python", "bin", "python3");
-const WHEELS_DIR = path.join(BACKEND_DIR, "wheels");   // vendored deps for offline install
+const WHEELS_DIR = path.join(BACKEND_DIR, "wheels");   // only in bundles built before deps shipped installed
+const TARGET_FILE = path.join(RUNTIME_DIR, "TARGET");  // what this bundle was built for
+const RELEASES_URL = "https://github.com/haile-teshome/Evidence-Engine/releases/latest";
 
-function pyVersionOk(cmd) {
-  // Returns the (major, minor) if runnable and >= 3.9, else null.
+/** The platform-arch this machine is, named the way the builds are named. */
+function thisTarget() {
+  const os_ = IS_WIN ? "win" : process.platform === "darwin" ? "darwin" : "linux";
+  const arch = process.arch === "arm64" ? "arm64" : "x64";
+  return `${os_}-${arch}`;
+}
+
+/** The download this user should have taken, when they took another one. */
+function wrongDownload() {
+  let built = "";
+  try { built = fs.readFileSync(TARGET_FILE, "utf8").trim(); } catch { return null; }
+  if (!built || built === thisTarget()) return null;
+  // win-x64 runs on Windows on ARM through emulation, so that is not a mismatch.
+  if (built === "win-x64" && IS_WIN) return null;
+  return { built, actual: thisTarget() };
+}
+
+// Run an interpreter and say what happened. The failure text matters as much as
+// the success: "the bundled Python would not run" and "this machine has no
+// Python" need different answers, and they used to be the same answer.
+function pyProbe(cmd) {
   const r = spawnSync(cmd, ["-c", "import sys;print(sys.version_info[0],sys.version_info[1])"],
     { encoding: "utf8" });
-  if (r.status !== 0 || !r.stdout) return null;
-  const [maj, min] = r.stdout.trim().split(/\s+/).map(Number);
-  return maj === 3 && min >= 9 ? { maj, min } : null;
+  if (r.error) return { err: r.error.message };
+  if (r.status !== 0) {
+    const why = (r.stderr || "").trim().split("\n").filter(Boolean).pop();
+    return { err: why || `exited ${r.status}` };
+  }
+  const [maj, min] = (r.stdout || "").trim().split(/\s+/).map(Number);
+  if (maj !== 3 || min < 9) return { err: `found Python ${maj}.${min}, need 3.9 or newer` };
+  return { ver: { maj, min } };
+}
+
+// A bundle carries its own interpreter, so the only reasons it would not run
+// are local ones: the quarantine flag macOS puts on everything downloaded, or
+// execute bits lost in a zip round-trip. Both are ours to clear, and clearing
+// them is the difference between "download it and run it" and "install Python
+// first". Best effort: an app folder the user cannot write to is left alone.
+function repairBundledRuntime() {
+  const pyDir = path.join(RUNTIME_DIR, "python");
+  if (IS_WIN || !fs.existsSync(pyDir)) return;
+  spawnSync("chmod", ["-R", "u+rx", path.join(pyDir, "bin")], { stdio: "ignore" });
+  if (process.platform === "darwin") {
+    spawnSync("xattr", ["-dr", "com.apple.quarantine", RUNTIME_DIR], { stdio: "ignore" });
+  }
 }
 
 // Find a base interpreter capable of creating a venv. Prefer newer versions;
@@ -211,14 +283,26 @@ function pyVersionOk(cmd) {
 // so we try explicit versioned names first.
 function findBasePython() {
   // Prefer the bundled interpreter so a self-contained install never depends on
-  // (or is broken by) whatever Python happens to be on the machine.
-  if (fs.existsSync(BUNDLED_PY) && pyVersionOk(BUNDLED_PY)) return BUNDLED_PY;
+  // (or is broken by) whatever Python happens to be on the machine. If it will
+  // not start, repair it and try once more before falling back: falling back
+  // silently is how someone with a complete bundle ended up being told to go
+  // and install Python.
+  if (fs.existsSync(BUNDLED_PY)) {
+    let probe = pyProbe(BUNDLED_PY);
+    if (probe.err) {
+      log(`The bundled Python did not start (${probe.err}); clearing quarantine and permissions.`);
+      repairBundledRuntime();
+      probe = pyProbe(BUNDLED_PY);
+      if (probe.err) log(`The bundled Python still will not start: ${probe.err}`);
+    }
+    if (probe.ver) return BUNDLED_PY;
+  }
   const cands = IS_WIN
     ? ["python", "py", "python3", "python3.12", "python3.11"]
     : ["python3.13", "python3.12", "python3.11", "python3.10", "python3", "python"];
   let best = null, bestVer = -1;
   for (const c of cands) {
-    const v = pyVersionOk(c);
+    const v = pyProbe(c).ver;
     if (!v) continue;
     const canVenv = spawnSync(c, ["-c", "import venv"], { stdio: "ignore" });
     if (canVenv.status !== 0) continue;
@@ -228,10 +312,41 @@ function findBasePython() {
   return best;
 }
 
-function venvHasDeps() {
-  if (!fs.existsSync(VENV_PY)) return false;
-  const dep = spawnSync(VENV_PY, ["-c", "import fastapi, uvicorn"], { stdio: "ignore" });
+// Child output goes straight into the launcher log: a long install can be
+// watched while it runs, and a failed one can be read afterwards. It used to be
+// inherited, which meant it went to /dev/null for anyone starting from the app
+// icon, so the one thing that explains the failure was the one thing not kept.
+function runLogged(cmd, args) {
+  // Where this child's output starts, so its own last words can be read back
+  // without picking up the launcher's lines around them.
+  let from = 0;
+  try { from = fs.statSync(LOG_FILE).size; } catch { /* no log yet */ }
+  let fd = null;
+  try { fd = fs.openSync(LOG_FILE, "a"); } catch { /* no log: still run it */ }
+  const r = spawnSync(cmd, args, fd === null ? { stdio: "ignore" } : { stdio: ["ignore", fd, fd] });
+  if (fd !== null) { try { fs.closeSync(fd); } catch { /* ignore */ } }
+  r.logFrom = from;
+  return r;
+}
+
+/** The last few lines a logged child wrote, which after a failure is its error.
+ *  Sliced as BYTES, because that is what the file offset counts: one "…" in an
+ *  earlier line is enough to make a character slice skip the whole thing. */
+function logSince(from, n = 3) {
+  try {
+    const text = fs.readFileSync(LOG_FILE).subarray(from).toString("utf8");
+    const lines = text.trimEnd().split("\n").map(l => l.trim()).filter(Boolean);
+    return lines.slice(-n).join(" / ").slice(0, 400);
+  } catch { return ""; }
+}
+
+function hasDeps(py) {
+  const dep = spawnSync(py, ["-c", "import fastapi, uvicorn"], { stdio: "ignore" });
   return dep.status === 0;
+}
+
+function venvHasDeps() {
+  return fs.existsSync(VENV_PY) && hasDeps(VENV_PY);
 }
 
 // Create the env file on first run so the user never has to. No API keys are
@@ -255,34 +370,74 @@ function ensureBackendEnv() {
   } catch { /* ignore — the backend falls back to built-in defaults */ }
 }
 
-// Ensure a working, isolated backend interpreter. Returns the python path to run
-// the backend with, or null if we couldn't build one.
+// Ensure a working, isolated backend interpreter. Returns `{ py }` with the
+// interpreter to run the backend with, or `{ reason }` saying which step failed.
+// It returns a reason because the caller used to get only null, and answered it
+// by sending everyone to python.org: right for a machine with no Python, and
+// useless for the four other ways this can fail with a Python right there.
 function ensureBackendPython() {
-  if (venvHasDeps()) return VENV_PY;
-
+  // A bundle built by packaging/build.* carries its dependencies inside its own
+  // interpreter, so there is nothing to create, nothing to download and nothing
+  // that can half-finish. This is the path every installed copy takes.
   const base = findBasePython();
-  if (!base) return null;
+  if (base === BUNDLED_PY && hasDeps(BUNDLED_PY)) return { py: BUNDLED_PY };
+
+  // A source checkout, or a bundle from before the dependencies shipped
+  // installed, keeps its own environment under ~/.evidence-engine.
+  if (venvHasDeps()) return { py: VENV_PY };
+
+  if (!base) {
+    return { reason: fs.existsSync(BUNDLED_PY)
+      ? "this copy ships its own Python and it would not start"
+      : "no Python 3.9 or newer was found on this machine" };
+  }
+
+  // A venv that exists without the dependencies is a first run interrupted
+  // partway through a long install: closed laptop, quit app, lost network.
+  // Reusing it means pip retries into a half-built environment on every launch
+  // and fails the same way every time. Rebuilding it is what gets the user
+  // running, and costs nothing when it was already going to be rebuilt.
+  if (fs.existsSync(VENV_PY) && !venvHasDeps()) {
+    log("The backend environment is incomplete (an earlier setup did not finish); rebuilding it.");
+    try { fs.rmSync(VENV_DIR, { recursive: true, force: true }); } catch { /* in use: reuse it */ }
+  }
 
   if (!fs.existsSync(VENV_PY)) {
     log("First run: creating an isolated Python environment for the backend...");
-    const mk = spawnSync(base, ["-m", "venv", VENV_DIR], { stdio: "ignore" });
-    if (mk.status !== 0 || !fs.existsSync(VENV_PY)) return null;
+    const mk = runLogged(base, ["-m", "venv", VENV_DIR]);
+    if (mk.status !== 0 || !fs.existsSync(VENV_PY)) {
+      return { reason: `the environment under ${VENV_DIR} could not be created (${logSince(mk.logFrom, 2) || `exit ${mk.status}`})` };
+    }
   }
 
   const req = path.join(BACKEND_DIR, "requirements.txt");
   if (fs.existsSync(req)) {
     log("Installing backend dependencies (one time, a couple of minutes)...");
-    // Offline install from vendored wheels when the bundle ships them; otherwise
-    // fall back to PyPI (developer / from-source mode).
+    // The bundle ships every wheel it needs, so the offline install is the one
+    // that should work and the one that is tried first. The networked retry is
+    // for when it does not: a slow first run beats a dead end, and someone who
+    // downloaded a complete bundle should never have to go and find Python.
     const offline = fs.existsSync(WHEELS_DIR);
-    const pipArgs = ["-m", "pip", "install"];
-    if (offline) pipArgs.push("--no-index", "--find-links", WHEELS_DIR);
-    else spawnSync(VENV_PY, ["-m", "pip", "install", "--upgrade", "pip"], { stdio: "ignore" });
-    pipArgs.push("-r", req);
-    const inst = spawnSync(VENV_PY, pipArgs, { stdio: "inherit" });
-    if (inst.status !== 0) return null;
+    const attempts = offline
+      ? [{ what: "from the bundled wheels", extra: ["--no-index", "--find-links", WHEELS_DIR] },
+         { what: "from the network", extra: [] }]
+      : [{ what: "from the network", extra: [] }];
+    let ok = false;
+    let why = "";
+    for (const attempt of attempts) {
+      if (!attempt.extra.length) {
+        spawnSync(VENV_PY, ["-m", "pip", "install", "--upgrade", "pip"], { stdio: "ignore" });
+      }
+      const inst = runLogged(VENV_PY, ["-m", "pip", "install", ...attempt.extra, "-r", req]);
+      if (inst.status === 0) { ok = true; break; }
+      why = logSince(inst.logFrom);
+      log(`Installing the dependencies ${attempt.what} failed.`);
+    }
+    if (!ok) return { reason: `the backend dependencies could not be installed (${why})` };
   }
-  return venvHasDeps() ? VENV_PY : null;
+  return venvHasDeps()
+    ? { py: VENV_PY }
+    : { reason: "the dependencies installed but the backend still cannot be imported" };
 }
 
 // Docling downloads its layout and table models from Hugging Face the first time
@@ -295,7 +450,10 @@ const DOCLING_MARK = path.join(EE_CACHE, "docling-models-fetched");
 function warmDocling(venvPy) {
   if (!venvPy || fs.existsSync(DOCLING_MARK)) return;
   const code = "from docling.document_converter import DocumentConverter; DocumentConverter()";
-  const p = spawn(venvPy, ["-c", code], { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN });
+  const p = spawn(venvPy, ["-c", code], {
+    cwd: PROJECT, stdio: "ignore", detached: !IS_WIN,
+    env: { ...process.env, PYTHONPYCACHEPREFIX: path.join(EE_CACHE, "pycache") },
+  });
   started.push(p);
   p.on("exit", (status) => {
     if (status === 0) {
@@ -897,6 +1055,11 @@ async function main() {
   writeLock();   // claim the single-instance lock so later launches just focus us
 
   const spawnOpts = { cwd: PROJECT, stdio: "ignore", detached: !IS_WIN };
+  // Byte-code goes to the user's cache, not next to the app. The app folder is
+  // often somewhere they cannot write (/Applications, Program Files), and
+  // shipping the compiled files instead would have added 373 MB to the
+  // download. Written once here, reused by every later launch.
+  const pyEnv = { ...process.env, PYTHONPYCACHEPREFIX: path.join(EE_CACHE, "pycache") };
 
   // 2) backend — run from an isolated venv so it always uses a working Python
   //    with correctly-built deps, regardless of what `python3` resolves to when
@@ -911,11 +1074,10 @@ async function main() {
   if (await isOurBackend(BACKEND_PORT)) {
     log(`Backend already running on :${BACKEND_PORT}`);
   } else {
-    const backendPy = ensureBackendPython();
+    const { py: backendPy, reason } = ensureBackendPython();
     if (!backendPy) {
-      log("Could not set up the Python backend. Install Python 3.10+ from");
-      log("https://www.python.org/downloads/ (or `brew install python`), then run this again.");
-      openDefaultBrowser("https://www.python.org/downloads/");
+      showError("Evidence Engine cannot start",
+        [...backendFailureAdvice(reason).lines, "", "Log: " + LOG_FILE]);
       cleanup(1); return;
     }
     // Nothing here blocks the window: the models are fetched beside the app.
@@ -926,19 +1088,33 @@ async function main() {
     const blog = openBackendLog();
     const b = spawn(backendPy,
       ["-m", "uvicorn", "api:app", "--app-dir", BACKEND_DIR, "--host", LOCAL, "--port", String(BACKEND_PORT)],
-      blog === null ? spawnOpts : { ...spawnOpts, stdio: ["ignore", blog, blog] });
+      blog === null ? { ...spawnOpts, env: pyEnv }
+                    : { ...spawnOpts, env: pyEnv, stdio: ["ignore", blog, blog] });
     started.push(b);
     // If the backend exits on its own the app would otherwise sit on "the local
     // engine is still starting" forever. Record it so /api answers explain the
     // failure and point at the log instead of timing out silently.
     b.on("exit", (code, signal) => {
       if (shuttingDown) return;
+      const first = backendFailure === null && heldWindow === null;
       backendFailure = {
         code, signal,
         log: BACKEND_LOG,
         at: new Date().toISOString(),
       };
-      log(`The backend stopped unexpectedly (exit ${code ?? signal}). The app window will say so.`);
+      log(`The backend stopped unexpectedly (exit ${code ?? signal}).`);
+      // Before the window exists there is nothing to carry the message, and a
+      // missing dependency dies exactly here: the import fails, the process
+      // exits, and the app would otherwise just never appear. Afterwards the
+      // window explains itself and a dialog on top of it would be noise.
+      if (first) {
+        showError("Evidence Engine cannot start", [
+          `The engine stopped while starting up (exit ${code ?? signal}).`,
+          "This usually means something it needs is missing or could not be loaded.",
+          "",
+          "Engine log: " + BACKEND_LOG,
+        ]);
+      }
     });
   }
 
@@ -1184,6 +1360,49 @@ function keepAlive() {
   log(`\nEvidence Engine is running at ${appUrl()}`);
   log(">>> Press Ctrl-C in this window to shut everything down. <<<");
   setInterval(() => {}, 1 << 30);   // stay alive until SIGINT
+}
+
+// What to tell someone whose backend would not start, and whether sending them
+// to python.org is any use to them. A copy that ships its own Python cannot be
+// helped by downloading another one, which is what it used to offer everybody.
+// Both the launch path and --check-python read this, so the check reports what
+// a real launch would actually have said.
+function backendFailureAdvice(reason) {
+  const bundled = fs.existsSync(BUNDLED_PY);
+  const lines = ["Could not start the backend: " + reason + "."];
+  const wrong = wrongDownload();
+  if (wrong) {
+    // The one failure a user can act on, and the one they were never told
+    // about: an arm64 build on an Intel Mac cannot run its own interpreter, so
+    // every step after that fails for a reason that has nothing to do with the
+    // step. Installing Python does not help, which is exactly what they report.
+    lines.push(`This download is the ${wrong.built} build and this machine is ${wrong.actual}.`);
+    lines.push(`Download the ${wrong.actual} build instead: ${RELEASES_URL}`);
+  } else if (bundled) {
+    lines.push("This copy carries its own Python and its own dependencies, so there is");
+    lines.push("nothing to install. The log says what failed: " + LOG_FILE);
+  } else {
+    // A source checkout, which is a developer, not someone who downloaded the
+    // app. No browser is opened: an installed copy is never short of a Python,
+    // so offering one has never been the answer to a failure here.
+    lines.push("This is a source checkout with no bundled runtime: run setup.sh first.");
+    lines.push("The full log is at " + LOG_FILE);
+  }
+  return { lines, wrongBuild: Boolean(wrong) };
+}
+
+// `node launch.mjs --check-python` sets the backend up and reports what
+// happened, without starting the app. It is what to ask someone to run when a
+// launch failed: it prints the step that broke rather than a dead window.
+if (process.argv.includes("--check-python")) {
+  const { py, reason } = ensureBackendPython();
+  if (py) {
+    log(`Backend interpreter ready: ${py}`);
+  } else {
+    backendFailureAdvice(reason).lines.forEach(log);
+  }
+  log(fs.existsSync(BUNDLED_PY) ? `Bundled Python: ${BUNDLED_PY}` : "No bundled Python in this copy.");
+  process.exit(py ? 0 : 1);
 }
 
 main().catch((e) => { log("Launcher error: " + e.message); cleanup(1); });
