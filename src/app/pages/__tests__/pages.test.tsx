@@ -295,13 +295,13 @@ describe("stage gating", () => {
 
   it("QualityPage shows its own controls before anything has been screened", () => {
     /* It used to replace itself with a "No research goal yet" signpost, which
-       hid the instrument note, the integrity tab and the appraise action behind
+       hid the instrument note, the retraction tab and the appraise action behind
        a card about a different page. The panel that lists included articles
        says what is missing in place instead. */
     const view = renderPage(QualityPage);
     expect(view.container.textContent).not.toMatch(/no research goal yet/i);
     expect(view.container.textContent).toMatch(/risk of bias/i);
-    expect(view.container.textContent).toMatch(/research integrity/i);
+    expect(view.container.textContent).toMatch(/retraction check/i);
     // With nothing included there is nothing to run, so the appraise action
     // is not offered: the panel says what to do instead.
     expect(view.container.textContent).toMatch(/no included articles yet/i);

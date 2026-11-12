@@ -10,7 +10,7 @@ import { toast } from "sonner";
 
 type Result = { paper_id: string; status: string; detail: string; source: string; doi: string; notice_doi?: string; notice_date?: string };
 
-// Research-integrity check: flags included studies that have been retracted or
+// Retraction check: flags included studies that have been retracted or
 // carry an expression of concern (OpenAlex is_retracted + Crossref updates).
 // Including a retracted study is a serious, avoidable error; this catches it.
 export function IntegrityCheck() {
@@ -69,7 +69,7 @@ export function IntegrityCheck() {
         <div className="flex items-start gap-2 min-w-0">
           <ShieldAlert className="size-4 text-primary mt-0.5 shrink-0" />
           <div className="min-w-0">
-            <div className="text-sm font-medium leading-tight">Research integrity check</div>
+            <div className="text-sm font-medium leading-tight">Retraction check</div>
             <p className="text-xs text-muted-foreground leading-snug">Flags included studies that are retracted or under an expression of concern.</p>
           </div>
         </div>

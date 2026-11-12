@@ -445,16 +445,16 @@ export function QualityPage() {
   // Studies, not a research question, are what this stage appraises, and the
   // page no longer replaces itself with a card asking for one. A reviewer
   // arriving with their own included studies sees the appraisal controls, the
-  // instrument picker and the integrity tab straight away, and the panel that
+  // instrument picker and the retraction tab straight away, and the panel that
   // lists the included articles says what is missing in place. Replacing the
   // whole page hid every one of its own components behind a signpost.
   // `s.history` is read nowhere else here, so nothing below depends on it.
 
   return (
     <div className="space-y-4">
-      {/* Tab toggle: risk-of-bias appraisal vs a research-integrity report. */}
+      {/* Tab toggle: risk-of-bias appraisal vs the retraction report. */}
       <div className="inline-flex items-center gap-1 rounded-lg border bg-muted/50 p-0.5 w-fit">
-        {([["appraisal", "Risk of bias", ShieldCheck], ["integrity", "Research integrity", ShieldAlert]] as const).map(([id, label, Icon]) => (
+        {([["appraisal", "Risk of bias", ShieldCheck], ["integrity", "Retraction check", ShieldAlert]] as const).map(([id, label, Icon]) => (
           <button key={id} onClick={() => setQualityTab(id)}
             className={`relative inline-flex items-center gap-1.5 rounded-md px-3 h-8 text-sm font-medium transition-colors ${qualityTab === id ? "text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
             {qualityTab === id && <motion.span layoutId="quality-tab-indicator" transition={{ type: "spring", stiffness: 440, damping: 36, mass: 0.7 }} className="absolute inset-0 rounded-md bg-card shadow-sm" />}
