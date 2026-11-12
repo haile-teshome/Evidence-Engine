@@ -10,9 +10,38 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Any, Tuple
 from config import Config, DataSource
 from models import Paper
+from request_creds import openalex_auth
 import time
 
 _last_request_time = 0.0
+
+
+class OpenAlexError(RuntimeError):
+    """OpenAlex answered, and the answer was a refusal."""
+
+
+def _openalex_json(resp) -> dict:
+    """The body of an OpenAlex response, or a raised error explaining why not.
+
+    A refused call comes back as a normal JSON object with an `error` key, so
+    reading `results` off it yields nothing and the caller cannot tell an empty
+    search from a rejected one. Without this, a spent request budget looks
+    exactly like a seed with no related work.
+    """
+    try:
+        data = resp.json()
+    except Exception:
+        raise OpenAlexError(f"OpenAlex returned a non-JSON response ({getattr(resp, 'status_code', '?')}).")
+    if isinstance(data, dict) and data.get("error"):
+        detail = str(data.get("message") or data.get("error") or "").strip()
+        if "budget" in detail.lower() or getattr(resp, "status_code", 0) == 429:
+            raise OpenAlexError(
+                "OpenAlex turned the request down: without an API key the daily budget is "
+                "shared with every machine on your network, and it is used up. Add a free "
+                "OpenAlex key under API keys."
+            )
+        raise OpenAlexError(f"OpenAlex turned the request down: {detail[:200]}")
+    return data if isinstance(data, dict) else {}
 
 def throttled_request(url: str, params: dict = None, headers: dict = None, method: str = "GET", max_retries: int = 3, timeout: int = 30) -> requests.Response:
     """Ensures all outgoing requests respect a 1-request-per-second limit with retry logic."""
@@ -640,11 +669,12 @@ class OpenAlexService:
             clean = translate_query(query, "OpenAlex")
             url = "https://api.openalex.org/works"
             params = {
+                **openalex_auth(),
                 "filter": f"title_and_abstract.search:{clean}" if clean else None,
                 "per_page": min(max(max_results, 1), 200),
                 "select": "id,title,abstract_inverted_index,doi,open_access,publication_year,authorships,primary_location,biblio",
             }
-            resp = throttled_request(url, params=params).json()
+            resp = _openalex_json(throttled_request(url, params=params))
             papers: List[Paper] = []
             for w in resp.get("results", []):
                 abs_idx = w.get("abstract_inverted_index") or {}
@@ -677,25 +707,31 @@ class OpenAlexService:
         similarity (shared concepts), NOT citations. Complements citation
         snowballing by surfacing same-topic papers that have no citation link."""
         try:
-            mail = {}  # no contact email is sent to third-party APIs
+            # The key, and no contact email: the address is per-user and belongs
+            # to the request-scoped helpers in api.py, but the key is what makes
+            # an OpenAlex call work at all now.
+            auth = openalex_auth()
             # 1. resolve the seed to an OpenAlex work and read its related_works
             if seed_doi:
                 doi = seed_doi.replace("https://doi.org/", "")
-                w = throttled_request(f"https://api.openalex.org/works/doi:{doi}",
-                                      params={**mail, "select": "id,related_works"}).json()
+                w = _openalex_json(throttled_request(
+                    f"https://api.openalex.org/works/doi:{doi}",
+                    params={**auth, "select": "id,related_works"}))
             else:
-                r = throttled_request("https://api.openalex.org/works",
-                                      params={**mail, "search": seed_title, "per_page": 1,
-                                              "select": "id,related_works"}).json()
+                r = _openalex_json(throttled_request(
+                    "https://api.openalex.org/works",
+                    params={**auth, "search": seed_title, "per_page": 1,
+                            "select": "id,related_works"}))
                 w = (r.get("results") or [None])[0]
             rel_ids = [rid.split("/")[-1] for rid in ((w or {}).get("related_works") or [])][:max_results]
             if not rel_ids:
                 return []
             # 2. batch-fetch the related works
-            resp = throttled_request("https://api.openalex.org/works",
-                                     params={**mail, "filter": "ids.openalex:" + "|".join(rel_ids),
-                                             "per_page": min(len(rel_ids), 200),
-                                             "select": "id,title,abstract_inverted_index,doi,open_access"}).json()
+            resp = _openalex_json(throttled_request(
+                "https://api.openalex.org/works",
+                params={**auth, "filter": "ids.openalex:" + "|".join(rel_ids),
+                        "per_page": min(len(rel_ids), 200),
+                        "select": "id,title,abstract_inverted_index,doi,open_access"}))
             papers: List[Paper] = []
             for work in resp.get("results", []):
                 abs_idx = work.get("abstract_inverted_index") or {}
@@ -710,6 +746,11 @@ class OpenAlexService:
                     url=oa.get("oa_url") or (f"https://doi.org/{doi}" if doi else (work.get("id") or "")),
                 ))
             return papers
+        except OpenAlexError:
+            # A refusal is not an empty result, and the reviewer is the only one
+            # who can act on it, so it travels up to them rather than becoming
+            # "no similar papers found".
+            raise
         except Exception as e:
             print(f"OpenAlex related error: {e}")
             return []

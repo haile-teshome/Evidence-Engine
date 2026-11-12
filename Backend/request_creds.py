@@ -31,6 +31,20 @@ def get_cred(name: str) -> str:
         return ""
 
 
+def openalex_auth() -> dict:
+    """Query params that authenticate a call to OpenAlex, or {} without a key.
+
+    Since February 2026 OpenAlex meters unkeyed callers: the request counts
+    against a free daily budget shared by every machine on the same public IP,
+    which on a university network is spent long before the day starts. The call
+    still returns 200 with an error body, so an unkeyed caller sees empty
+    results rather than a failure. Every OpenAlex request must go through here.
+    """
+    import os
+    key = get_cred("openalex") or os.getenv("OPENALEX_API_KEY", "")
+    return {"api_key": key} if key else {}
+
+
 # Header name <-> credential key mapping, shared by the middleware.
 HEADER_TO_CRED = {
     "x-llm-openai-key": "openai",

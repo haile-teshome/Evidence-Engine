@@ -11,6 +11,7 @@ the UI says anything went wrong.
 import pytest
 
 import data_services as ds
+from request_creds import set_request_creds
 from config import DataSource
 from models import Paper
 
@@ -397,3 +398,28 @@ class TestOpenAlexRelated:
     def test_no_seed_returns_a_list(self, monkeypatch):
         monkeypatch.setattr(ds, "throttled_request", lambda *a, **k: FakeResponse({"results": []}))
         assert ds.OpenAlexService.related("", "", 10) == []
+
+    def test_a_refusal_is_raised_not_swallowed(self, monkeypatch):
+        """OpenAlex answers a spent request budget with 200-shaped JSON carrying
+        an `error` key. Read for `results` it looks like a seed with no related
+        work, which is how find-similar came to fail in silence."""
+        monkeypatch.setattr(ds, "throttled_request", lambda *a, **k: FakeResponse(
+            {"error": "Rate limit exceeded",
+             "message": "Insufficient budget. This request has no API key..."}))
+        with pytest.raises(ds.OpenAlexError) as e:
+            ds.OpenAlexService.related("seed", "", 10)
+        assert "API key" in str(e.value)
+
+    def test_sends_the_api_key_when_one_is_set(self, monkeypatch):
+        """The key is the only thing that gets a real budget, and this call used
+        to be the one OpenAlex path that never carried it."""
+        calls = []
+        monkeypatch.setattr(ds, "throttled_request",
+                            lambda *a, **k: (calls.append(k.get("params") or {}),
+                                             FakeResponse({"results": []}))[1])
+        set_request_creds({"openalex": "k-123"})
+        try:
+            ds.OpenAlexService.related("seed", "", 10)
+        finally:
+            set_request_creds({})
+        assert calls and calls[0].get("api_key") == "k-123"

@@ -44,7 +44,7 @@ from config import Config
 from models import Paper as BackendPaper, PICOCriteria, clean_markup
 from utils import AIService, Deduplicator, AITableExtractor, QueryGenerationError
 import frameworks
-from data_services import DataAggregator, OpenAlexService
+from data_services import DataAggregator, OpenAlexService, OpenAlexError
 from leads_screening import (
     LEADS_MODEL_NAME,
     LEADS_SCORE_THRESHOLD,
@@ -160,7 +160,7 @@ app.add_middleware(
 # Capture per-request LLM / database keys the user supplied from their browser
 # into a request-scoped ContextVar. Keys travel as headers, are used only to
 # construct model / data clients for this request, and are never persisted here.
-from request_creds import set_request_creds, get_cred, HEADER_TO_CRED
+from request_creds import set_request_creds, get_cred, openalex_auth, HEADER_TO_CRED
 from ratelimit import limited_get, cached, cache_stats
 
 
@@ -2533,12 +2533,18 @@ def papers_similar(req: SimilarRequest):
 
     # 1. External discovery: OpenAlex related_works per seed (deduped pool).
     pool: Dict[str, Dict[str, Any]] = {}
-    for s in seeds:
-        for p in OpenAlexService.related(s.get("title", ""), s.get("doi", ""), req.max_per_seed):
-            key = (p.id or p.title or "").lower().strip()
-            if key and key not in pool:
-                pool[key] = {"id": p.id, "title": p.title, "abstract": p.abstract,
-                             "url": p.url, "source": p.source}
+    try:
+        for s in seeds:
+            for p in OpenAlexService.related(s.get("title", ""), s.get("doi", ""), req.max_per_seed):
+                key = (p.id or p.title or "").lower().strip()
+                if key and key not in pool:
+                    pool[key] = {"id": p.id, "title": p.title, "abstract": p.abstract,
+                                 "url": p.url, "source": p.source}
+    except OpenAlexError as e:
+        # Every candidate comes from OpenAlex, so a refusal is the whole answer.
+        # Saying "no similar papers" here would be a lie the reviewer cannot
+        # act on; the reason names the fix.
+        return {"papers": [], "error": str(e)}
     # Allow the caller to also fold in a candidate corpus to rank (e.g. a
     # supplementary search) — dedupe against the discovered pool.
     for p in (req.corpus or []):
@@ -3609,9 +3615,7 @@ def _polite_params(extra: Optional[dict] = None) -> dict:
     email = _contact_email()
     if email:
         p["mailto"] = email
-    key = get_cred("openalex") or os.getenv("OPENALEX_API_KEY", "")
-    if key:
-        p["api_key"] = key
+    p.update(openalex_auth())
     return p
 
 # OpenAlex asks for <= 3 requests/second from anonymous callers.
