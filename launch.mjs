@@ -1059,7 +1059,15 @@ async function main() {
   // often somewhere they cannot write (/Applications, Program Files), and
   // shipping the compiled files instead would have added 373 MB to the
   // download. Written once here, reused by every later launch.
-  const pyEnv = { ...process.env, PYTHONPYCACHEPREFIX: path.join(EE_CACHE, "pycache") };
+  // EE_LAUNCHER_PID is how the backend knows we are still here. It is spawned
+  // detached so closing a terminal does not kill it, which also means it
+  // survives US dying: one was found two days after its launcher had gone,
+  // still driving the local model. It now watches this pid and exits with us.
+  const pyEnv = {
+    ...process.env,
+    PYTHONPYCACHEPREFIX: path.join(EE_CACHE, "pycache"),
+    EE_LAUNCHER_PID: String(process.pid),
+  };
 
   // 2) backend — run from an isolated venv so it always uses a working Python
   //    with correctly-built deps, regardless of what `python3` resolves to when
