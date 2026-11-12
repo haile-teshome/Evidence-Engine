@@ -132,12 +132,13 @@ Remove-Item -Recurse -Force (Join-Path $Stage "runtime\python\Lib\site-packages\
 Get-ChildItem (Join-Path $Stage "runtime\python\Lib\site-packages") -Filter "pip-*.dist-info" -ErrorAction SilentlyContinue |
   Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-# Prove the bundle can start before it is wrapped up. A missing or half-built
-# dependency is a build failure, not something for a reviewer to discover.
-Write-Host "    checking the bundle has everything the backend imports"
+# Prove the bundle has what it needs before it is wrapped up. The checker reads
+# requirements.txt and honours its markers, so a package excluded on a platform
+# on purpose counts as absent on purpose rather than failing the build.
+Write-Host "    checking the bundle has everything the backend needs"
 $env:PYTHONDONTWRITEBYTECODE = "1"   # an import writes a .pyc beside every module
-& $Bpy -c "import fastapi, uvicorn, pydantic, dotenv, requests, bs4, Bio, pypdf, pdfplumber, docling, torch, transformers, numpy, pandas, sqlalchemy, langchain, langchain_core, langchain_ollama, openai, anthropic, ollama"
-if ($LASTEXITCODE -ne 0) { throw "REFUSING TO PACKAGE: the bundled interpreter cannot import what the backend needs" }
+& $Bpy (Join-Path $PSScriptRoot "verify_bundle.py") (Join-Path $Stage "Backend\requirements.txt")
+if ($LASTEXITCODE -ne 0) { throw "REFUSING TO PACKAGE: the bundled interpreter is missing something the backend needs" }
 Remove-Item Env:\PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue
 
 # No byte-compiled files ship, and this runs after the import check because an

@@ -168,16 +168,16 @@ fi
 rm -rf "$PAYLOAD"/runtime/python/lib/python3.*/site-packages/pip \
        "$PAYLOAD"/runtime/python/lib/python3.*/site-packages/pip-*.dist-info
 
-# Prove the bundle can actually start before it is wrapped up. A missing or
-# half-installed dependency is a build failure, not something to discover on a
-# reviewer's laptop: these are the imports the backend does on the way up.
+# Prove the bundle has what it needs before it is wrapped up. A dependency that
+# did not install is a build failure here, not something a reviewer discovers on
+# their own laptop. The checker reads requirements.txt and honours its markers,
+# so a package deliberately excluded on one platform (docling on Intel macs)
+# counts as absent on purpose rather than failing the build.
 # PYTHONDONTWRITEBYTECODE, because an import writes a .pyc beside every module
 # it touches, and those are exactly what the next step is here to remove.
-echo "    checking the bundle has everything the backend imports"
-PYTHONDONTWRITEBYTECODE=1 "$BPY" -c "import fastapi, uvicorn, pydantic, dotenv, requests, bs4, Bio, pypdf, \
-           pdfplumber, docling, torch, transformers, numpy, pandas, sqlalchemy, \
-           langchain, langchain_core, langchain_ollama, openai, anthropic, ollama" \
-  || { echo "REFUSING TO PACKAGE: the bundled interpreter cannot import what the backend needs"; exit 1; }
+echo "    checking the bundle has everything the backend needs"
+PYTHONDONTWRITEBYTECODE=1 "$BPY" "$ROOT/packaging/verify_bundle.py" "$PAYLOAD/Backend/requirements.txt" \
+  || { echo "REFUSING TO PACKAGE: the bundled interpreter is missing something the backend needs"; exit 1; }
 
 # No byte-compiled files ship, and this runs LAST because anything that imports
 # a module writes one beside it. Compiling the lot added 373 MB to the download
