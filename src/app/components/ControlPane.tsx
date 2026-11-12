@@ -4,27 +4,27 @@ import { Card } from "./ui/card";
 // Shared "control pane": a Card that groups summary counts (left) with the
 // view's action buttons (right), used at the top of results views so every
 // stage looks consistent. Compose with <InlineStat> and <PaneDivider>.
-export function ControlPane({ stats, actions, className = "", singleLine = true }: {
+export function ControlPane({ stats, actions, className = "" }: {
   stats: ReactNode;
   actions: ReactNode;
   className?: string;
-  // Keep stats and actions on one row (scrolls horizontally only if the window is
-  // genuinely too narrow) instead of wrapping the actions below the stats. On by
-  // default so the top bar stays a single tidy line. Pass singleLine={false} to
-  // allow wrapping.
-  singleLine?: boolean;
 }) {
   return (
     <Card className={`p-0 overflow-hidden shadow-sm ring-1 ring-black/[0.02] ${className}`}>
-      {/* Stats left, actions right. When the row can't fit (large counts, long
-          labels, many buttons) the actions wrap to their own line and stay
-          right-aligned via ml-auto, rather than jumping under the stats. */}
-      <div className={`flex items-center gap-x-3 gap-y-3 px-4 py-3 bg-gradient-to-b from-muted/40 to-transparent ${singleLine ? "flex-nowrap" : "flex-wrap"}`}>
-        {/* Stats flex and scroll INTERNALLY (min-w-0 + overflow-x-auto) so that
-            large counts or many stats never push the action buttons off-screen;
-            the actions stay pinned right (shrink-0) and always visible. */}
-        <div className={`flex items-center gap-2.5 sm:gap-3.5 ${singleLine ? "flex-nowrap min-w-0 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" : "flex-wrap"}`}>{stats}</div>
-        <div className={`flex items-center gap-1.5 ml-auto ${singleLine ? "flex-nowrap shrink-0" : "flex-wrap justify-end"}`}>{actions}</div>
+      {/* Stats left, actions right, and nothing is ever cut in half.
+          This used to hold one line at any cost: the stats scrolled inside a
+          clipped strip with its scrollbar hidden, so a stat that did not fit
+          was sliced mid-glyph with no sign that anything was missing, and once
+          the buttons alone outgrew the row a button was sliced too.
+          Wrapping is the honest degradation. Flexbox decides line breaks from
+          each group's natural width BEFORE it shrinks anything, so the buttons
+          move down as one block the moment they stop fitting beside the stats,
+          and ml-auto keeps them right-aligned on that line. Each group wraps
+          internally as well, so a group too wide for the pane on its own goes
+          to two rows rather than over the edge. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5 px-4 py-3 bg-gradient-to-b from-muted/40 to-transparent">
+        <div className="flex flex-wrap items-center gap-2.5 sm:gap-3.5 min-w-0">{stats}</div>
+        <div className="flex flex-wrap items-center justify-end gap-1.5 ml-auto min-w-0">{actions}</div>
       </div>
     </Card>
   );

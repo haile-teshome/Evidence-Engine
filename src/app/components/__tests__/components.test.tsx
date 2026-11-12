@@ -110,6 +110,25 @@ describe("ControlPane", () => {
     // `actions` is a required prop, so the empty case is null, not omitted.
     expect(() => render(<ControlPane stats={<span>x</span>} actions={null} />)).not.toThrow();
   });
+
+  it("wraps rather than clipping when the row runs out of room", () => {
+    // jsdom has no layout, so the guard is on the rule that decides what
+    // happens when the content does not fit. The pane used to pin everything
+    // to one line and clip the overflow with the scrollbar hidden, which cut
+    // stats, and eventually buttons, in half with nothing to say so. Both
+    // groups must be free to wrap, and neither may clip.
+    const { container } = render(
+      <ControlPane stats={<span>56 included</span>} actions={<button>Fetch all</button>} />,
+    );
+    const card = container.firstElementChild as HTMLElement;
+    const row = card.firstElementChild as HTMLElement;
+    const groups = Array.from(row.children) as HTMLElement[];
+    for (const el of [row, ...groups]) {
+      expect(el.className).toContain("flex-wrap");
+      expect(el.className).not.toContain("flex-nowrap");
+      expect(el.className).not.toContain("overflow-x-auto");
+    }
+  });
 });
 
 describe("InlineStat", () => {
