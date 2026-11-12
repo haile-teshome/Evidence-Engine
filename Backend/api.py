@@ -14,9 +14,12 @@ import re
 import math
 import json as _json
 import queue
+import signal
 import threading
 from typing import Any, Dict, List, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    FIRST_COMPLETED, ThreadPoolExecutor, as_completed, wait as futures_wait,
+)
 
 from dotenv import load_dotenv
 
@@ -128,8 +131,128 @@ def _unregister_cancel(task_id: Optional[str]) -> None:
         _cancel_events.pop(task_id, None)
 
 
+# How often the backend checks that its launcher is still there. Short enough
+# that an orphan cannot cook a laptop, long enough to cost nothing.
+_LAUNCHER_POLL_SECONDS = 15
+
+
+def _pid_alive(pid: int) -> bool:
+    """Is that process still running? Never signals it, on any platform."""
+    try:
+        import psutil
+        return psutil.pid_exists(pid)
+    except Exception:
+        pass
+    if os.name == "nt":
+        return True            # no safe check without psutil: assume it is there
+    try:
+        os.kill(pid, 0)        # signal 0 asks about the process, does nothing to it
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True            # exists, owned by someone else
+    except OSError:
+        return True
+
+
+def watch_launcher() -> Optional[threading.Thread]:
+    """Shut down when the launcher that started this backend is gone.
+
+    The backend is spawned detached so it survives a terminal closing, which
+    also means it survives the launcher dying. One was found two days after its
+    launcher had exited, holding 52 connections to Ollama and still generating
+    answers: no window, no launcher, nothing left that could cancel it, and a
+    laptop running hot the whole time. An orphan now outlives its parent by one
+    poll interval instead of indefinitely.
+
+    Does nothing unless the launcher passed its pid, so a backend started by
+    hand, by a test, or by a developer is left alone.
+    """
+    raw = (os.getenv("EE_LAUNCHER_PID") or "").strip()
+    if not raw.isdigit():
+        return None
+    pid = int(raw)
+
+    def watch() -> None:
+        while True:
+            time.sleep(_LAUNCHER_POLL_SECONDS)
+            if _pid_alive(pid):
+                continue
+            print(f"[watchdog] launcher {pid} is gone; shutting down")
+            try:
+                # SIGTERM first, so uvicorn closes its sockets and finishes
+                # writing; _exit after, for the case where something in flight
+                # refuses to let go, which is the case this exists for.
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:
+                pass
+            time.sleep(10)
+            os._exit(0)
+
+    t = threading.Thread(target=watch, daemon=True, name="launcher-watchdog")
+    t.start()
+    return t
+
+
+def run_cancellable(items, work, workers: int, task_id: Optional[str]):
+    """Map `work` over `items` in a pool, stopping when the client cancels.
+
+    Returns ``(results, canceled)``, results in completion order.
+
+    The point is the SLIDING WINDOW. Every batch endpoint here used to hand the
+    whole corpus to a ThreadPoolExecutor in one go, and a pool given ten
+    thousand futures runs all ten thousand whatever the caller does next: the
+    browser's fetch is aborted, the window is closed, and the work carries on.
+    A backend found two days into a run held 52 open connections to Ollama,
+    still generating answers nobody was waiting for. Stopping early means never
+    queueing the work in the first place.
+
+    What cannot be stopped is a call already in flight, so up to `workers` of
+    them finish after a cancel. Those are bounded by Config.OLLAMA_TIMEOUT,
+    which is the other half of this fix.
+    """
+    ev = _register_cancel(task_id)
+    results, canceled = [], False
+    it = iter(items)
+    ex = ThreadPoolExecutor(max_workers=max(1, workers))
+    try:
+        pending = set()
+
+        def top_up():
+            # Twice the worker count: enough that no thread idles waiting for
+            # the next submission, few enough that a cancel discards little.
+            while len(pending) < max(1, workers) * 2:
+                try:
+                    pending.add(ex.submit(work, next(it)))
+                except StopIteration:
+                    return
+
+        top_up()
+        while pending:
+            done, pending = futures_wait(pending, return_when=FIRST_COMPLETED)
+            for fut in done:
+                try:
+                    results.append(fut.result())
+                except Exception as e:                  # one item failing is not
+                    print(f"[run_cancellable] item failed: {e}")   # the batch failing
+            if ev is not None and ev.is_set():
+                canceled = True
+                break
+            top_up()
+    finally:
+        # wait=False so the response goes out now; cancel_futures drops
+        # everything that had not started.
+        ex.shutdown(wait=False, cancel_futures=True)
+        _unregister_cancel(task_id)
+    return results, canceled
+
+
 class CancelRequest(BaseModel):
     task_id: str
+
+
+watch_launcher()
 
 
 @app.post("/api/tasks/cancel")
@@ -2310,6 +2433,9 @@ class ScreenAbstractBatchRequest(BaseModel):
     exclusion: List[str] = Field(default_factory=list)
     protocol: Optional[str] = None
     model: Optional[str] = None
+    # Sent by the client so Cancel can reach the work. Without it the batch runs
+    # to the end of the corpus whatever the reviewer does.
+    task_id: Optional[str] = None
 
 
 @app.post("/api/screen/abstract-batch")
@@ -2329,15 +2455,11 @@ def screen_abstract_batch(req: ScreenAbstractBatchRequest):
             protocol=req.protocol or "", derive_decision=not leads,
         )
 
-    results: List[Dict[str, Any]] = []
     workers = _screening_workers(pico_model, len(req.papers))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for fut in as_completed([ex.submit(_one, p) for p in req.papers]):
-            try:
-                results.append(fut.result())
-            except Exception as e:
-                print(f"[screen_abstract_batch] worker error: {e}")
-    return {"results": results}
+    results, canceled = run_cancellable(req.papers, _one, workers, req.task_id)
+    # Partial results are kept: a reviewer who stops a run halfway has screened
+    # whatever landed, and throwing it away would make Cancel cost them work.
+    return {"results": results, "canceled": canceled}
 
 
 def _auto_relevance_cutoff(scores: List[float]) -> Tuple[float, str]:
@@ -2412,6 +2534,10 @@ class RerankRequest(BaseModel):
     inclusion: List[str] = Field(default_factory=list)
     exclusion: List[str] = Field(default_factory=list)
     model: Optional[str] = None
+    # Sent by the client so Cancel can reach the work. Ranking a snowball haul
+    # is thousands of model calls; without this, stopping it stops only the
+    # progress bar.
+    task_id: Optional[str] = None
     # Auto-cutoff mode (default). The endpoint picks the cutoff itself based on
     # the score distribution — gap detection within the top half, hard floor at
     # 0.0, no max cap. Threshold / quantile_keep are honoured only when auto is
@@ -2498,16 +2624,14 @@ def papers_rerank(req: RerankRequest):
     model_name = resolve_model_name(req.model) or LEADS_MODEL_NAME
     _score_one = _rerank_score_one_factory(req, pico, model_name)
 
-    scored: List[Dict[str, Any]] = []
     workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, len(req.papers) or 1))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for fut in as_completed([ex.submit(_score_one, p) for p in req.papers]):
-            try:
-                scored.append(fut.result())
-            except Exception as e:
-                print(f"[papers_rerank] worker error: {e}")
+    scored, canceled = run_cancellable(req.papers, _score_one, workers, req.task_id)
 
-    return _rerank_finalize(req, scored, model_name)
+    # What was scored before the stop is still ranked and returned, so a reviewer
+    # who changes their mind halfway keeps the work rather than losing it.
+    out = _rerank_finalize(req, scored, model_name)
+    out["canceled"] = canceled
+    return out
 
 
 class SimilarRequest(BaseModel):
@@ -2591,19 +2715,26 @@ def papers_rerank_stream(req: RerankRequest):
     event_queue: "queue.Queue" = queue.Queue()
 
     def _run():
-        scored: List[Dict[str, Any]] = []
         try:
             workers = max(1, min(Config.PARALLEL_SCREENING_WORKERS, total or 1))
-            with ThreadPoolExecutor(max_workers=workers) as ex:
-                done_n = 0
-                for fut in as_completed([ex.submit(_score_one, p) for p in req.papers]):
-                    try:
-                        scored.append(fut.result())
-                    except Exception as e:
-                        print(f"[papers_rerank_stream] worker error: {e}")
-                    done_n += 1
-                    event_queue.put(("progress", {"done": done_n, "total": total}))
-            event_queue.put(("done", _rerank_finalize(req, scored, model_name)))
+            done_n = 0
+
+            def scored_one(paper):
+                nonlocal done_n
+                out = _score_one(paper)
+                done_n += 1
+                event_queue.put(("progress", {"done": done_n, "total": total}))
+                return out
+
+            # This thread outlives the HTTP response: it used to drain the whole
+            # corpus into a queue nobody was reading once the client had gone.
+            scored, canceled = run_cancellable(req.papers, scored_one, workers, req.task_id)
+            # Still a `done` event, carrying whatever was scored: the client's
+            # stream reader knows two terminal events and adding a third would
+            # leave an older build waiting for one that never comes.
+            payload = _rerank_finalize(req, scored, model_name)
+            payload["canceled"] = canceled
+            event_queue.put(("done", payload))
         except Exception as e:
             event_queue.put(("error", {"message": str(e)}))
 
@@ -7155,6 +7286,7 @@ class MetaExtractRequest(BaseModel):
     outcome: str = ""                            # plain-English target outcome
     measure: str = ""                            # preferred effect measure hint
     model: Optional[str] = None                  # LLM for extraction
+    task_id: Optional[str] = None                # so Cancel can reach the work
     # Per-paper full text (paper_id → text), opt-in. If absent, abstract only.
     full_texts: Dict[str, str] = Field(default_factory=dict)
     # Per-paper tables (paper_id → tables) the client already extracted. Effect
@@ -7183,15 +7315,10 @@ def meta_extract(req: MetaExtractRequest):
         )
         return _ma_asdict(se)
 
-    out: List[Dict[str, Any]] = []
     workers = max(1, min(Config.PARALLEL_AGENT_WORKERS, len(req.papers) or 1))
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for fut in as_completed([ex.submit(_one, p) for p in req.papers]):
-            try:
-                out.append(fut.result())
-            except Exception as e:
-                print(f"[meta_extract] worker error: {e}")
-    return {"extractions": out, "model_used": model_name, "outcome": req.outcome}
+    out, canceled = run_cancellable(req.papers, _one, workers, req.task_id)
+    return {"extractions": out, "model_used": model_name, "outcome": req.outcome,
+            "canceled": canceled}
 
 
 class MetaAskRequest(BaseModel):

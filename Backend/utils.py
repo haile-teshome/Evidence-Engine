@@ -130,9 +130,13 @@ class AIService:
             # num_ctx MUST be set explicitly: Ollama otherwise falls back to the model
             # default (2048 on most), which silently truncates long screening and
             # extraction prompts instead of erroring.
+            # client_kwargs carries the timeout down to the HTTP client. A call
+            # with no ceiling blocks its worker thread forever when a generation
+            # wedges, which is how a cancelled run kept Ollama busy for days.
             return ChatOllama(model=model_name, temperature=0, base_url=ollama_base,
                               seed=_seed, num_predict=4096,
-                              num_ctx=num_ctx or Config.OLLAMA_NUM_CTX)
+                              num_ctx=num_ctx or Config.OLLAMA_NUM_CTX,
+                              client_kwargs={"timeout": Config.OLLAMA_TIMEOUT})
         except Exception as e:
             print(f"[get_model] AI connection error for {model_name}: {e}")
             return None

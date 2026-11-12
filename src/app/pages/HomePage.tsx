@@ -1555,7 +1555,9 @@ export function HomePage() {
 
     const submittedAt = Date.now();   // stamp the eventual history entry with submit time so it interleaves with chat turns in order
     const stageList: Stage[] = INITIAL_STAGES.map(st => ({ ...st, status: "pending" as const }));
-    const { abort } = s.startTask("home-analysis", stageList);
+    // taskId travels with the ranking call, which scores every fetched paper
+    // server-side and cannot otherwise be stopped.
+    const { abort, taskId } = s.startTask("home-analysis", stageList);
     const signal = abort.signal;
 
     try {
@@ -1691,12 +1693,14 @@ export function HomePage() {
               sig,
               undefined,   // quantileKeep
               (done, total) => markStage("rerank", { status: "running", detail: `Scoring article ${done} of ${total}` }),
+              "home", taskId,
             );
           } catch (e: any) {
             if (sig.aborted || e?.name === "AbortError") throw e;   // genuine cancel
             // Stream unavailable (old backend / buffering proxy) → blocking call.
             return await DataAggregator.rerankByRelevance(
               papers, newPico, analysis.inclusion, analysis.exclusion, -1.0, undefined, sig,
+              undefined, "home", taskId,
             );
           }
         });

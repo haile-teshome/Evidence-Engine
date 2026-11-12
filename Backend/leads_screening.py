@@ -220,6 +220,7 @@ def screen_paper_leads(paper: Any, pico: Any) -> dict[str, Any]:
     # callers that just need the model-detection helpers.
     from langchain_core.messages import HumanMessage
     from langchain_ollama import ChatOllama
+    from config import Config
 
     criteria_labels = [
         f"{display}: {getattr(pico, attr, '') or 'any'}"
@@ -238,6 +239,9 @@ def screen_paper_leads(paper: Any, pico: Any) -> dict[str, Any]:
         model=LEADS_MODEL_NAME,
         temperature=0,
         base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        # Same ceiling as every other model call: a screening verdict that never
+        # arrives must not hold its thread for the life of the process.
+        client_kwargs={"timeout": Config.OLLAMA_TIMEOUT},
     )
 
     raw_text = ""

@@ -551,9 +551,13 @@ export const AIService = {
     }, signal);
   },
 
-  async screenPaperMultiAgentBatch(papers: Paper[], pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = ""): Promise<ScreenResult[]> {
+  // `taskId` is what lets Cancel reach the work. Aborting the fetch only ends
+  // the waiting: the batch runs server-side, and without the id it screens the
+  // whole corpus however long after the reviewer stopped it.
+  async screenPaperMultiAgentBatch(papers: Paper[], pico: Pico, inclusion: string[] = [], exclusion: string[] = [], signal?: AbortSignal, protocol = "", taskId?: string): Promise<ScreenResult[]> {
     const r = await postJSON<{ results: ScreenResult[] }>("/screen/abstract-batch", {
       papers, pico, inclusion, exclusion, protocol, model: modelFor("abstract-screening"),
+      task_id: taskId,
     }, signal);
     return r.results || [];
   },
@@ -1058,6 +1062,8 @@ export const DataAggregator = {
     quantileKeep?: number,
     /** Home ranks search results; Snowball ranks cited work. */
     stage: ModelStage = "home",
+    /** Lets Cancel stop the scoring, which otherwise runs to the last paper. */
+    taskId?: string,
   ): Promise<RerankResult> {
     return postJSON<RerankResult>(
       "/papers/rerank",
@@ -1067,6 +1073,7 @@ export const DataAggregator = {
         quantile_keep: quantileKeep,
         top_k: topK,
         model: modelFor(stage),
+        task_id: taskId,
       },
       signal,
     );
@@ -1088,6 +1095,8 @@ export const DataAggregator = {
     onProgress?: (done: number, total: number) => void,
     /** Home ranks search results; Snowball ranks cited work. */
     stage: ModelStage = "home",
+    /** Lets Cancel stop the scoring thread, which outlives this response. */
+    taskId?: string,
   ): Promise<RerankResult> {
     const res = await fetch(`${apiConfig.baseUrl}/papers/rerank/stream`, {
       method: "POST",
@@ -1098,6 +1107,7 @@ export const DataAggregator = {
         quantile_keep: quantileKeep,
         top_k: topK,
         model: modelFor(stage),
+        task_id: taskId,
       }),
       signal,
     });
@@ -1377,10 +1387,13 @@ export const MetaAnalysisService = {
      *  column structure, so sending these beats making the model re-read it. */
     tables: Record<string, ExtractedTable[]> = {},
     signal?: AbortSignal,
+    /** Lets Cancel stop the extraction, which runs server-side per paper. */
+    taskId?: string,
   ): Promise<{ extractions: StudyEffect[]; model_used: string; outcome: string }> {
     return postJSON<{ extractions: StudyEffect[]; model_used: string; outcome: string }>(
       "/meta/extract",
-      { papers, outcome, measure, full_texts: fullTexts, tables, model: modelFor("meta-analysis") },
+      { papers, outcome, measure, full_texts: fullTexts, tables,
+        model: modelFor("meta-analysis"), task_id: taskId },
       signal,
     );
   },

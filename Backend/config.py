@@ -61,6 +61,12 @@ class Config:
     # of the abstract. The screening prompt (criteria + protocol + a 6000-char
     # abstract) routinely overflows 2048, so set this explicitly.
     OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "8192"))
+    # Ceiling on a single model call, in seconds. Without one a generation that
+    # never finishes holds its thread for as long as the process lives: a
+    # two-day-old backend was found with 52 open connections to Ollama, still
+    # generating answers for requests whose caller had gone. Generous enough for
+    # a long extraction, finite enough that a wedged call cannot outlive the run.
+    OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "600"))
 
     # Data extraction reads a whole paper rather than an abstract, and the answer
     # (one quoted snippet per field) is long too. num_ctx is the budget for BOTH,

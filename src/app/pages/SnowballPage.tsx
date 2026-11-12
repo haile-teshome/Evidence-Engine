@@ -163,7 +163,9 @@ export function SnowballPage() {
   }
 
   async function start() {
-    const { abort } = s.startTask("snowball", [{ id: "snow", label: "Fetching citations", status: "running" }]);
+    // taskId travels with the ranking call: Cancel aborts the fetch here, but
+    // the scoring runs server-side and only this id can reach it.
+    const { abort, taskId } = s.startTask("snowball", [{ id: "snow", label: "Fetching citations", status: "running" }]);
     s.updateTask("snowball", { progress: { done: 0, total: seeds.length } });
     // Record the seed set this fetch runs over, so a later change to the included
     // set (e.g. re-running full-text) can flag the cached results as stale.
@@ -234,7 +236,7 @@ export function SnowballPage() {
               // how long is left instead of a bar that stopped moving.
               res = await DataAggregator.rerankByRelevanceStream(
                 rows, s.pico, s.inclusion, s.exclusion, -1, undefined, signal, undefined,
-                report, "citation-snowball",
+                report, "citation-snowball", taskId,
               );
             } catch (e: any) {
               if (signal.aborted || e?.name === "AbortError") throw e;   // a genuine cancel
@@ -243,7 +245,8 @@ export function SnowballPage() {
               // than freezing at zero.
               s.updateTask("snowball", { progress: { done: 0, total: 0 } });
               res = await DataAggregator.rerankByRelevance(
-                rows, s.pico, s.inclusion, s.exclusion, -1, undefined, signal, undefined, "citation-snowball",
+                rows, s.pico, s.inclusion, s.exclusion, -1, undefined, signal, undefined,
+                "citation-snowball", taskId,
               );
             }
             scores = new Map(res.ranked.map(r => [(r.paper.title || "").toLowerCase(), r.leads_score]));
